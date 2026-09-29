@@ -27,3 +27,5 @@ services:
         sync: false
       - key: INITIAL_ADMIN_PASSWORD
         sync: false
+      - key: DISCORD_CLIENT_ID
+        sync: false
