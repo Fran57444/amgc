@@ -1662,21 +1662,15 @@ export function initMusicPlayer() {
                 && String(playbackActivityUserId || '') === String(currentUser?._id || '')
                 ? playlist[currentTrackIndex]
                 : null;
-            const friendTrack = user?.lastPlayed;
-            const displayTrack = isOwnProfile
-                ? track
-                : hasPlaybackEvidence(friendTrack) ? friendTrack : null;
+            const recentTrack = hasPlaybackEvidence(user?.lastPlayed) ? user.lastPlayed : null;
+            const displayTrack = isOwnProfile ? (track || recentTrack) : recentTrack;
             const isListening = isOwnProfile
                 ? Boolean(track && !audio.paused)
-                : Boolean(user?.isOnline && displayTrack && friendTrack?.isPlaying !== false);
+                : Boolean(user?.isOnline && displayTrack && displayTrack.isPlaying !== false);
             const isOnline = Boolean(user) && (isListening || user.isOnline !== false);
             const isOfflineProfile = isOwnProfile && offlineOnly;
-            const currentCover = isOwnProfile
-                ? (track ? getSongCover(track) : '/img/vinculo.png')
-                : (displayTrack?.cover || '/img/vinculo.png');
-            const activityColor = isOwnProfile
-                ? (track?.color || '#ff8a00')
-                : (displayTrack?.color || '#ff8a00');
+            const currentCover = track ? getSongCover(track) : (displayTrack?.cover || '/img/vinculo.png');
+            const activityColor = displayTrack?.color || '#ff8a00';
             const lastPlayedAt = displayTrack?.updatedAt || user?.lastActive;
             const lastPlayedLabel = lastPlayedAt ? ` · ${timeAgo(lastPlayedAt)}` : '';
             const listeningLabel = isListening
@@ -1697,10 +1691,10 @@ export function initMusicPlayer() {
                 ? (Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0)
                 : (Number(displayTrack?.duration) || 0);
             const progress = total > 0 ? Math.min(100, (elapsed / total) * 100) : 0;
-            const localTrackIndex = !isOwnProfile && displayTrack?.songId
+            const localTrackIndex = isFriendProfile && displayTrack?.songId
                 ? playlist.findIndex(item => String(item._id) === String(displayTrack.songId))
                 : currentTrackIndex;
-            const canJoin = Boolean(displayTrack && localTrackIndex >= 0);
+            const canJoin = Boolean(isFriendProfile && displayTrack && localTrackIndex >= 0);
 
             if (profileStatus) {
                 profileStatus.innerHTML = `
@@ -3238,6 +3232,8 @@ export function initMusicPlayer() {
                     permissions: result.permissions || [],
                     settings: result.settings || { seekSeconds: 5, maxVolume: 200 },
                     savedPlaylists: Array.isArray(result.savedPlaylists) ? result.savedPlaylists : [],
+                    lastPlayed: result.lastPlayed || null,
+                    lastPlayedHistory: Array.isArray(result.lastPlayedHistory) ? result.lastPlayedHistory : [],
                     profilePhoto: result.profilePhoto || ''
                 };
 

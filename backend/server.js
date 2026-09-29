@@ -764,6 +764,8 @@ app.post('/api/auth/login', async (req, res) => {
       permissions: user.permissions,
       settings: user.settings,
       savedPlaylists: user.savedPlaylists || [],
+      lastPlayed: user.lastPlayed,
+      lastPlayedHistory: user.lastPlayedHistory || [],
       profilePhoto: user.profilePhoto && user.profilePhoto.includes('drive.google.com')
         ? `${req.protocol}://${req.get('host')}/api/media/${extractDriveId(user.profilePhoto)}`
         : user.profilePhoto || ''

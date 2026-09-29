@@ -278,7 +278,7 @@ function App() {
 
             <div className="settings-section">
               <h3>Descargar de YouTube</h3>
-              <p>Ingresa un enlace de YouTube limpio, sin &list= ni &start_radio=. En Electron, el MP3 se guarda en la carpeta local de MMAMGC; en la web, se guarda en el servidor.</p>
+              <p>Ingresa un enlace de YouTube limpio, sin &list= ni &start_radio=. La descarga se guarda localmente en MP3</p>
               <div className="field-row" style={{ maxWidth: '400px' }}>
                 <input 
                   type="text" 
