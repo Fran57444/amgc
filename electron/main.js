@@ -124,6 +124,7 @@ async function getDiscordExternalAssetKey(imageUrl) {
             throw new Error('Discord no devolvió una ruta para la portada externa.');
         }
         const assetKey = assetPath.startsWith('mp:') ? assetPath : `mp:${assetPath}`;
+        logDiscordRpc(`Asset externo registrado (ruta ${assetKey.startsWith('mp:external/') ? 'mp:external' : 'formato alternativo'}, ${assetKey.length} caracteres).`);
         discordExternalAssetCache.set(imageUrl, assetKey);
         if (discordExternalAssetCache.size > 200) {
             discordExternalAssetCache.delete(discordExternalAssetCache.keys().next().value);
@@ -281,6 +282,7 @@ async function publishDiscordPresence() {
             type: 2,
             details: songName,
             state: artist,
+            status_display_type: 2,
             instance: false
         };
         if (coverUrl) {
@@ -290,7 +292,7 @@ async function publishDiscordPresence() {
                     activity.assets = {
                         large_image: largeImageKey
                     };
-                    logDiscordArtworkStatus('attached', 'Discord acepto y adjunto el asset de portada.');
+                    logDiscordArtworkStatus('attached', 'Portada externa añadida al payload RPC.');
                 } else if (!getDiscordClientSecret()) {
                     logDiscordArtworkStatus('missing-secret', 'No hay DISCORD_CLIENT_SECRET; la presencia se publica sin portada.');
                 }
@@ -327,6 +329,18 @@ function connectDiscordRpc() {
     const client = new DiscordRPC.Client({ transport: 'ipc' });
     discordRpcClient = client;
     discordRpcReady = false;
+    client.transport.on('message', message => {
+        if (message.evt === 'ERROR') {
+            logDiscordRpc(`Discord rechazó el estado RPC: ${message.data?.message || 'error sin detalle'}.`);
+            return;
+        }
+        if (message.evt !== 'ACTIVITY_UPDATE') return;
+        const activity = message.data?.activity || message.data?.data?.activity || message.data;
+        const storedImage = activity?.assets?.large_image;
+        if (typeof storedImage === 'string') {
+            logDiscordRpc(`Discord devolvió actividad con imagen (${storedImage.startsWith('mp:external/') ? 'mp:external' : 'otro formato'}).`);
+        }
+    });
 
     client.on('ready', () => {
         if (discordRpcClient !== client) return;
