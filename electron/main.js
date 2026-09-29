@@ -26,6 +26,7 @@ let discordRpcLastActivityAt = null;
 let discordRpcAccessToken = null;
 let discordRpcAccessTokenExpiresAt = 0;
 let discordMissingClientSecretLogged = false;
+let discordLastArtworkStatus = null;
 const discordExternalAssetCache = new Map();
 const discordExternalAssetRequests = new Map();
 
@@ -35,6 +36,12 @@ function logDiscordRpc(message) {
     appendFile(path.join(app.getPath('userData'), 'discord-rpc.log'), line, error => {
         if (error) console.error('[Discord RPC] No se pudo escribir el registro local.', error);
     });
+}
+
+function logDiscordArtworkStatus(status, message) {
+    if (discordLastArtworkStatus === status) return;
+    discordLastArtworkStatus = status;
+    logDiscordRpc(message);
 }
 
 function readApplicationConfiguration() {
@@ -267,6 +274,9 @@ async function publishDiscordPresence() {
             return true;
         }
 
+        if (!coverUrl) {
+            logDiscordArtworkStatus('no-cover-url', 'La interfaz no envio una URL HTTPS de portada.');
+        }
         const activity = {
             type: 2,
             details: songName,
@@ -278,12 +288,15 @@ async function publishDiscordPresence() {
                 const largeImageKey = await getDiscordExternalAssetKey(coverUrl);
                 if (largeImageKey) {
                     activity.assets = {
-                        large_image: largeImageKey,
-                        large_text: songName
+                        large_image: largeImageKey
                     };
+                    logDiscordArtworkStatus('attached', 'Discord acepto y adjunto el asset de portada.');
+                } else if (!getDiscordClientSecret()) {
+                    logDiscordArtworkStatus('missing-secret', 'No hay DISCORD_CLIENT_SECRET; la presencia se publica sin portada.');
                 }
             } catch (error) {
-                logDiscordRpc(`No se pudo preparar la portada externa: ${error.message || error}`);
+                const message = error.message || String(error);
+                logDiscordArtworkStatus(`error:${message}`, `No se pudo preparar la portada externa: ${message}`);
             }
         }
         if (pendingDiscordPresence !== presence) return false;
