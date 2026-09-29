@@ -4521,34 +4521,63 @@ export function initMusicPlayer() {
     const audio = new Audio();
     audio.crossOrigin = "anonymous";
     audio.volume = currentVolume;
+    const discordArtworkCache = new Map();
+    const discordArtworkRequests = new Map();
+    const resolveDiscordArtworkKey = async track => {
+        if (offlineOnly || !navigator.onLine || !accessToken || !track?._id || !track.cover
+            || track.cover === '/img/vinculo.png') return null;
+        const cacheKey = `${track._id}:${track.cover}`;
+        const cachedImageKey = discordArtworkCache.get(cacheKey);
+        if (cachedImageKey) return cachedImageKey;
+        const pendingRequest = discordArtworkRequests.get(cacheKey);
+        if (pendingRequest) return pendingRequest;
+
+        const request = fetchJsonWithRetry(`${API_URL}/discord/external-assets`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ songId: track._id })
+        }, 1).then(result => {
+            if (typeof result.largeImageKey !== 'string' || !result.largeImageKey.startsWith('mp:')) {
+                throw new Error('El servidor no devolvió una clave válida para la portada de Discord.');
+            }
+            discordArtworkCache.set(cacheKey, result.largeImageKey);
+            if (discordArtworkCache.size > 200) {
+                discordArtworkCache.delete(discordArtworkCache.keys().next().value);
+            }
+            return result.largeImageKey;
+        }).finally(() => {
+            discordArtworkRequests.delete(cacheKey);
+        });
+        discordArtworkRequests.set(cacheKey, request);
+        return request;
+    };
     const updateDiscordPresence = () => {
         if (!desktopSetDiscordPresence) return;
         const track = playlist[currentTrackIndex];
         if (!track) return;
-        const cover = track.cover && track.cover !== '/img/vinculo.png'
-            ? track.cover
-            : getSongCover(track);
-        let coverUrl = '';
-        if (cover && !cover.startsWith('blob:') && !cover.startsWith('data:')) {
-            try {
-                const resolvedCoverUrl = new URL(cover, window.location.href);
-                if (resolvedCoverUrl.protocol === 'https:') coverUrl = resolvedCoverUrl.href;
-            } catch (error) {
-                console.warn('No se pudo resolver la portada para Discord.', error);
+        const publishPresence = async () => {
+            let largeImageKey = null;
+            if (!audio.paused && !audio.ended) {
+                try {
+                    largeImageKey = await resolveDiscordArtworkKey(track);
+                } catch (error) {
+                    console.warn('No se pudo preparar la portada para Discord.', error);
+                }
             }
-        }
-        Promise.resolve(desktopSetDiscordPresence({
-            songName: track.name || 'Canción desconocida',
-            artist: track.artist || 'Artista desconocido',
-            currentTime: Number.isFinite(audio.currentTime) ? audio.currentTime : 0,
-            duration: Number.isFinite(audio.duration) ? audio.duration : Number(track.duration) || 0,
-            isPlaying: !audio.paused && !audio.ended,
-            coverUrl
-        })).then(status => {
+            if (playlist[currentTrackIndex] !== track) return;
+            const status = await desktopSetDiscordPresence({
+                songName: track.name || 'Canción desconocida',
+                artist: track.artist || 'Artista desconocido',
+                currentTime: Number.isFinite(audio.currentTime) ? audio.currentTime : 0,
+                duration: Number.isFinite(audio.duration) ? audio.duration : Number(track.duration) || 0,
+                isPlaying: !audio.paused && !audio.ended,
+                largeImageKey
+            });
             if (status && (!status.configured || !status.connected || !status.published)) {
                 console.warn('Discord Rich Presence no está activa:', status);
             }
-        }).catch(error => console.warn('No se pudo actualizar Discord Rich Presence.', error));
+        };
+        void publishPresence().catch(error => console.warn('No se pudo actualizar Discord Rich Presence.', error));
     };
     if (editLyricsPreview) {
         editLyricsPreview.addEventListener('click', event => {

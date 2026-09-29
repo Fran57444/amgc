@@ -28,4 +28,8 @@ services:
       - key: INITIAL_ADMIN_PASSWORD
         sync: false
       - key: DISCORD_CLIENT_ID
-        sync: false"
+        sync: false
+      - key: DISCORD_CLIENT_SECRET
+        sync: false
+      - key: PUBLIC_APP_URL
+        value: https://mmamgc.onrender.com

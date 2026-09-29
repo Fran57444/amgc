@@ -416,6 +416,83 @@ const drive = google.drive({ version: 'v3', auth: oauthClient });
 const upload = multer({ storage: multer.memoryStorage() });
 let cachedDriveAccessToken = null;
 let cachedDriveTokenExpiresAt = 0;
+let discordAccessToken = null;
+let discordAccessTokenExpiresAt = 0;
+const discordExternalAssetCache = new Map();
+const discordExternalAssetRequests = new Map();
+
+async function getDiscordAppAccessToken() {
+  if (discordAccessToken && Date.now() < discordAccessTokenExpiresAt) return discordAccessToken;
+  const clientId = process.env.DISCORD_CLIENT_ID;
+  const clientSecret = process.env.DISCORD_CLIENT_SECRET;
+  if (!clientId || !clientSecret) {
+    throw new Error('Discord external assets requieren DISCORD_CLIENT_ID y DISCORD_CLIENT_SECRET en el servidor.');
+  }
+
+  const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+  const response = await fetch('https://discord.com/api/oauth2/token', {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${credentials}`,
+      'Content-Type': 'application/x-www-form-urlencoded'
+    },
+    body: new URLSearchParams({
+      grant_type: 'client_credentials',
+      scope: 'applications.commands.update'
+    })
+  });
+  if (!response.ok) throw new Error(`Discord OAuth respondió ${response.status} al solicitar el token de assets.`);
+  const result = await response.json();
+  if (typeof result.access_token !== 'string' || !Number.isFinite(result.expires_in)) {
+    throw new Error('Discord devolvió un token OAuth incompleto.');
+  }
+  discordAccessToken = result.access_token;
+  discordAccessTokenExpiresAt = Date.now() + Math.max(0, result.expires_in - 60) * 1000;
+  return discordAccessToken;
+}
+
+async function getDiscordExternalAssetKey(imageUrl) {
+  const cachedKey = discordExternalAssetCache.get(imageUrl);
+  if (cachedKey) return cachedKey;
+  const pendingRequest = discordExternalAssetRequests.get(imageUrl);
+  if (pendingRequest) return pendingRequest;
+
+  const request = (async () => {
+    const clientId = process.env.DISCORD_CLIENT_ID;
+    if (!clientId || !process.env.DISCORD_CLIENT_SECRET) {
+      throw new Error('Discord external assets no están configurados en el servidor.');
+    }
+
+    const accessToken = await getDiscordAppAccessToken();
+    const response = await fetch(`https://discord.com/api/v10/applications/${clientId}/external-assets`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ urls: [imageUrl] })
+    });
+    if (!response.ok) throw new Error(`Discord external-assets respondió ${response.status}.`);
+    const result = await response.json();
+    const assetPath = result?.[0]?.external_asset_path;
+    if (typeof assetPath !== 'string' || !assetPath) {
+      throw new Error('Discord no devolvió una ruta para la portada externa.');
+    }
+
+    const assetKey = assetPath.startsWith('mp:') ? assetPath : `mp:${assetPath}`;
+    discordExternalAssetCache.set(imageUrl, assetKey);
+    if (discordExternalAssetCache.size > 200) {
+      discordExternalAssetCache.delete(discordExternalAssetCache.keys().next().value);
+    }
+    return assetKey;
+  })();
+  discordExternalAssetRequests.set(imageUrl, request);
+  try {
+    return await request;
+  } finally {
+    discordExternalAssetRequests.delete(imageUrl);
+  }
+}
 
 function escapeDriveQueryValue(value = '') {
   return String(value)
@@ -1276,6 +1353,45 @@ app.get('/api/songs', async (req, res) => {
     res.json({ songs: songsWithProxy });
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/discord/external-assets', async (req, res) => {
+  if (!process.env.DISCORD_CLIENT_ID || !process.env.DISCORD_CLIENT_SECRET) {
+    return res.status(503).json({ error: 'Discord no tiene configuradas las credenciales de assets en el servidor.' });
+  }
+  if (!isValidObjectId(req.body?.songId)) {
+    return res.status(400).json({ error: 'La canción para registrar la portada no es válida.' });
+  }
+
+  try {
+    const song = await Song.findById(req.body.songId).select('cover').lean();
+    if (!song?.cover || song.cover === '/img/vinculo.png') {
+      return res.status(404).json({ error: 'La canción no tiene una portada disponible.' });
+    }
+
+    const publicAppUrl = new URL(process.env.PUBLIC_APP_URL || 'https://mmamgc.onrender.com/');
+    if (publicAppUrl.protocol !== 'https:' || publicAppUrl.username || publicAppUrl.password) {
+      return res.status(503).json({ error: 'PUBLIC_APP_URL debe ser una URL HTTPS pública.' });
+    }
+    const isDriveCover = song.cover.includes('drive.google.com');
+    const driveFileId = isDriveCover ? extractDriveId(song.cover) : null;
+    if (isDriveCover && !/^[\w-]{25,}$/.test(driveFileId || '')) {
+      return res.status(400).json({ error: 'La URL de portada de Google Drive no es válida.' });
+    }
+    const imageUrl = isDriveCover
+      ? new URL(`/api/media/${driveFileId}`, publicAppUrl)
+      : new URL(song.cover, publicAppUrl);
+    if (imageUrl.protocol !== 'https:' || imageUrl.username || imageUrl.password
+      || imageUrl.origin !== publicAppUrl.origin) {
+      return res.status(400).json({ error: 'La portada debe estar alojada en el servidor HTTPS de la aplicación.' });
+    }
+
+    const largeImageKey = await getDiscordExternalAssetKey(imageUrl.href);
+    return res.json({ largeImageKey });
+  } catch (error) {
+    console.error('No se pudo registrar la portada de la canción en Discord:', error);
+    return res.status(502).json({ error: 'Discord no pudo registrar la portada de esta canción.' });
   }
 });
 
