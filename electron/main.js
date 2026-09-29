@@ -1,7 +1,9 @@
 import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import dotenv from 'dotenv';
 
 const productionUrl = 'https://mmamgc.onrender.com/';
 const developmentUrl = 'http://127.0.0.1:5163/';
@@ -12,10 +14,31 @@ const desktopDownloadKey = randomBytes(32).toString('hex');
 let downloaderProcess = null;
 let downloaderReadyPromise = null;
 
+function getYoutubeCookiesFile() {
+    const configurationDirectory = app.isPackaged ? app.getPath('userData') : app.getAppPath();
+    const configurationPath = path.join(configurationDirectory, '.env');
+    let configuration = {};
+
+    try {
+        configuration = dotenv.parse(readFileSync(configurationPath));
+    } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+    }
+
+    const cookiesFile = process.env.YOUTUBE_COOKIES_FILE || configuration.YOUTUBE_COOKIES_FILE;
+    if (!cookiesFile) return null;
+    return path.isAbsolute(cookiesFile)
+        ? cookiesFile
+        : path.resolve(configurationDirectory, cookiesFile);
+}
+
 function startLocalDownloader() {
     if (downloaderReadyPromise) return downloaderReadyPromise;
 
-    const serverPath = path.join(app.getAppPath(), 'backend', 'server.js');
+    const applicationPath = app.getAppPath();
+    const serverPath = app.isPackaged
+        ? path.join(path.dirname(applicationPath), 'app.asar.unpacked', 'backend', 'server.js')
+        : path.join(applicationPath, 'backend', 'server.js');
     const inheritedEnvironment = {};
     for (const key of [
         'PATH',
@@ -30,6 +53,7 @@ function startLocalDownloader() {
     ]) {
         if (process.env[key]) inheritedEnvironment[key] = process.env[key];
     }
+    const youtubeCookiesFile = getYoutubeCookiesFile();
     downloaderProcess = spawn(process.execPath, [serverPath], {
         cwd: app.getPath('userData'),
         env: {
@@ -38,7 +62,8 @@ function startLocalDownloader() {
             MMAMGC_DESKTOP_DOWNLOADER: 'true',
             MMAMGC_DESKTOP_DOWNLOAD_KEY: desktopDownloadKey,
             NODE_ENV: 'development',
-            PORT: '0'
+            PORT: '0',
+            ...(youtubeCookiesFile ? { YOUTUBE_COOKIES_FILE: youtubeCookiesFile } : {})
         },
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true

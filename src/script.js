@@ -2172,6 +2172,7 @@ export function initMusicPlayer() {
                     ...friend,
                     ...(hasFreshRealtimeUpdate && {
                         ...(typeof realtimeUpdate.isOnline === 'boolean' && { isOnline: realtimeUpdate.isOnline }),
+                        ...(realtimeUpdate.updatedAt && { lastActive: realtimeUpdate.updatedAt }),
                         ...(realtimeUpdate.lastPlayed && {
                             lastPlayed: getNewestPlayback(friend.lastPlayed, realtimeUpdate.lastPlayed)
                         })
@@ -2180,7 +2181,10 @@ export function initMusicPlayer() {
                         ...(hasRealtimePlayback && {
                             lastPlayed: getNewestPlayback(friend.lastPlayed, previousFriend.lastPlayed)
                         }),
-                        ...(presenceChangedAfterRequest && { isOnline: previousFriend.isOnline })
+                        ...(presenceChangedAfterRequest && {
+                            isOnline: previousFriend.isOnline,
+                            ...(previousFriend.lastActive && { lastActive: previousFriend.lastActive })
+                        })
                     })
                 };
             });
@@ -2623,6 +2627,7 @@ export function initMusicPlayer() {
             if (!friend) return;
             friendPresenceUpdatedAt.set(String(userId), Date.now());
             friend.isOnline = Boolean(isOnline);
+            if (updatedAt) friend.lastActive = updatedAt;
             if (lastPlayed) friend.lastPlayed = getNewestPlayback(lastPlayed, friend.lastPlayed);
             scheduleFriendsOfflineSave();
             renderFriendsSidebar();
@@ -2631,7 +2636,12 @@ export function initMusicPlayer() {
                 chatTitleStatus.classList.toggle('online', friend.isOnline);
             }
             if (selectedProfileUser && String(selectedProfileUser._id) === String(userId)) {
-                selectedProfileUser = { ...selectedProfileUser, isOnline: friend.isOnline, lastPlayed: friend.lastPlayed };
+                selectedProfileUser = {
+                    ...selectedProfileUser,
+                    isOnline: friend.isOnline,
+                    lastActive: friend.lastActive,
+                    lastPlayed: friend.lastPlayed
+                };
                 renderProfile();
             }
         });

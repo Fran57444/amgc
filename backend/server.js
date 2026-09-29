@@ -2,7 +2,6 @@ import dns from 'node:dns';
 dns.setServers(['8.8.8.8', '8.8.4.4']);
 
 import dotenv from 'dotenv';
-dotenv.config();
 import express from 'express';
 import mongoose from 'mongoose';
 import cors from 'cors';
@@ -23,8 +22,10 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 
-const app = express();
 const desktopDownloaderOnly = process.env.MMAMGC_DESKTOP_DOWNLOADER === 'true';
+if (!desktopDownloaderOnly) dotenv.config();
+
+const app = express();
 if (process.env.NODE_ENV === 'production') {
   app.set('trust proxy', 1);
 }
@@ -43,14 +44,24 @@ app.use(cors());
 app.use(compression());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
-app.use('/mp3', express.static(path.resolve(process.cwd(), 'public/mp3'), {
-  maxAge: '1d',
-  immutable: true
-}));
-app.get('/healthz', (_req, res) => {
-  const isReady = isDatabaseReady() && passwordMigrationComplete;
-  res.status(isReady ? 200 : 503).json({ status: isReady ? 'ok' : 'starting' });
-});
+if (desktopDownloaderOnly) {
+  app.use((req, res, next) => {
+    if (req.method === 'POST' && req.path === '/desktop/yt-download') {
+      return next();
+    }
+    return res.sendStatus(404);
+  });
+}
+if (!desktopDownloaderOnly) {
+  app.use('/mp3', express.static(path.resolve(process.cwd(), 'public/mp3'), {
+    maxAge: '1d',
+    immutable: true
+  }));
+  app.get('/healthz', (_req, res) => {
+    const isReady = isDatabaseReady() && passwordMigrationComplete;
+    res.status(isReady ? 200 : 503).json({ status: isReady ? 'ok' : 'starting' });
+  });
+}
 
 function isDatabaseReady() {
   return mongoose.connection.readyState === 1;
@@ -678,6 +689,10 @@ app.post('/desktop/yt-download', async (req, res) => {
     res.status(error.statusCode || 500).json({ error: error.message });
   }
 });
+
+if (desktopDownloaderOnly) {
+  app.use((_req, res) => res.sendStatus(404));
+}
 
 app.post('/api/auth/register', async (req, res) => {
   try {

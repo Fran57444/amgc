@@ -125,6 +125,8 @@ npm run desktop:build
 
 El instalador se genera en `dist-electron`. El servicio local de descargas escucha solo en loopback, no carga la configuración MongoDB/Google del proyecto y usa una clave aleatoria efímera entre Electron y el proceso local. Electron mantiene `nodeIntegration` desactivado, aislamiento de contexto y sandbox habilitados; los enlaces externos HTTP(S) se abren en el navegador predeterminado.
 
+Si yt-dlp muestra `Sign in to confirm you're not a bot`, configura un archivo de cookies de YouTube en `YOUTUBE_COOKIES_FILE`. En desarrollo, agrega esa variable al `.env` de la carpeta del proyecto antes de ejecutar `npm run desktop:dev`. En la aplicación instalada, crea un `.env` dentro de la carpeta de datos de usuario de Electron y agrega la misma variable. También puedes definirla en el entorno del sistema antes de abrir Electron. Usa una ruta absoluta al archivo de cookies y no compartas ni publiques ese archivo: permite acceder a tu sesión de YouTube. Electron solo pasa esta variable al descargador local; el resto del `.env` no se envía al proceso de descarga. Si YouTube no exige iniciar sesión, no necesitas configurar cookies.
+
 
 ## Comprobar cambios
 
