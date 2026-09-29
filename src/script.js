@@ -21,6 +21,7 @@ export function initMusicPlayer() {
     const desktopYoutubeDownloader = window.mmamgcDesktop?.downloadYoutubeAudio;
     const desktopYoutubeLocalSaver = window.mmamgcDesktop?.saveYoutubeAudioLocally;
     const desktopOpenLocalMp3Folder = window.mmamgcDesktop?.openLocalMp3Folder;
+    const desktopSetDiscordPresence = window.mmamgcDesktop?.setDiscordPresence;
     const accessTokenStorageKey = 'mmamgc-access-token';
     let accessToken = localStorage.getItem(accessTokenStorageKey) || '';
     let isLoggingOut = false;
@@ -2359,7 +2360,7 @@ export function initMusicPlayer() {
                     </div>
                 `;
             }).join('')
-            : '<div class="chat-message">Todavía no hay mensajes. ¡Saludá!</div>';
+            : '<div class="chat-message">Todavía no hay mensajes.</div>';
         if (forceScrollToBottom || wasNearBottom) scrollChatToBottom();
         else chatMessages.scrollTop = previousScrollTop;
         chatMessages.querySelectorAll('[data-invitation-action]').forEach(button => {
@@ -3729,7 +3730,8 @@ export function initMusicPlayer() {
     
     let autoSpinTimer = null; 
     let svgRot = 0;
-    let spinAf;
+    let spinAf = null;
+    let lastSpinFrameAt = 0;
     let isAutoSpinning = false;
     const mergedSvg = merged.querySelector('svg');
 
@@ -4468,22 +4470,34 @@ export function initMusicPlayer() {
         showRandomSecretPhrase();
     });
 
+    const doSpin = timestamp => {
+        if (!isAutoSpinning || document.hidden) {
+            spinAf = null;
+            return;
+        }
+        if (!lastSpinFrameAt || timestamp - lastSpinFrameAt >= 1000 / 30) {
+            const elapsed = lastSpinFrameAt ? Math.min(timestamp - lastSpinFrameAt, 100) : 1000 / 30;
+            svgRot += 9 * elapsed / 1000;
+            mergedSvg.style.transform = `rotate(${svgRot}deg)`;
+            lastSpinFrameAt = timestamp;
+        }
+        spinAf = requestAnimationFrame(doSpin);
+    };
+
     const startSpin = () => {
         if (isAutoSpinning) return;
         isAutoSpinning = true;
+        lastSpinFrameAt = 0;
         mergedSvg.style.transition = 'none';
-        const doSpin = () => {
-            svgRot += 0.15; 
-            mergedSvg.style.transform = `rotate(${svgRot}deg)`;
-            spinAf = requestAnimationFrame(doSpin);
-        };
-        doSpin();
+        if (!document.hidden) spinAf = requestAnimationFrame(doSpin);
     };
 
     const stopSpin = () => {
         if (!isAutoSpinning) return;
         isAutoSpinning = false;
         cancelAnimationFrame(spinAf);
+        spinAf = null;
+        lastSpinFrameAt = 0;
         const remainder = svgRot % 360;
         let targetRot = svgRot - remainder;
         if (remainder > 180) targetRot += 360; 
@@ -4507,6 +4521,18 @@ export function initMusicPlayer() {
     const audio = new Audio();
     audio.crossOrigin = "anonymous";
     audio.volume = currentVolume;
+    const updateDiscordPresence = () => {
+        if (!desktopSetDiscordPresence) return;
+        const track = playlist[currentTrackIndex];
+        if (!track) return;
+        Promise.resolve(desktopSetDiscordPresence({
+            songName: track.name || 'Canción desconocida',
+            artist: track.artist || 'Artista desconocido',
+            currentTime: Number.isFinite(audio.currentTime) ? audio.currentTime : 0,
+            duration: Number.isFinite(audio.duration) ? audio.duration : Number(track.duration) || 0,
+            isPlaying: !audio.paused && !audio.ended
+        })).catch(error => console.warn('No se pudo actualizar Discord Rich Presence.', error));
+    };
     if (editLyricsPreview) {
         editLyricsPreview.addEventListener('click', event => {
             const clickedWord = event.target.closest('[data-lyric-word-index]');
@@ -4576,6 +4602,7 @@ export function initMusicPlayer() {
     }
 
     audio.addEventListener('loadedmetadata', () => {
+        updateDiscordPresence();
         sharedPlaybackDuration = Number.isFinite(audio.duration) ? audio.duration : 0;
         if (isProfileMode) renderProfile();
     });
@@ -6209,6 +6236,7 @@ export function initMusicPlayer() {
     }
 
     audio.addEventListener('play', () => { 
+        updateDiscordPresence();
         suppressStartupPlaybackUpdates = false;
         const activeUser = getStoredUser();
         if (activeUser?._id && !isRestoringInitialPlayback) {
@@ -6229,6 +6257,7 @@ export function initMusicPlayer() {
         if (isProfileMode) renderProfile();
     });
     audio.addEventListener('pause', () => { 
+        updateDiscordPresence();
         recordOfflineListeningProgress(
             playlist[currentTrackIndex],
             Number.isFinite(audio.currentTime) ? audio.currentTime : 0,
@@ -6506,6 +6535,7 @@ export function initMusicPlayer() {
 
         trackNameEl.textContent = track.name;
         trackArtistEl.textContent = track.artist;
+        updateDiscordPresence();
         bottomBar.style.setProperty('--track-color', track.color);
         const trackCover = getSongCover(track);
         bottomBarCover.src = trackCover;
@@ -6623,7 +6653,10 @@ export function initMusicPlayer() {
     document.addEventListener("keydown", handleKeyDown);
 
     btnNext.addEventListener('click', playNextTrack);
-    audio.addEventListener('ended', playNextTrack);
+    audio.addEventListener('ended', () => {
+        updateDiscordPresence();
+        playNextTrack();
+    });
     btnPrev.addEventListener('click', () => {
         const previous = playbackHistory.pop();
         if (!previous) {
@@ -6925,13 +6958,25 @@ export function initMusicPlayer() {
     window.addEventListener('beforeunload', handleUnload);
     window.addEventListener('pagehide', handleUnload);
     const handleVisibilityChange = () => {
-        if (document.visibilityState !== 'hidden') return;
-        recordOfflineListeningProgress(
-            playlist[currentTrackIndex],
-            Number.isFinite(audio.currentTime) ? audio.currentTime : 0,
-            true
-        );
-        persistOfflineListeningBuffer(true);
+        if (document.visibilityState === 'hidden') {
+            if (spinAf !== null) cancelAnimationFrame(spinAf);
+            spinAf = null;
+            if (perroGif) perroGif.style.display = 'none';
+            recordOfflineListeningProgress(
+                playlist[currentTrackIndex],
+                Number.isFinite(audio.currentTime) ? audio.currentTime : 0,
+                true
+            );
+            persistOfflineListeningBuffer(true);
+            return;
+        }
+        if (audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA && perroGif) {
+            perroGif.style.display = 'block';
+        }
+        if (isAutoSpinning && spinAf === null) {
+            lastSpinFrameAt = 0;
+            spinAf = requestAnimationFrame(doSpin);
+        }
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
 

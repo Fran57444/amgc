@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import dotenv from 'dotenv';
+import DiscordRPC from 'discord-rpc';
 
 const productionUrl = 'https://mmamgc.onrender.com/';
 const developmentUrl = 'http://127.0.0.1:5163/';
@@ -14,6 +15,23 @@ const trustedOrigins = new Set([new URL(productionUrl).origin, new URL(developme
 const desktopDownloadKey = randomBytes(32).toString('hex');
 let downloaderProcess = null;
 let downloaderReadyPromise = null;
+let discordRpcClient = null;
+let discordRpcClientId = '';
+let discordRpcReconnectTimer = null;
+let discordRpcReady = false;
+let pendingDiscordPresence = null;
+let isQuitting = false;
+
+function readApplicationConfiguration() {
+    const configurationDirectory = app.isPackaged ? app.getPath('userData') : app.getAppPath();
+    const configurationPath = path.join(configurationDirectory, '.env');
+    try {
+        return dotenv.parse(readFileSync(configurationPath));
+    } catch (error) {
+        if (error.code === 'ENOENT') return {};
+        throw error;
+    }
+}
 
 function getLocalMp3Directory() {
     return path.join(app.getPath('userData'), 'MP3');
@@ -21,15 +39,7 @@ function getLocalMp3Directory() {
 
 function getYoutubeCookiesFile() {
     const configurationDirectory = app.isPackaged ? app.getPath('userData') : app.getAppPath();
-    const configurationPath = path.join(configurationDirectory, '.env');
-    let configuration = {};
-
-    try {
-        configuration = dotenv.parse(readFileSync(configurationPath));
-    } catch (error) {
-        if (error.code !== 'ENOENT') throw error;
-    }
-
+    const configuration = readApplicationConfiguration();
     const cookiesFile = process.env.YOUTUBE_COOKIES_FILE || configuration.YOUTUBE_COOKIES_FILE;
     if (!cookiesFile) return null;
     return path.isAbsolute(cookiesFile)
@@ -131,6 +141,90 @@ function isTrustedSender(event) {
     }
 }
 
+function scheduleDiscordRpcReconnect() {
+    if (isQuitting || discordRpcReconnectTimer || !discordRpcClientId) return;
+    discordRpcReconnectTimer = setTimeout(() => {
+        discordRpcReconnectTimer = null;
+        connectDiscordRpc();
+    }, 15000);
+    discordRpcReconnectTimer.unref();
+}
+
+async function publishDiscordPresence() {
+    if (!discordRpcReady || !discordRpcClient) return;
+    try {
+        if (!pendingDiscordPresence) {
+            await discordRpcClient.clearActivity();
+            return;
+        }
+
+        const { songName, artist, currentTime, duration, isPlaying } = pendingDiscordPresence;
+        const activity = {
+            details: songName,
+            state: `${artist} · ${isPlaying ? 'Reproduciendo' : 'En pausa'}`,
+            instance: false
+        };
+        if (isPlaying && duration > currentTime) {
+            const startTimestamp = Date.now() - currentTime * 1000;
+            activity.startTimestamp = startTimestamp;
+            activity.endTimestamp = startTimestamp + duration * 1000;
+        }
+        await discordRpcClient.setActivity(activity);
+    } catch (error) {
+        console.warn('[Discord RPC] No se pudo actualizar la presencia.', error);
+    }
+}
+
+function connectDiscordRpc() {
+    if (isQuitting || !discordRpcClientId) return;
+    const client = new DiscordRPC.Client({ transport: 'ipc' });
+    discordRpcClient = client;
+    discordRpcReady = false;
+
+    client.on('ready', () => {
+        if (discordRpcClient !== client) return;
+        discordRpcReady = true;
+        console.info('[Discord RPC] Conectado a Discord.');
+        void publishDiscordPresence();
+    });
+    client.on('disconnected', () => {
+        if (discordRpcClient !== client) return;
+        discordRpcReady = false;
+        discordRpcClient = null;
+        scheduleDiscordRpcReconnect();
+    });
+    client.on('error', error => {
+        console.warn('[Discord RPC] Error de conexión:', error);
+        if (discordRpcClient !== client) return;
+        discordRpcReady = false;
+        discordRpcClient = null;
+        scheduleDiscordRpcReconnect();
+    });
+    client.login({ clientId: discordRpcClientId }).catch(error => {
+        console.warn('[Discord RPC] Discord no está disponible; se volverá a intentar.', error.message);
+        if (discordRpcClient !== client) return;
+        discordRpcReady = false;
+        discordRpcClient = null;
+        scheduleDiscordRpcReconnect();
+    });
+}
+
+function startDiscordRpc() {
+    try {
+        const configuration = readApplicationConfiguration();
+        const clientId = process.env.DISCORD_CLIENT_ID || configuration.DISCORD_CLIENT_ID || '';
+        if (!/^\d{17,20}$/.test(clientId)) {
+            console.info('[Discord RPC] Rich Presence desactivada: configura DISCORD_CLIENT_ID en .env.');
+            return;
+        }
+        discordRpcClientId = clientId;
+        DiscordRPC.register(clientId);
+        connectDiscordRpc();
+    } catch (error) {
+        console.error('[Discord RPC] No se pudo iniciar la integración.', error);
+    }
+}
+
 ipcMain.handle('mmamgc:download-youtube', async (event, ytLink, fileName, saveLocally = false) => {
     if (!isTrustedSender(event)) throw new Error('Origen no autorizado para usar el descargador local.');
     let url;
@@ -173,6 +267,31 @@ ipcMain.handle('mmamgc:download-youtube', async (event, ytLink, fileName, saveLo
         title: result.title,
         bytes: Uint8Array.from(Buffer.from(result.audio, 'base64'))
     };
+});
+
+ipcMain.handle('mmamgc:discord-presence', async (event, presence) => {
+    if (!isTrustedSender(event)) throw new Error('Origen no autorizado para actualizar Discord.');
+    if (!presence || typeof presence !== 'object'
+        || typeof presence.songName !== 'string'
+        || typeof presence.artist !== 'string'
+        || typeof presence.isPlaying !== 'boolean'
+        || !Number.isFinite(presence.currentTime)
+        || !Number.isFinite(presence.duration)) {
+        throw new Error('La información de reproducción para Discord no es válida.');
+    }
+
+    const songName = presence.songName.trim().slice(0, 128);
+    const artist = presence.artist.trim().slice(0, 128) || 'Artista desconocido';
+    if (!songName) throw new Error('La canción para Discord no puede estar vacía.');
+    const duration = Math.max(0, Math.min(presence.duration, 86400));
+    pendingDiscordPresence = {
+        songName,
+        artist,
+        currentTime: Math.max(0, Math.min(presence.currentTime, duration)),
+        duration,
+        isPlaying: presence.isPlaying
+    };
+    await publishDiscordPresence();
 });
 
 ipcMain.handle('mmamgc:open-local-mp3-folder', async event => {
@@ -234,6 +353,7 @@ function createMainWindow() {
 }
 
 app.whenReady().then(() => {
+    startDiscordRpc();
     void startLocalDownloader().catch(error => {
         console.error('El descargador local de YouTube no está disponible.', error);
     });
@@ -248,5 +368,10 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+    isQuitting = true;
+    if (discordRpcReconnectTimer) clearTimeout(discordRpcReconnectTimer);
+    if (discordRpcReady) void discordRpcClient?.clearActivity().catch(error => {
+        console.warn('[Discord RPC] No se pudo borrar la presencia al cerrar.', error);
+    });
     downloaderProcess?.kill();
 });

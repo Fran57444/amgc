@@ -262,7 +262,6 @@ function App() {
                 <input type="checkbox" id="offline-mode-toggle" />
                 <span>Descargar</span>
               </label>
-              <progress id="offline-cache-progress" max="1" value="0"></progress>
               <span id="offline-cache-status" className="lyrics-editor-status" aria-live="polite">Descargas offline desactivadas.</span><br></br>
             </div><br></br>
 

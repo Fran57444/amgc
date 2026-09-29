@@ -635,7 +635,7 @@ async function downloadYoutubeAudio(ytLink) {
     const requestSource = desktopDownloaderOnly ? 'este equipo' : 'el servidor alojado';
     if (/429|too many requests|rate limit/i.test(ytDlpError.message || '')) {
       const error = new Error(
-        `YouTube limitó temporalmente las solicitudes desde la IP de ${requestSource}. Espera y vuelve a intentarlo más tarde.`
+        `YouTube limitó temporalmente las solicitudes desde la IP de ${requestSource}. Abre cmd y ejecuta "ipconfig /flushdns", si no funciona, espera.`
       );
       error.statusCode = 429;
       throw error;
@@ -651,7 +651,7 @@ async function downloadYoutubeAudio(ytLink) {
       const message = fallbackError?.message || 'El enlace no pudo ser procesado por YouTube.';
       if (/429|too many requests|rate limit/i.test(`${ytDlpError.message} ${message}`)) {
         const error = new Error(
-          `YouTube limitó temporalmente las solicitudes desde la IP de ${requestSource}. Espera y vuelve a intentarlo más tarde.`
+          `YouTube limitó temporalmente las solicitudes desde la IP de ${requestSource}. Abre cmd y ejecuta "ipconfig /flushdns", si no funciona, espera.`
         );
         error.statusCode = 429;
         throw error;
