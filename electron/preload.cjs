@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('mmamgcDesktop', {
     downloadYoutubeAudio: (ytLink, fileName) => ipcRenderer.invoke('mmamgc:download-youtube', ytLink, fileName),
     setDiscordPresence: presence => ipcRenderer.invoke('mmamgc:discord-presence', presence),
+    getDiscordPresenceStatus: () => ipcRenderer.invoke('mmamgc:discord-status'),
     saveYoutubeAudioLocally: (ytLink, fileName) => ipcRenderer.invoke(
         'mmamgc:download-youtube',
         ytLink,

@@ -4525,13 +4525,30 @@ export function initMusicPlayer() {
         if (!desktopSetDiscordPresence) return;
         const track = playlist[currentTrackIndex];
         if (!track) return;
+        const cover = track.cover && track.cover !== '/img/vinculo.png'
+            ? track.cover
+            : getSongCover(track);
+        let coverUrl = '';
+        if (cover && !cover.startsWith('blob:') && !cover.startsWith('data:')) {
+            try {
+                const resolvedCoverUrl = new URL(cover, window.location.href);
+                if (resolvedCoverUrl.protocol === 'https:') coverUrl = resolvedCoverUrl.href;
+            } catch (error) {
+                console.warn('No se pudo resolver la portada para Discord.', error);
+            }
+        }
         Promise.resolve(desktopSetDiscordPresence({
             songName: track.name || 'Canción desconocida',
             artist: track.artist || 'Artista desconocido',
             currentTime: Number.isFinite(audio.currentTime) ? audio.currentTime : 0,
             duration: Number.isFinite(audio.duration) ? audio.duration : Number(track.duration) || 0,
-            isPlaying: !audio.paused && !audio.ended
-        })).catch(error => console.warn('No se pudo actualizar Discord Rich Presence.', error));
+            isPlaying: !audio.paused && !audio.ended,
+            coverUrl
+        })).then(status => {
+            if (status && (!status.configured || !status.connected || !status.published)) {
+                console.warn('Discord Rich Presence no está activa:', status);
+            }
+        }).catch(error => console.warn('No se pudo actualizar Discord Rich Presence.', error));
     };
     if (editLyricsPreview) {
         editLyricsPreview.addEventListener('click', event => {

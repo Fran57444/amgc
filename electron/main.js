@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { appendFile, readFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import dotenv from 'dotenv';
@@ -21,6 +21,21 @@ let discordRpcReconnectTimer = null;
 let discordRpcReady = false;
 let pendingDiscordPresence = null;
 let isQuitting = false;
+let discordRpcLastError = null;
+let discordRpcLastActivityAt = null;
+let discordRpcAccessToken = null;
+let discordRpcAccessTokenExpiresAt = 0;
+let discordMissingClientSecretLogged = false;
+const discordExternalAssetCache = new Map();
+const discordExternalAssetRequests = new Map();
+
+function logDiscordRpc(message) {
+    const line = `${new Date().toISOString()} ${message}\n`;
+    console.info(line.trimEnd());
+    appendFile(path.join(app.getPath('userData'), 'discord-rpc.log'), line, error => {
+        if (error) console.error('[Discord RPC] No se pudo escribir el registro local.', error);
+    });
+}
 
 function readApplicationConfiguration() {
     const configurationDirectory = app.isPackaged ? app.getPath('userData') : app.getAppPath();
@@ -30,6 +45,89 @@ function readApplicationConfiguration() {
     } catch (error) {
         if (error.code === 'ENOENT') return {};
         throw error;
+    }
+}
+
+function getDiscordClientSecret() {
+    const configuration = readApplicationConfiguration();
+    return process.env.DISCORD_CLIENT_SECRET || configuration.DISCORD_CLIENT_SECRET || '';
+}
+
+async function getDiscordAppAccessToken() {
+    if (discordRpcAccessToken && Date.now() < discordRpcAccessTokenExpiresAt) {
+        return discordRpcAccessToken;
+    }
+    const clientSecret = getDiscordClientSecret();
+    if (!clientSecret) return null;
+
+    const credentials = Buffer.from(`${discordRpcClientId}:${clientSecret}`).toString('base64');
+    const response = await fetch('https://discord.com/api/oauth2/token', {
+        method: 'POST',
+        headers: {
+            Authorization: `Basic ${credentials}`,
+            'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: new URLSearchParams({
+            grant_type: 'client_credentials',
+            scope: 'applications.commands.update'
+        })
+    });
+    if (!response.ok) {
+        throw new Error(`Discord OAuth respondió ${response.status} al solicitar el token de assets.`);
+    }
+    const result = await response.json();
+    if (typeof result.access_token !== 'string' || !Number.isFinite(result.expires_in)) {
+        throw new Error('Discord devolvió un token OAuth incompleto.');
+    }
+    discordRpcAccessToken = result.access_token;
+    discordRpcAccessTokenExpiresAt = Date.now() + Math.max(0, result.expires_in - 60) * 1000;
+    return discordRpcAccessToken;
+}
+
+async function getDiscordExternalAssetKey(imageUrl) {
+    if (!imageUrl) return null;
+    const cachedAssetKey = discordExternalAssetCache.get(imageUrl);
+    if (cachedAssetKey) return cachedAssetKey;
+    const pendingRequest = discordExternalAssetRequests.get(imageUrl);
+    if (pendingRequest) return pendingRequest;
+
+    const request = (async () => {
+        const token = await getDiscordAppAccessToken();
+        if (!token) {
+            if (!discordMissingClientSecretLogged) {
+                discordMissingClientSecretLogged = true;
+                logDiscordRpc('No hay DISCORD_CLIENT_SECRET; se publica Rich Presence sin portada.');
+            }
+            return null;
+        }
+        const response = await fetch(`https://discord.com/api/v10/applications/${discordRpcClientId}/external-assets`, {
+            method: 'POST',
+            headers: {
+                Authorization: `Bearer ${token}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ urls: [imageUrl] })
+        });
+        if (!response.ok) {
+            throw new Error(`Discord external-assets respondió ${response.status}.`);
+        }
+        const result = await response.json();
+        const assetPath = result?.[0]?.external_asset_path;
+        if (typeof assetPath !== 'string' || !assetPath) {
+            throw new Error('Discord no devolvió una ruta para la portada externa.');
+        }
+        const assetKey = assetPath.startsWith('mp:') ? assetPath : `mp:${assetPath}`;
+        discordExternalAssetCache.set(imageUrl, assetKey);
+        if (discordExternalAssetCache.size > 200) {
+            discordExternalAssetCache.delete(discordExternalAssetCache.keys().next().value);
+        }
+        return assetKey;
+    })();
+    discordExternalAssetRequests.set(imageUrl, request);
+    try {
+        return await request;
+    } finally {
+        discordExternalAssetRequests.delete(imageUrl);
     }
 }
 
@@ -151,27 +249,63 @@ function scheduleDiscordRpcReconnect() {
 }
 
 async function publishDiscordPresence() {
-    if (!discordRpcReady || !discordRpcClient) return;
+    if (!discordRpcReady || !discordRpcClient) return false;
+    const presence = pendingDiscordPresence;
     try {
-        if (!pendingDiscordPresence) {
+        if (!presence) {
             await discordRpcClient.clearActivity();
-            return;
+            discordRpcLastActivityAt = null;
+            logDiscordRpc('Presencia borrada.');
+            return true;
         }
 
-        const { songName, artist, currentTime, duration, isPlaying } = pendingDiscordPresence;
+        const { songName, artist, currentTime, duration, isPlaying, coverUrl } = presence;
+        if (!isPlaying) {
+            await discordRpcClient.clearActivity();
+            discordRpcLastActivityAt = null;
+            logDiscordRpc('Presencia borrada porque la reproduccion esta pausada.');
+            return true;
+        }
+
         const activity = {
+            type: 2,
             details: songName,
-            state: `${artist} · ${isPlaying ? 'Reproduciendo' : 'En pausa'}`,
+            state: artist,
             instance: false
         };
-        if (isPlaying && duration > currentTime) {
-            const startTimestamp = Date.now() - currentTime * 1000;
-            activity.startTimestamp = startTimestamp;
-            activity.endTimestamp = startTimestamp + duration * 1000;
+        if (coverUrl) {
+            try {
+                const largeImageKey = await getDiscordExternalAssetKey(coverUrl);
+                if (largeImageKey) {
+                    activity.assets = {
+                        large_image: largeImageKey,
+                        large_text: songName
+                    };
+                }
+            } catch (error) {
+                logDiscordRpc(`No se pudo preparar la portada externa: ${error.message || error}`);
+            }
         }
-        await discordRpcClient.setActivity(activity);
+        if (pendingDiscordPresence !== presence) return false;
+        if (duration > currentTime) {
+            const startTimestamp = Date.now() - currentTime * 1000;
+            activity.timestamps = {
+                start: startTimestamp,
+                end: startTimestamp + duration * 1000
+            };
+        }
+        await discordRpcClient.request('SET_ACTIVITY', {
+            pid: process.pid,
+            activity
+        });
+        discordRpcLastError = null;
+        discordRpcLastActivityAt = new Date().toISOString();
+        logDiscordRpc('Presencia actualizada (reproduciendo).');
+        return true;
     } catch (error) {
-        console.warn('[Discord RPC] No se pudo actualizar la presencia.', error);
+        discordRpcLastError = error.message || String(error);
+        logDiscordRpc(`Error al actualizar la presencia: ${discordRpcLastError}`);
+        return false;
     }
 }
 
@@ -184,24 +318,29 @@ function connectDiscordRpc() {
     client.on('ready', () => {
         if (discordRpcClient !== client) return;
         discordRpcReady = true;
-        console.info('[Discord RPC] Conectado a Discord.');
+        discordRpcLastError = null;
+        logDiscordRpc('Conectado a Discord.');
         void publishDiscordPresence();
     });
     client.on('disconnected', () => {
         if (discordRpcClient !== client) return;
         discordRpcReady = false;
         discordRpcClient = null;
+        discordRpcLastError = 'Discord cerró la conexión IPC.';
+        logDiscordRpc(discordRpcLastError);
         scheduleDiscordRpcReconnect();
     });
     client.on('error', error => {
-        console.warn('[Discord RPC] Error de conexión:', error);
+        discordRpcLastError = error.message || String(error);
+        logDiscordRpc(`Error de conexión: ${discordRpcLastError}`);
         if (discordRpcClient !== client) return;
         discordRpcReady = false;
         discordRpcClient = null;
         scheduleDiscordRpcReconnect();
     });
     client.login({ clientId: discordRpcClientId }).catch(error => {
-        console.warn('[Discord RPC] Discord no está disponible; se volverá a intentar.', error.message);
+        discordRpcLastError = error.message || String(error);
+        logDiscordRpc(`No se pudo conectar; se reintentará: ${discordRpcLastError}`);
         if (discordRpcClient !== client) return;
         discordRpcReady = false;
         discordRpcClient = null;
@@ -214,14 +353,17 @@ function startDiscordRpc() {
         const configuration = readApplicationConfiguration();
         const clientId = process.env.DISCORD_CLIENT_ID || configuration.DISCORD_CLIENT_ID || '';
         if (!/^\d{17,20}$/.test(clientId)) {
-            console.info('[Discord RPC] Rich Presence desactivada: configura DISCORD_CLIENT_ID en .env.');
+            discordRpcLastError = 'DISCORD_CLIENT_ID falta o no tiene un formato válido.';
+            logDiscordRpc(discordRpcLastError);
             return;
         }
         discordRpcClientId = clientId;
         DiscordRPC.register(clientId);
+        logDiscordRpc('Application ID leído desde la configuración.');
         connectDiscordRpc();
     } catch (error) {
-        console.error('[Discord RPC] No se pudo iniciar la integración.', error);
+        discordRpcLastError = error.message || String(error);
+        logDiscordRpc(`No se pudo iniciar la integración: ${discordRpcLastError}`);
     }
 }
 
@@ -276,7 +418,8 @@ ipcMain.handle('mmamgc:discord-presence', async (event, presence) => {
         || typeof presence.artist !== 'string'
         || typeof presence.isPlaying !== 'boolean'
         || !Number.isFinite(presence.currentTime)
-        || !Number.isFinite(presence.duration)) {
+        || !Number.isFinite(presence.duration)
+        || (presence.coverUrl !== undefined && typeof presence.coverUrl !== 'string')) {
         throw new Error('La información de reproducción para Discord no es válida.');
     }
 
@@ -284,14 +427,46 @@ ipcMain.handle('mmamgc:discord-presence', async (event, presence) => {
     const artist = presence.artist.trim().slice(0, 128) || 'Artista desconocido';
     if (!songName) throw new Error('La canción para Discord no puede estar vacía.');
     const duration = Math.max(0, Math.min(presence.duration, 86400));
+    let coverUrl = null;
+    if (presence.coverUrl) {
+        if (presence.coverUrl.length > 2048) throw new Error('La URL de portada para Discord es demasiado larga.');
+        let parsedCoverUrl;
+        try {
+            parsedCoverUrl = new URL(presence.coverUrl);
+        } catch {
+            throw new Error('La URL de portada para Discord no es válida.');
+        }
+        if (parsedCoverUrl.protocol === 'https:' && !parsedCoverUrl.username && !parsedCoverUrl.password) {
+            coverUrl = parsedCoverUrl.href;
+        }
+    }
     pendingDiscordPresence = {
         songName,
         artist,
         currentTime: Math.max(0, Math.min(presence.currentTime, duration)),
         duration,
-        isPlaying: presence.isPlaying
+        isPlaying: presence.isPlaying,
+        coverUrl
     };
-    await publishDiscordPresence();
+    const published = await publishDiscordPresence();
+    if (!discordRpcReady) logDiscordRpc('La interfaz envió el estado, pero Discord aún no está conectado.');
+    return {
+        configured: Boolean(discordRpcClientId),
+        connected: discordRpcReady,
+        published,
+        lastError: discordRpcLastError,
+        lastActivityAt: discordRpcLastActivityAt
+    };
+});
+
+ipcMain.handle('mmamgc:discord-status', event => {
+    if (!isTrustedSender(event)) throw new Error('Origen no autorizado para consultar Discord.');
+    return {
+        configured: Boolean(discordRpcClientId),
+        connected: discordRpcReady,
+        lastError: discordRpcLastError,
+        lastActivityAt: discordRpcLastActivityAt
+    };
 });
 
 ipcMain.handle('mmamgc:open-local-mp3-folder', async event => {
