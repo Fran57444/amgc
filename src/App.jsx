@@ -278,7 +278,7 @@ function App() {
 
             <div className="settings-section">
               <h3>Descargar de YouTube</h3>
-              <p>Ingresar link de Youtube limpio, sin &list=, sin &start_radio=, este se descargara como mp3 para almacenarse localmente en la carpeta /public/mp3</p>
+              <p>Ingresa un enlace de YouTube limpio, sin &list= ni &start_radio=. En Electron, el MP3 se guarda en la carpeta local de MMAMGC; en la web, se guarda en el servidor.</p>
               <div className="field-row" style={{ maxWidth: '400px' }}>
                 <input 
                   type="text" 
@@ -295,6 +295,9 @@ function App() {
                 />
                 <button id="btn-settings-yt-download" className="main-play-btn" style={{backgroundColor: '#ff7221', marginTop: '10px', justifyContent: 'center', padding: '10px', width: '100%' }}>
                   Descargar Audio
+                </button>
+                <button id="btn-open-local-mp3-folder" className="main-play-btn" hidden type="button" style={{backgroundColor: '#333', marginTop: '8px', justifyContent: 'center', padding: '10px', width: '100%' }}>
+                  Abrir carpeta de MP3
                 </button>
                 <span id="settings-yt-status" style={{ fontSize: '0.85rem', color: '#e79f32', marginTop: '5px', display: 'none' }}></span>
               </div><br></br>

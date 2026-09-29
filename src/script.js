@@ -19,7 +19,10 @@ export function initMusicPlayer() {
     const API_URL = import.meta.env.VITE_API_URL || '/api';
     const realtimeEnabled = import.meta.env.VITE_REALTIME_ENABLED !== 'false';
     const desktopYoutubeDownloader = window.mmamgcDesktop?.downloadYoutubeAudio;
-    let accessToken = '';
+    const desktopYoutubeLocalSaver = window.mmamgcDesktop?.saveYoutubeAudioLocally;
+    const desktopOpenLocalMp3Folder = window.mmamgcDesktop?.openLocalMp3Folder;
+    const accessTokenStorageKey = 'mmamgc-access-token';
+    let accessToken = localStorage.getItem(accessTokenStorageKey) || '';
     let isLoggingOut = false;
     let offlineOnly = false;
     let offlineModeEnabled = false;
@@ -172,6 +175,7 @@ export function initMusicPlayer() {
     });
     socket.off('accountRemoved').on('accountRemoved', () => {
         accessToken = '';
+        localStorage.removeItem(accessTokenStorageKey);
         socket.disconnect();
         setStoredUser(null);
         localStorage.removeItem('mmamgc-offline-user');
@@ -229,6 +233,7 @@ export function initMusicPlayer() {
         const response = await fetch(url, { ...options, headers });
         if (response.status === 401 && !String(url).includes('/auth/login')) {
             accessToken = '';
+            localStorage.removeItem(accessTokenStorageKey);
             localStorage.removeItem('mmamgc-user');
             socket.disconnect();
             const overlay = document.getElementById('auth-overlay');
@@ -244,6 +249,7 @@ export function initMusicPlayer() {
             });
             if (response.status === 401) {
                 accessToken = '';
+                localStorage.removeItem(accessTokenStorageKey);
                 if (offlineRecoveryTimer) {
                     clearInterval(offlineRecoveryTimer);
                     offlineRecoveryTimer = null;
@@ -562,6 +568,7 @@ export function initMusicPlayer() {
     
     const editInputYt = document.getElementById("edit-input-yt");
     const btnSettingsYt = document.getElementById("btn-settings-yt-download");
+    const btnOpenLocalMp3Folder = document.getElementById("btn-open-local-mp3-folder");
     const inputSettingsYt = document.getElementById("settings-yt-link");
     const inputSettingsYtName = document.getElementById("settings-yt-name");
     const statusSettingsYt = document.getElementById("settings-yt-status");
@@ -3093,14 +3100,59 @@ export function initMusicPlayer() {
     if (!navigator.onLine && cachedOfflineUser?._id && isOfflineEnabledFor(cachedOfflineUser._id)) {
         offlineOnly = true;
         offlineModeEnabled = true;
+        accessToken = '';
         setStoredUser(null);
         if (offlineModeToggle) offlineModeToggle.checked = true;
         if (authUsername) authUsername.value = cachedOfflineUser.username;
         showAuthOverlay();
         updateOfflineCacheStatus('Sin conexión. Inicia sesión con la contraseña de este dispositivo para abrir el contenido guardado.');
-    } else if (currentSavedUser) {
-        setStoredUser(null);
+    } else if (currentSavedUser && accessToken) {
+        if (authUsername) authUsername.value = currentSavedUser.username || '';
+        const restoreSession = async () => {
+            try {
+                const response = await apiFetch(`${API_URL}/auth/me`);
+                if (!response.ok) {
+                    throw new Error(`El servidor respondió ${response.status} al restaurar la sesión.`);
+                }
+                const restoredUser = await response.json();
+                if (String(restoredUser?._id || '') !== String(currentSavedUser._id)) {
+                    accessToken = '';
+                    localStorage.removeItem(accessTokenStorageKey);
+                    setStoredUser(null);
+                    throw new Error('La sesión guardada no coincide con el perfil de este dispositivo. Inicia sesión nuevamente.');
+                }
+                setStoredUser(restoredUser);
+                saveCachedOfflineUser(restoredUser);
+                isLoggingOut = false;
+                offlineOnly = false;
+                offlineModeEnabled = isOfflineEnabledFor(restoredUser._id);
+                if (offlineModeToggle) offlineModeToggle.checked = offlineModeEnabled;
+                await syncOfflineListening();
+                syncSecretPhrasesFromUser(restoredUser);
+                renderProfile();
+                syncAccessControls();
+                startRealtime();
+                fetchMusicData();
+                loadPlaylists();
+                loadFriends();
+                if (offlineModeEnabled) syncOfflineResources();
+                if (authTitle) authTitle.textContent = `Bienvenido, ${restoredUser.username}`;
+                hideAuthOverlay();
+            } catch (error) {
+                console.error('No se pudo restaurar la sesión guardada.', error);
+                showAuthOverlay();
+                if (authError) {
+                    setAuthError(accessToken
+                        ? 'No se pudo comprobar la sesión guardada. Revisa tu conexión e intenta ingresar nuevamente.'
+                        : 'La sesión expiró o dejó de ser válida. Inicia sesión nuevamente.');
+                }
+            }
+        };
+        void restoreSession();
+    } else {
         accessToken = '';
+        localStorage.removeItem(accessTokenStorageKey);
+        if (currentSavedUser) setStoredUser(null);
     }
 
     if (btnLogoutSettings) {
@@ -3118,6 +3170,7 @@ export function initMusicPlayer() {
             stopRealtime();
             playbackActivityUserId = null;
             accessToken = '';
+            localStorage.removeItem(accessTokenStorageKey);
             offlineOnly = false;
             offlineModeEnabled = false;
             musicDataRequestSequence += 1;
@@ -3191,6 +3244,7 @@ export function initMusicPlayer() {
                 if (typeof result.token !== 'string' || !result.token) {
                     throw new Error('El servidor no devolvió una sesión autenticada.');
                 }
+                localStorage.setItem(accessTokenStorageKey, result.token);
                 isLoggingOut = false;
                 accessToken = result.token;
                 setStoredUser(userPayload);
@@ -6675,6 +6729,22 @@ export function initMusicPlayer() {
     }
 
     if (btnSettingsYt) {
+        if (btnOpenLocalMp3Folder && desktopOpenLocalMp3Folder) {
+            btnOpenLocalMp3Folder.hidden = false;
+            btnOpenLocalMp3Folder.addEventListener('click', async () => {
+                btnOpenLocalMp3Folder.disabled = true;
+                try {
+                    const directory = await desktopOpenLocalMp3Folder();
+                    showYoutubeLinkStatus(`Carpeta de MP3: ${directory}`, false);
+                } catch (error) {
+                    console.error(error);
+                    showYoutubeLinkStatus(error?.message || 'No se pudo abrir la carpeta de MP3.', true);
+                } finally {
+                    btnOpenLocalMp3Folder.disabled = false;
+                }
+            });
+        }
+
         btnSettingsYt.addEventListener('click', async () => {
             const link = inputSettingsYt.value.trim();
             if (!link || !isValidYoutubeLink(link)) {
@@ -6686,8 +6756,8 @@ export function initMusicPlayer() {
             btnSettingsYt.disabled = true;
             startYtDownloadProgress('Descargando canción');
             showYoutubeLinkStatus(
-                desktopYoutubeDownloader
-                    ? 'Descargando el audio en este equipo y subiéndolo al servidor...'
+                desktopYoutubeLocalSaver
+                    ? 'Descargando el audio en este equipo...'
                     : 'Descargando y guardando el MP3 localmente...',
                 false
             );
@@ -6696,21 +6766,16 @@ export function initMusicPlayer() {
 
             try {
                 let response;
-                if (desktopYoutubeDownloader) {
-                    const downloadedAudio = await desktopYoutubeDownloader(link);
-                    const audioFile = new File(
-                        [downloadedAudio.bytes],
-                        requestedFileName || `${downloadedAudio.title}.mp3`,
-                        { type: 'audio/mpeg' }
-                    );
-                    const formData = new FormData();
-                    formData.append('mp3', audioFile);
-                    formData.append('title', downloadedAudio.title);
-                    if (requestedFileName) formData.append('fileName', requestedFileName);
-                    response = await apiFetch(`${API_URL}/yt-download/upload`, {
-                        method: 'POST',
-                        body: formData
+                if (desktopYoutubeLocalSaver) {
+                    const result = await desktopYoutubeLocalSaver(link, requestedFileName);
+                    stopYtDownloadProgress({
+                        success: true,
+                        message: `MP3 guardado en este equipo: ${result.fileName}`
                     });
+                    showYoutubeLinkStatus(`¡MP3 guardado en ${result.path}!`, false);
+                    inputSettingsYt.value = '';
+                    if (inputSettingsYtName) inputSettingsYtName.value = '';
+                    return;
                 } else {
                     response = await apiFetch(`${API_URL}/yt-download`, {
                         method: 'POST',
@@ -6723,10 +6788,10 @@ export function initMusicPlayer() {
                     const message = result?.error || 'El enlace de YouTube fue rechazado o no es válido.';
                     throw new Error(message);
                 }
-                const savedMessage = desktopYoutubeDownloader
-                    ? `MP3 subido al servidor: ${result.fileName}`
-                    : `MP3 guardado localmente: ${result.fileName}`;
-                stopYtDownloadProgress({ success: true, message: savedMessage });
+                stopYtDownloadProgress({
+                    success: true,
+                    message: `MP3 guardado localmente: ${result.fileName}`
+                });
                 showYoutubeLinkStatus(`¡MP3 guardado en ${result.path}!`, false);
                 inputSettingsYt.value = '';
                 if (inputSettingsYtName) inputSettingsYtName.value = '';

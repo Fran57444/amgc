@@ -491,8 +491,8 @@ async function uploadToDrive(fileObject) {
   return data.webContentLink;
 }
 
-async function saveMp3Locally(title, buffer, requestedName = '') {
-  const mp3Directory = path.resolve(process.cwd(), 'public/mp3');
+async function saveMp3Locally(title, buffer, requestedName = '', outputDirectory) {
+  const mp3Directory = outputDirectory || path.resolve(process.cwd(), 'public/mp3');
   await fs.promises.mkdir(mp3Directory, { recursive: true });
 
   const safeTitle = (requestedName || title || 'audio-youtube')
@@ -506,7 +506,7 @@ async function saveMp3Locally(title, buffer, requestedName = '') {
   const filePath = path.join(mp3Directory, fileName);
 
   await fs.promises.writeFile(filePath, buffer);
-  return { fileName, filePath: `/mp3/${fileName}` };
+  return { fileName, filePath: outputDirectory ? filePath : `/mp3/${fileName}` };
 }
 
 function sanitizeAudioFileName(requestedName, fallbackName, extension = '.mp3') {
@@ -679,12 +679,21 @@ app.post('/desktop/yt-download', async (req, res) => {
   }
 
   try {
-    const { ytLink } = req.body;
+    const { ytLink, fileName, saveLocally } = req.body;
     if (!isValidYoutubeUrl(ytLink)) {
       return res.status(400).json({ error: 'El enlace de YouTube no es válido.' });
     }
     const { title, buffer } = await downloadYoutubeAudio(ytLink);
-    res.json({ title, audio: buffer.toString('base64') });
+    if (saveLocally !== true) {
+      return res.json({ title, audio: buffer.toString('base64') });
+    }
+    const localFile = await saveMp3Locally(
+      title,
+      buffer,
+      fileName,
+      process.env.MMAMGC_DESKTOP_DOWNLOAD_DIRECTORY
+    );
+    res.json({ title, fileName: localFile.fileName, path: localFile.filePath });
   } catch (error) {
     res.status(error.statusCode || 500).json({ error: error.message });
   }

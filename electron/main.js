@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import dotenv from 'dotenv';
 
@@ -13,6 +14,10 @@ const trustedOrigins = new Set([new URL(productionUrl).origin, new URL(developme
 const desktopDownloadKey = randomBytes(32).toString('hex');
 let downloaderProcess = null;
 let downloaderReadyPromise = null;
+
+function getLocalMp3Directory() {
+    return path.join(app.getPath('userData'), 'MP3');
+}
 
 function getYoutubeCookiesFile() {
     const configurationDirectory = app.isPackaged ? app.getPath('userData') : app.getAppPath();
@@ -61,6 +66,7 @@ function startLocalDownloader() {
             ELECTRON_RUN_AS_NODE: '1',
             MMAMGC_DESKTOP_DOWNLOADER: 'true',
             MMAMGC_DESKTOP_DOWNLOAD_KEY: desktopDownloadKey,
+            MMAMGC_DESKTOP_DOWNLOAD_DIRECTORY: getLocalMp3Directory(),
             NODE_ENV: 'development',
             PORT: '0',
             ...(youtubeCookiesFile ? { YOUTUBE_COOKIES_FILE: youtubeCookiesFile } : {})
@@ -125,7 +131,7 @@ function isTrustedSender(event) {
     }
 }
 
-ipcMain.handle('mmamgc:download-youtube', async (event, ytLink) => {
+ipcMain.handle('mmamgc:download-youtube', async (event, ytLink, fileName, saveLocally = false) => {
     if (!isTrustedSender(event)) throw new Error('Origen no autorizado para usar el descargador local.');
     let url;
     try {
@@ -145,19 +151,37 @@ ipcMain.handle('mmamgc:download-youtube', async (event, ytLink) => {
             'Content-Type': 'application/json',
             'X-Desktop-Download-Key': desktopDownloadKey
         },
-        body: JSON.stringify({ ytLink: url.href })
+        body: JSON.stringify({ ytLink: url.href, fileName, saveLocally })
     });
     const result = await response.json().catch(() => null);
     if (!response.ok) {
         throw new Error(result?.error || `El descargador local respondió ${response.status}.`);
     }
-    if (!result?.audio || typeof result.title !== 'string') {
+    if (typeof result?.title !== 'string') {
+        throw new Error('El descargador local devolvió una respuesta incompleta.');
+    }
+    if (saveLocally) {
+        if (typeof result.fileName !== 'string' || typeof result.path !== 'string') {
+            throw new Error('El descargador local devolvió una respuesta incompleta.');
+        }
+        return result;
+    }
+    if (typeof result.audio !== 'string') {
         throw new Error('El descargador local devolvió una respuesta incompleta.');
     }
     return {
         title: result.title,
         bytes: Uint8Array.from(Buffer.from(result.audio, 'base64'))
     };
+});
+
+ipcMain.handle('mmamgc:open-local-mp3-folder', async event => {
+    if (!isTrustedSender(event)) throw new Error('Origen no autorizado para abrir esta carpeta.');
+    const directory = getLocalMp3Directory();
+    await mkdir(directory, { recursive: true });
+    const errorMessage = await shell.openPath(directory);
+    if (errorMessage) throw new Error(`No se pudo abrir la carpeta de MP3: ${errorMessage}`);
+    return directory;
 });
 
 async function openExternalUrl(value) {
