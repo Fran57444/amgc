@@ -63,6 +63,32 @@ Reproductor de musica para uso personal.
 3. Abre `http://localhost:5163` en el navegador.
 4. Inicia sesión con la cuenta inicial o con una cuenta creada por un administrador.
 
+## Publicar la web y habilitar tiempo real
+
+La API y Socket.IO deben ejecutarse en un proceso Node persistente. No despliegues `backend/server.js` como función serverless: la aplicación usa conexiones Socket.IO autenticadas para presencia, actividad, seguimiento de reproducción y cambios de playlists. El blueprint `render.yaml` publica el frontend, la API y Socket.IO bajo un mismo origen y conserva los MP3 generados en un disco persistente.
+
+1. Crea una base de datos en MongoDB Atlas. Antes de migrar una base existente, crea una copia de seguridad local:
+
+   ```powershell
+   mongodump --uri="$env:MONGO_URI" --out=.\backup
+   ```
+
+2. En Atlas, crea un usuario de base de datos con una contraseña fuerte y configura el acceso de red para el servicio Render. Permite únicamente las direcciones de salida que Render muestra para el servicio, si están disponibles; evita abrir MongoDB a todo internet.
+3. Si ya tienes usuarios, canciones o playlists en MongoDB local, restaura la copia en la base de Atlas antes de publicar. Sustituye la URI por la de Atlas y el nombre de base por el que creaste:
+
+   ```powershell
+   mongorestore --uri="URI_DE_ATLAS" --nsInclude="musicapp.*" .\backup\musicapp
+   ```
+
+   Haz la primera restauración sobre una base vacía y conserva la copia de seguridad original.
+
+4. Sube el repositorio a GitHub y, desde Render, crea un **Blueprint** conectado a ese repositorio. Render detectará `render.yaml` y preparará el servicio `mmamgc`.
+5. En la configuración del servicio, completa `MONGO_URI` con la URI de Atlas. Si usas Google Drive, completa también `DRIVE_FOLDER_ID`, `GOOGLE_OAUTH_CREDENTIALS_JSON` y `GOOGLE_OAUTH_TOKEN_JSON` con los valores privados correspondientes. No los guardes en Git ni los compartas en el chat.
+6. `JWT_SECRET` se genera automáticamente en Render. No lo regeneres después de publicar: invalidaría las sesiones activas. `INITIAL_ADMIN_USERNAME` y `INITIAL_ADMIN_PASSWORD` solo se necesitan si Atlas no tiene usuarios; el administrador inicial se crea únicamente con la base vacía.
+7. Publica el Blueprint y espera a que `/healthz` responda con estado `ok`. La URL `https://<nombre-del-servicio>.onrender.com` será la dirección pública de la web, la API y Socket.IO. Usa esa misma URL para la versión Electron para conservar estados, actividad y seguimiento realtime entre todos los clientes.
+
+El servicio usa el plan Starter para evitar la suspensión por inactividad y un disco persistente para que los MP3 locales generados no desaparezcan al reiniciar. El servidor de medios de Google Drive requiere las variables OAuth indicadas; sin ellas, esa función no estará disponible en producción.
+
 
 ## Comprobar cambios
 
