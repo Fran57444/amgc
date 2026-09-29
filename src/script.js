@@ -3699,8 +3699,14 @@ export function initMusicPlayer() {
 
     function getOfflineResourceUrl(resource) {
         const apiOrigin = new URL(API_URL, window.location.origin).origin;
-        if (resource.startsWith('/mp3/')) return `${apiOrigin}${resource}`;
-        return new URL(resource, window.location.href).href;
+        const resolvedUrl = new URL(resource, window.location.href);
+        if (resolvedUrl.pathname.startsWith('/mp3/')) {
+            return new URL(`${resolvedUrl.pathname}${resolvedUrl.search}${resolvedUrl.hash}`, apiOrigin).href;
+        }
+        if (['localhost', '127.0.0.1', '[::1]'].includes(resolvedUrl.hostname)) {
+            return new URL(`${resolvedUrl.pathname}${resolvedUrl.search}${resolvedUrl.hash}`, apiOrigin).href;
+        }
+        return resolvedUrl.href;
     }
 
     async function hydrateOfflineSongCovers(songs) {
@@ -3731,11 +3737,35 @@ export function initMusicPlayer() {
         const resolvedUrl = getOfflineResourceUrl(resourceUrl);
         const existing = await getOfflineMedia(key);
         if (existing?.sourceUrl === resolvedUrl) return false;
-        const response = await fetch(resolvedUrl, { credentials: 'omit' });
-        if (!response.ok) {
-            throw new Error(`El servidor respondió ${response.status} al descargar un recurso offline.`);
+        const resourceHost = new URL(resolvedUrl).host;
+        let response;
+        let blob;
+        let lastNetworkError;
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+            try {
+                response = await fetch(resolvedUrl, { credentials: 'omit' });
+                if (response.ok) {
+                    blob = await response.blob();
+                    break;
+                }
+                if (response.status !== 429 && response.status < 500) {
+                    throw new Error(`El servidor respondió ${response.status} al descargar un recurso offline.`);
+                }
+                lastNetworkError = new Error(`El servidor respondió ${response.status}.`);
+            } catch (error) {
+                if (error instanceof TypeError) {
+                    lastNetworkError = error;
+                } else {
+                    throw error;
+                }
+            }
+            if (attempt < 2) {
+                await new Promise(resolve => setTimeout(resolve, 750 * (2 ** attempt)));
+            }
         }
-        const blob = await response.blob();
+        if (!response?.ok || !blob) {
+            throw new Error(`No se pudo descargar desde ${resourceHost} después de 3 intentos: ${lastNetworkError?.message || 'respuesta vacía del servidor'}`);
+        }
         if (!blob.size) throw new Error('El recurso descargado está vacío.');
         await saveOfflineMedia(key, blob, blob.type, resolvedUrl);
         const cachedObjectUrl = offlineObjectUrls.get(key);

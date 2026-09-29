@@ -576,6 +576,13 @@ async function downloadYoutubeAudio(ytLink) {
   try {
     return await downloadWithYtDlp(ytLink);
   } catch (ytDlpError) {
+    if (/429|too many requests|rate limit/i.test(ytDlpError.message || '')) {
+      const error = new Error(
+        'YouTube limitó temporalmente las solicitudes desde la IP del servidor alojado. No es un problema de tu PC ni se soluciona limpiando el DNS; espera y vuelve a intentarlo más tarde.'
+      );
+      error.statusCode = 429;
+      throw error;
+    }
     try {
       const info = await ytdl.getInfo(ytLink);
       const audioStream = ytdl(ytLink, { quality: 'highestaudio', filter: 'audioonly' });
@@ -586,7 +593,11 @@ async function downloadYoutubeAudio(ytLink) {
     } catch (fallbackError) {
       const message = fallbackError?.message || 'El enlace no pudo ser procesado por YouTube.';
       if (/429|too many requests|rate limit/i.test(`${ytDlpError.message} ${message}`)) {
-        throw new Error('YouTube rechazó temporalmente la descarga (429). Abre cmd y escribe ipconfig /flushdns, si no funciona, espera unos minutos.');
+        const error = new Error(
+          'YouTube limitó temporalmente las solicitudes desde la IP del servidor alojado. No es un problema de tu PC ni se soluciona limpiando el DNS; espera y vuelve a intentarlo más tarde.'
+        );
+        error.statusCode = 429;
+        throw error;
       }
       throw new Error(message);
     }
@@ -1213,7 +1224,7 @@ app.post('/api/songs', upload.fields([{ name: 'mp3' }, { name: 'cover' }]), asyn
       realtimeIo?.emit('songCatalogChanged');
     res.json(savedSong);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(err.statusCode || 500).json({ error: err.message });
   }
 });
 
@@ -1908,7 +1919,7 @@ app.post('/api/yt-download', async (req, res) => {
       size: buffer.length
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(error.statusCode || 500).json({ error: error.message });
   }
 });
 

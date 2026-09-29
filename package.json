@@ -3,14 +3,39 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "main": "electron/main.js",
   "scripts": {
     "dev": "concurrently \"vite\" \"node backend/server.js\"",
     "dev:lan": "concurrently \"vite --host 0.0.0.0\" \"node backend/server.js\"",
     "start": "node backend/server.js",
+    "desktop": "electron .",
+    "desktop:dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5163 && electron . --dev\"",
+    "desktop:build": "npm run build && electron-builder --win nsis",
     "oauth:token": "node backend/generate-oauth-token.js",
     "build": "vite build",
     "lint": "oxlint",
     "preview": "vite preview"
+  },
+  "build": {
+    "appId": "com.fran57444.mmamgc",
+    "productName": "MMAMGC",
+    "directories": {
+      "output": "dist-electron"
+    },
+    "files": [
+      "electron/**",
+      "package.json"
+    ],
+    "win": {
+      "icon": "public/chaos.ico",
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
   },
   "dependencies": {
     "@distube/ytdl-core": "^4.16.12",

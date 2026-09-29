@@ -89,6 +89,31 @@ La API y Socket.IO deben ejecutarse en un proceso Node persistente. No despliegu
 
 El servicio usa el plan Starter para evitar la suspensión por inactividad y un disco persistente para que los MP3 locales generados no desaparezcan al reiniciar. El servidor de medios de Google Drive requiere las variables OAuth indicadas; sin ellas, esa función no estará disponible en producción.
 
+## Aplicación de escritorio Electron
+
+La versión de escritorio abre `https://mmamgc.onrender.com`, por lo que comparte el mismo servidor, las mismas cuentas y las mismas conexiones Socket.IO que la web. Presencia, actividad, seguimiento de reproducción, playlists y mensajes realtime siguen funcionando entre clientes. La autenticación y los datos offline permanecen en el perfil persistente de Electron. Para iniciar sesión y sincronizar con otras cuentas se necesita conexión al servidor; el modo offline de la aplicación usa las descargas locales ya guardadas.
+
+Para ejecutar el cliente contra el servidor publicado:
+
+```powershell
+npm ci
+npm run desktop
+```
+
+Para desarrollar la interfaz contra Vite en `http://127.0.0.1:5163`:
+
+```powershell
+npm run desktop:dev
+```
+
+Para generar el instalador NSIS de Windows:
+
+```powershell
+npm run desktop:build
+```
+
+El instalador se genera en `dist-electron`. Electron mantiene `nodeIntegration` desactivado, aislamiento de contexto y sandbox habilitados; los enlaces externos HTTP(S) se abren en el navegador predeterminado.
+
 
 ## Comprobar cambios
 
@@ -105,6 +130,4 @@ npm run build
 2. Para actualizar el código, descarga los cambios y ejecuta `npm ci`.
 3. Mantén `.env`, los archivos de credenciales y las copias de seguridad ocultas.
 
-## Instaladores
-
-`npm run build` genera los archivos web de producción en `dist`. Este repositorio todavía no define comandos para crear instaladores de escritorio Electron ni paquetes nativos para Android o iOS.
+`npm run build` genera los archivos web de producción en `dist`. `npm run desktop:build` genera el instalador de Windows; no hay instaladores nativos para Android o iOS.
