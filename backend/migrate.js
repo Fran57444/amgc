@@ -1,5 +1,5 @@
 import dns from 'node:dns';
-dns.setServers(['8.8.8.8', '8.8.4.4']); // Por si persisten los bloqueos de red
+dns.setServers(['8.8.8.8', '8.8.4.4']);
 
 import dotenv from 'dotenv';
 dotenv.config();
@@ -9,8 +9,6 @@ import path from 'path';
 import { google } from 'googleapis';
 import http from 'http';
 import url from 'url';
-
-// 1. Conexión a MongoDB
 await mongoose.connect(process.env.MONGO_URI);
 
 const songSchema = new mongoose.Schema({
@@ -23,8 +21,6 @@ const songSchema = new mongoose.Schema({
   lyrics: String
 });
 const Song = mongoose.model('Song', songSchema);
-
-// 2. Autenticación OAuth 2.0 con cuenta personal
 async function getOAuthClient() {
   const credentialsContent = fs.readFileSync('oauth-credentials.json', 'utf-8');
   const credentials = JSON.parse(credentialsContent);
@@ -35,15 +31,11 @@ async function getOAuthClient() {
     client_secret,
     redirect_uris[0] || 'http://localhost:3000'
   );
-
-  // Intentar cargar token guardado previamente si ya te autenticaste antes
   if (fs.existsSync('token.json')) {
     const token = JSON.parse(fs.readFileSync('token.json', 'utf-8'));
     oAuth2Client.setCredentials(token);
     return oAuth2Client;
   }
-
-  // Si no hay token, abrir servidor local para recibir el código de autorización
   return new Promise((resolve, reject) => {
     const server = http.createServer(async (req, res) => {
       try {
@@ -66,18 +58,13 @@ async function getOAuthClient() {
       });
       console.log('🔗 Abre el siguiente enlace en tu navegador para autorizar la app con tu cuenta personal:\n');
       console.log(authorizeUrl);
-      
-      // Intentar abrir el navegador automáticamente
       try {
         await import('open').then(m => m.default(authorizeUrl));
       } catch {
-        // Si falla, el usuario lo copia manualmente de la consola
       }
     });
   });
 }
-
-// 3. Subir archivo usando la cuenta personal
 async function uploadToPersonalDrive(authClient, filePath, mimeType) {
   const drive = google.drive({ version: 'v3', auth: authClient });
   const absolutePath = path.resolve('../public' + filePath);
@@ -89,7 +76,7 @@ async function uploadToPersonalDrive(authClient, filePath, mimeType) {
 
   const fileMetadata = {
     name: path.basename(filePath),
-    parents: [process.env.DRIVE_FOLDER_ID], // Tu carpeta en tu Drive personal
+    parents: [process.env.DRIVE_FOLDER_ID],
   };
   
   const media = {
@@ -103,8 +90,6 @@ async function uploadToPersonalDrive(authClient, filePath, mimeType) {
       media: media,
       fields: 'id, webContentLink',
     });
-
-    // Hacer público el archivo para que el reproductor web pueda leerlo
     await drive.permissions.create({
       fileId: data.id,
       requestBody: { role: 'reader', type: 'anyone' },

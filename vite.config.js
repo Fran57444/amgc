@@ -11,7 +11,12 @@ export default defineConfig({
     port: 5163,
     strictPort: true,
     proxy: {
-      '/api': 'http://localhost:5000'
+      '/api': 'http://localhost:5000',
+      '/socket.io': {
+        target: 'http://localhost:5000',
+        ws: true
+      },
+      '/mp3': 'http://localhost:5000'
     }
   }
 })

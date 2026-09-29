@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: mmamgc
+    runtime: node
+    plan: starter
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /healthz
+    disk:
+      name: mmamgc-audio
+      mountPath: /opt/render/project/src/public/mp3
+      sizeGB: 10
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JWT_SECRET
+        generateValue: true
+      - key: MONGO_URI
+        sync: false
+      - key: DRIVE_FOLDER_ID
+        sync: false
+      - key: GOOGLE_OAUTH_CREDENTIALS_JSON
+        sync: false
+      - key: GOOGLE_OAUTH_TOKEN_JSON
+        sync: false
+      - key: INITIAL_ADMIN_USERNAME
+        sync: false
+      - key: INITIAL_ADMIN_PASSWORD
+        sync: false
