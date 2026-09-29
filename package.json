@@ -11,6 +11,7 @@
     "desktop": "electron .",
     "desktop:dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5163 && electron . --dev\"",
     "desktop:build": "npm run build && electron-builder --win nsis",
+    "build:vercel": "vite build --mode vercel",
     "oauth:token": "node backend/generate-oauth-token.js",
     "build": "vite build",
     "lint": "oxlint",
@@ -24,6 +25,7 @@
     },
     "files": [
       "electron/**",
+      "backend/**",
       "package.json"
     ],
     "win": {

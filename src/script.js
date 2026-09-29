@@ -17,6 +17,8 @@ import {
 
 export function initMusicPlayer() {
     const API_URL = import.meta.env.VITE_API_URL || '/api';
+    const realtimeEnabled = import.meta.env.VITE_REALTIME_ENABLED !== 'false';
+    const desktopYoutubeDownloader = window.mmamgcDesktop?.downloadYoutubeAudio;
     let accessToken = '';
     let isLoggingOut = false;
     let offlineOnly = false;
@@ -37,6 +39,9 @@ export function initMusicPlayer() {
         transports: ['websocket', 'polling'],
         auth: callback => callback({ token: accessToken })
     });
+    const connectRealtime = () => {
+        if (realtimeEnabled) socket.connect();
+    };
     let realtimeConnectedBefore = false;
     let skipNextRealtimeReconciliation = false;
     const profilePlaylistCache = new Map();
@@ -97,9 +102,9 @@ export function initMusicPlayer() {
                 isAdminMode = false;
                 updateBackgroundAndViews();
             }
-            if (permissionsChanged && socket.connected) {
+            if (realtimeEnabled && permissionsChanged && socket.connected) {
                 socket.disconnect();
-                socket.connect();
+                connectRealtime();
             }
             if (isProfileMode) renderProfile();
         } catch (error) {
@@ -176,7 +181,7 @@ export function initMusicPlayer() {
     socket.off('accountAccessChanged').on('accountAccessChanged', () => {
         if (!accessToken) return;
         socket.disconnect();
-        socket.connect();
+        connectRealtime();
     });
     socket.off('connect').on('connect', async () => {
         const isReconnect = realtimeConnectedBefore;
@@ -202,6 +207,15 @@ export function initMusicPlayer() {
         }
         if (activeChatFriendId) loadChatMessages(false);
         refreshChatNotifications();
+    });
+    const refreshFriendsAfterForeground = () => {
+        if (!accessToken || offlineOnly || !navigator.onLine) return;
+        if (realtimeEnabled && !socket.connected) connectRealtime();
+        void loadFriends();
+    };
+    window.addEventListener('online', refreshFriendsAfterForeground);
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') refreshFriendsAfterForeground();
     });
     const apiFetch = async (url, options = {}) => {
         const isLoginRequest = String(url).includes('/auth/login');
@@ -252,7 +266,7 @@ export function initMusicPlayer() {
                 offlineRecoveryTimer = null;
             }
             skipNextRealtimeReconciliation = true;
-            socket.connect();
+            connectRealtime();
             await Promise.all([fetchMusicData(), loadFriends(), loadPlaylists()]);
             await syncOfflineResources();
             if (isProfileMode) renderProfile();
@@ -667,6 +681,7 @@ export function initMusicPlayer() {
     let friendsOwnerId = null;
     const annoyedFriendIds = new Set();
     const friendPresenceUpdatedAt = new Map();
+    const friendRealtimeUpdates = new Map();
     let selectedProfileUser = null;
     let listeningTogetherUserId = null;
     let sharedPlaybackTime = 0;
@@ -678,6 +693,8 @@ export function initMusicPlayer() {
     let serverChatMessages = [];
     let chatPollTimer = null;
     let friendsUiTimer = null;
+    let friendsRealtimeFallbackTimer = null;
+    let friendsFallbackRefreshInProgress = false;
     let friendCacheSaveTimer = null;
     let queueName = 'GENERAL';
     let playlist = [];
@@ -2061,6 +2078,22 @@ export function initMusicPlayer() {
         return incoming;
     }
 
+    function rememberFriendRealtimeUpdate(userId, update = {}) {
+        const normalizedId = String(userId || '');
+        if (!normalizedId) return;
+        const previous = friendRealtimeUpdates.get(normalizedId);
+        friendRealtimeUpdates.set(normalizedId, {
+            receivedAt: Date.now(),
+            updatedAt: update.updatedAt || update.lastPlayed?.updatedAt || previous?.updatedAt || null,
+            ...(typeof update.isOnline === 'boolean'
+                ? { isOnline: update.isOnline }
+                : previous && { isOnline: previous.isOnline }),
+            ...(update.lastPlayed
+                ? { lastPlayed: getNewestPlayback(update.lastPlayed, previous?.lastPlayed) }
+                : previous?.lastPlayed && { lastPlayed: previous.lastPlayed })
+        });
+    }
+
     function scheduleFriendsOfflineSave() {
         const user = getStoredUser();
         if (!offlineModeEnabled || !user?._id) return;
@@ -2088,13 +2121,14 @@ export function initMusicPlayer() {
         })));
     }
 
-    async function loadFriends() {
+    async function loadFriends({ skipOfflineResourceSync = false } = {}) {
         const user = getStoredUser();
         if (!user) return;
         const requestedOwnerId = String(user._id);
         if (friendsOwnerId !== requestedOwnerId) {
             currentFriends = [];
             friendPresenceUpdatedAt.clear();
+            friendRealtimeUpdates.clear();
             friendsOwnerId = requestedOwnerId;
         }
         if (offlineOnly || !navigator.onLine) {
@@ -2126,8 +2160,22 @@ export function initMusicPlayer() {
                 const friendId = String(friend._id);
                 const hasRealtimePlayback = friendPresenceUpdatedAt.has(friendId);
                 const presenceChangedAfterRequest = (friendPresenceUpdatedAt.get(friendId) || 0) > requestStartedAt;
+                const realtimeUpdate = friendRealtimeUpdates.get(friendId);
+                const realtimePlaybackIsNewer = realtimeUpdate?.lastPlayed
+                    && Date.parse(realtimeUpdate.lastPlayed.updatedAt) > Date.parse(friend.lastPlayed?.updatedAt);
+                const realtimePresenceIsNewer = realtimeUpdate?.updatedAt
+                    && Date.parse(realtimeUpdate.updatedAt) > Date.parse(friend.lastActive);
+                const hasFreshRealtimeUpdate = (realtimeUpdate?.receivedAt || 0) > requestStartedAt
+                    || realtimePlaybackIsNewer
+                    || realtimePresenceIsNewer;
                 return {
                     ...friend,
+                    ...(hasFreshRealtimeUpdate && {
+                        ...(typeof realtimeUpdate.isOnline === 'boolean' && { isOnline: realtimeUpdate.isOnline }),
+                        ...(realtimeUpdate.lastPlayed && {
+                            lastPlayed: getNewestPlayback(friend.lastPlayed, realtimeUpdate.lastPlayed)
+                        })
+                    }),
                     ...(previousFriend && {
                         ...(hasRealtimePlayback && {
                             lastPlayed: getNewestPlayback(friend.lastPlayed, previousFriend.lastPlayed)
@@ -2135,6 +2183,10 @@ export function initMusicPlayer() {
                         ...(presenceChangedAfterRequest && { isOnline: previousFriend.isOnline })
                     })
                 };
+            });
+            const refreshedFriendIds = new Set(currentFriends.map(friend => String(friend._id)));
+            friendRealtimeUpdates.forEach((_update, friendId) => {
+                if (!refreshedFriendIds.has(friendId)) friendRealtimeUpdates.delete(friendId);
             });
             if (offlineModeEnabled) {
                 try {
@@ -2184,7 +2236,7 @@ export function initMusicPlayer() {
             if (selectedProfileUser) renderProfile();
             else renderProfileFriendsSection();
         }
-        syncOfflineResources();
+        if (!skipOfflineResourceSync) syncOfflineResources();
     }
 
     async function addFriend() {
@@ -2470,11 +2522,9 @@ export function initMusicPlayer() {
     function startRealtime() {
         stopRealtime();
         const user = getStoredUser();
-        if (user?._id) {
-
-            socket.connect();
-        }
+        if (user?._id) connectRealtime();
         socket.off('songChanged').on('songChanged', ({ userId, playback }) => {
+            rememberFriendRealtimeUpdate(userId, { isOnline: true, lastPlayed: playback });
             const friend = currentFriends.find(item => String(item._id) === String(userId));
             if (!friend || !playback) return;
             friend.lastPlayed = getNewestPlayback(playback, friend.lastPlayed);
@@ -2490,9 +2540,11 @@ export function initMusicPlayer() {
             }
         });
         socket.off('playbackStatusChanged').on('playbackStatusChanged', ({ userId, playback } = {}) => {
+            rememberFriendRealtimeUpdate(userId, { isOnline: true, lastPlayed: playback });
             const friend = currentFriends.find(item => String(item._id) === String(userId));
             if (!friend || !playback) return;
             friend.lastPlayed = getNewestPlayback(playback, friend.lastPlayed);
+            friend.isOnline = true;
             friendPresenceUpdatedAt.set(String(userId), Date.now());
             scheduleFriendsOfflineSave();
             renderFriendsSidebar();
@@ -2565,7 +2617,8 @@ export function initMusicPlayer() {
                 showToast(error.message || 'No se pudo reproducir el audio de molestia.', true);
             });
         });
-        socket.off('presenceChanged').on('presenceChanged', ({ userId, isOnline, lastPlayed } = {}) => {
+        socket.off('presenceChanged').on('presenceChanged', ({ userId, isOnline, lastPlayed, updatedAt } = {}) => {
+            rememberFriendRealtimeUpdate(userId, { isOnline, lastPlayed, updatedAt });
             const friend = currentFriends.find(item => String(item._id) === String(userId));
             if (!friend) return;
             friendPresenceUpdatedAt.set(String(userId), Date.now());
@@ -2587,6 +2640,24 @@ export function initMusicPlayer() {
         friendsUiTimer = setInterval(() => {
             updateFriendsSidebarPlayback();
         }, 1000);
+        friendsRealtimeFallbackTimer = setInterval(async () => {
+            if (
+                !accessToken
+                || offlineOnly
+                || !navigator.onLine
+                || socket.connected
+                || document.visibilityState !== 'visible'
+                || friendsFallbackRefreshInProgress
+            ) return;
+            friendsFallbackRefreshInProgress = true;
+            try {
+                await loadFriends({ skipOfflineResourceSync: true });
+            } catch (error) {
+                console.warn('No se pudo actualizar el panel de amigos mientras Socket.IO está desconectado.', error);
+            } finally {
+                friendsFallbackRefreshInProgress = false;
+            }
+        }, 15000);
         if (btnOpenChat) btnOpenChat.onclick = () => {
             chatModal?.classList.add('active');
             if (chatFriendsView) chatFriendsView.hidden = false;
@@ -2612,6 +2683,7 @@ export function initMusicPlayer() {
         socket.disconnect();
         realtimeConnectedBefore = false;
         skipNextRealtimeReconciliation = false;
+        friendsFallbackRefreshInProgress = false;
         if (friendCacheSaveTimer) {
             clearTimeout(friendCacheSaveTimer);
             friendCacheSaveTimer = null;
@@ -2624,8 +2696,15 @@ export function initMusicPlayer() {
             clearInterval(friendsUiTimer);
             friendsUiTimer = null;
         }
+        if (friendsRealtimeFallbackTimer) {
+            clearInterval(friendsRealtimeFallbackTimer);
+            friendsRealtimeFallbackTimer = null;
+        }
         closeChat();
         currentFriends = [];
+        friendPresenceUpdatedAt.clear();
+        friendRealtimeUpdates.clear();
+        friendsOwnerId = null;
         renderFriendsSidebar();
         renderFriendsPanelList();
     }
@@ -5242,7 +5321,8 @@ export function initMusicPlayer() {
             formData.append('fileName', editInputFileName.value.trim());
         }
 
-        if (editInputMp3.files && editInputMp3.files[0]) {
+        if ((!editInputYt?.value.trim() || !desktopYoutubeDownloader)
+            && editInputMp3.files && editInputMp3.files[0]) {
             formData.append('mp3', editInputMp3.files[0]);
         }
         
@@ -5255,9 +5335,13 @@ export function initMusicPlayer() {
                 if (loadingSpinner) loadingSpinner.style.display = 'none';
                 return;
             }
-            formData.append('ytLink', ytLinkVal);
             startYtDownloadProgress(editingTrackIndex !== null ? 'Actualizando canción' : 'Añadiendo canción');
-            showYoutubeLinkStatus('Descargando y convirtiendo el audio antes de subirlo...', false);
+            if (desktopYoutubeDownloader) {
+                showYoutubeLinkStatus('Descargando el audio en este equipo antes de subirlo...', false);
+            } else {
+                formData.append('ytLink', ytLinkVal);
+                showYoutubeLinkStatus('Descargando y convirtiendo el audio antes de subirlo...', false);
+            }
         }
 
         if (editSongPhoto.files && editSongPhoto.files[0]) {
@@ -5265,6 +5349,15 @@ export function initMusicPlayer() {
         }
 
         try {
+            if (ytLinkVal && desktopYoutubeDownloader) {
+                showYoutubeLinkStatus('Descargando el audio desde este equipo...', false);
+                const downloadedAudio = await desktopYoutubeDownloader(ytLinkVal);
+                const requestedFileName = editInputFileName?.value.trim();
+                const audioFileName = requestedFileName || `${downloadedAudio.title}.mp3`;
+                const audioFile = new File([downloadedAudio.bytes], audioFileName, { type: 'audio/mpeg' });
+                formData.append('mp3', audioFile);
+                showYoutubeLinkStatus('Audio descargado. Subiéndolo a tu biblioteca...', false);
+            }
             const response = await apiFetch(`${API_URL}/songs`, {
                 method: 'POST',
                 body: formData
@@ -6582,23 +6675,48 @@ export function initMusicPlayer() {
             btnSettingsYt.textContent = "Descargando...";
             btnSettingsYt.disabled = true;
             startYtDownloadProgress('Descargando canción');
-            showYoutubeLinkStatus('Descargando y guardando el MP3 localmente...', false);
+            showYoutubeLinkStatus(
+                desktopYoutubeDownloader
+                    ? 'Descargando el audio en este equipo y subiéndolo al servidor...'
+                    : 'Descargando y guardando el MP3 localmente...',
+                false
+            );
 
             const requestedFileName = inputSettingsYtName?.value.trim() || '';
-            const requestBody = JSON.stringify({ ytLink: link, fileName: requestedFileName });
 
             try {
-                const response = await apiFetch(`${API_URL}/yt-download`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: requestBody
-                });
+                let response;
+                if (desktopYoutubeDownloader) {
+                    const downloadedAudio = await desktopYoutubeDownloader(link);
+                    const audioFile = new File(
+                        [downloadedAudio.bytes],
+                        requestedFileName || `${downloadedAudio.title}.mp3`,
+                        { type: 'audio/mpeg' }
+                    );
+                    const formData = new FormData();
+                    formData.append('mp3', audioFile);
+                    formData.append('title', downloadedAudio.title);
+                    if (requestedFileName) formData.append('fileName', requestedFileName);
+                    response = await apiFetch(`${API_URL}/yt-download/upload`, {
+                        method: 'POST',
+                        body: formData
+                    });
+                } else {
+                    response = await apiFetch(`${API_URL}/yt-download`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ ytLink: link, fileName: requestedFileName })
+                    });
+                }
                 const result = await response.json().catch(() => null);
                 if (!response.ok) {
                     const message = result?.error || 'El enlace de YouTube fue rechazado o no es válido.';
                     throw new Error(message);
                 }
-                stopYtDownloadProgress({ success: true, message: `MP3 guardado localmente: ${result.fileName}` });
+                const savedMessage = desktopYoutubeDownloader
+                    ? `MP3 subido al servidor: ${result.fileName}`
+                    : `MP3 guardado localmente: ${result.fileName}`;
+                stopYtDownloadProgress({ success: true, message: savedMessage });
                 showYoutubeLinkStatus(`¡MP3 guardado en ${result.path}!`, false);
                 inputSettingsYt.value = '';
                 if (inputSettingsYtName) inputSettingsYtName.value = '';

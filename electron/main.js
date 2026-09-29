@@ -1,10 +1,139 @@
-import { app, BrowserWindow, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, shell } from 'electron';
+import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import path from 'node:path';
 
 const productionUrl = 'https://mmamgc.onrender.com/';
 const developmentUrl = 'http://127.0.0.1:5163/';
 const isDevelopment = process.argv.includes('--dev');
 const appUrl = isDevelopment ? developmentUrl : productionUrl;
-const trustedOrigin = new URL(appUrl).origin;
+const trustedOrigins = new Set([new URL(productionUrl).origin, new URL(developmentUrl).origin]);
+const desktopDownloadKey = randomBytes(32).toString('hex');
+let downloaderProcess = null;
+let downloaderReadyPromise = null;
+
+function startLocalDownloader() {
+    if (downloaderReadyPromise) return downloaderReadyPromise;
+
+    const serverPath = path.join(app.getAppPath(), 'backend', 'server.js');
+    const inheritedEnvironment = {};
+    for (const key of [
+        'PATH',
+        'SystemRoot',
+        'WINDIR',
+        'TEMP',
+        'TMP',
+        'HOME',
+        'USERPROFILE',
+        'APPDATA',
+        'LOCALAPPDATA'
+    ]) {
+        if (process.env[key]) inheritedEnvironment[key] = process.env[key];
+    }
+    downloaderProcess = spawn(process.execPath, [serverPath], {
+        cwd: app.getPath('userData'),
+        env: {
+            ...inheritedEnvironment,
+            ELECTRON_RUN_AS_NODE: '1',
+            MMAMGC_DESKTOP_DOWNLOADER: 'true',
+            MMAMGC_DESKTOP_DOWNLOAD_KEY: desktopDownloadKey,
+            NODE_ENV: 'development',
+            PORT: '0'
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true
+    });
+
+    downloaderReadyPromise = new Promise((resolve, reject) => {
+        let settled = false;
+        let stdoutBuffer = '';
+        const timeout = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            downloaderProcess?.kill();
+            downloaderProcess = null;
+            downloaderReadyPromise = null;
+            reject(new Error('El servicio local de descargas no inició dentro del tiempo esperado.'));
+        }, 30000);
+
+        downloaderProcess.stdout.on('data', chunk => {
+            stdoutBuffer += chunk.toString();
+            const readyMatch = stdoutBuffer.match(/MMAMGC_DESKTOP_DOWNLOADER_READY:(\d+)/);
+            if (!readyMatch || settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            resolve(`http://127.0.0.1:${readyMatch[1]}`);
+        });
+
+        downloaderProcess.stderr.on('data', chunk => {
+            console.error('[Descargador local]', chunk.toString().trim());
+        });
+
+        downloaderProcess.once('error', error => {
+            clearTimeout(timeout);
+            if (!settled) {
+                settled = true;
+                reject(error);
+            }
+            downloaderReadyPromise = null;
+        });
+
+        downloaderProcess.once('exit', (code, signal) => {
+            clearTimeout(timeout);
+            downloaderProcess = null;
+            downloaderReadyPromise = null;
+            if (!settled) {
+                settled = true;
+                reject(new Error(`El servicio local de descargas se cerró (${signal || code}).`));
+            }
+        });
+    });
+
+    return downloaderReadyPromise;
+}
+
+function isTrustedSender(event) {
+    try {
+        return trustedOrigins.has(new URL(event.senderFrame.url).origin);
+    } catch {
+        return false;
+    }
+}
+
+ipcMain.handle('mmamgc:download-youtube', async (event, ytLink) => {
+    if (!isTrustedSender(event)) throw new Error('Origen no autorizado para usar el descargador local.');
+    let url;
+    try {
+        url = new URL(String(ytLink || ''));
+    } catch {
+        throw new Error('El enlace de YouTube no es válido.');
+    }
+    const hostname = url.hostname.replace(/^www\./, '').toLowerCase();
+    if (!['youtube.com', 'm.youtube.com', 'youtu.be'].includes(hostname)) {
+        throw new Error('El enlace de YouTube no es válido.');
+    }
+
+    const downloaderOrigin = await startLocalDownloader();
+    const response = await fetch(`${downloaderOrigin}/desktop/yt-download`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-Desktop-Download-Key': desktopDownloadKey
+        },
+        body: JSON.stringify({ ytLink: url.href })
+    });
+    const result = await response.json().catch(() => null);
+    if (!response.ok) {
+        throw new Error(result?.error || `El descargador local respondió ${response.status}.`);
+    }
+    if (!result?.audio || typeof result.title !== 'string') {
+        throw new Error('El descargador local devolvió una respuesta incompleta.');
+    }
+    return {
+        title: result.title,
+        bytes: Uint8Array.from(Buffer.from(result.audio, 'base64'))
+    };
+});
 
 async function openExternalUrl(value) {
     try {
@@ -26,6 +155,7 @@ function createMainWindow() {
         backgroundColor: '#000000',
         autoHideMenuBar: true,
         webPreferences: {
+            preload: path.join(app.getAppPath(), 'electron', 'preload.cjs'),
             contextIsolation: true,
             nodeIntegration: false,
             sandbox: true,
@@ -39,7 +169,7 @@ function createMainWindow() {
     });
 
     window.webContents.on('will-navigate', (event, targetUrl) => {
-        if (new URL(targetUrl).origin === trustedOrigin) return;
+        if (trustedOrigins.has(new URL(targetUrl).origin)) return;
         event.preventDefault();
         void openExternalUrl(targetUrl);
     });
@@ -55,6 +185,9 @@ function createMainWindow() {
 }
 
 app.whenReady().then(() => {
+    void startLocalDownloader().catch(error => {
+        console.error('El descargador local de YouTube no está disponible.', error);
+    });
     createMainWindow();
     app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) createMainWindow();
@@ -63,4 +196,8 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', () => {
+    downloaderProcess?.kill();
 });

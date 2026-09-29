@@ -21,9 +21,10 @@ import ffmpegPath from 'ffmpeg-static';
 import { Server as SocketIOServer } from 'socket.io';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 
 const app = express();
+const desktopDownloaderOnly = process.env.MMAMGC_DESKTOP_DOWNLOADER === 'true';
 if (process.env.NODE_ENV === 'production') {
   app.set('trust proxy', 1);
 }
@@ -37,6 +38,7 @@ if (jwtSecret.length < 32) {
 }
 const JWT_EXPIRES_IN = '7d';
 let passwordMigrationComplete = false;
+let databaseInitializationPromise = null;
 app.use(cors());
 app.use(compression());
 app.use(express.json({ limit: '50mb' }));
@@ -50,19 +52,45 @@ app.get('/healthz', (_req, res) => {
   res.status(isReady ? 200 : 503).json({ status: isReady ? 'ok' : 'starting' });
 });
 
-mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/musicapp', {
-  serverSelectionTimeoutMS: 5000
-})
-  .then(async () => {
-    console.log('MongoDB Conectado');
-    await bootstrapInitialAdmin();
-    await migrateLegacyPasswords();
-    passwordMigrationComplete = true;
-  })
-  .catch(err => console.error('Error conectando a MongoDB o migrando contraseñas:', err));
-
 function isDatabaseReady() {
   return mongoose.connection.readyState === 1;
+}
+
+function ensureDatabaseConnection() {
+  if (isDatabaseReady() && passwordMigrationComplete) return Promise.resolve();
+  if (mongoose.connection.readyState !== 2 && databaseInitializationPromise && passwordMigrationComplete) {
+    databaseInitializationPromise = null;
+  }
+  if (databaseInitializationPromise) return databaseInitializationPromise;
+
+  const mongoUri = process.env.MONGO_URI
+    || (process.env.NODE_ENV === 'production' ? '' : 'mongodb://localhost:27017/musicapp');
+  if (!mongoUri) {
+    return Promise.reject(new Error('Configura MONGO_URI con la URI de MongoDB Atlas en producción.'));
+  }
+
+  databaseInitializationPromise = mongoose.connect(mongoUri, {
+    serverSelectionTimeoutMS: 10000,
+    maxPoolSize: 5
+  })
+    .then(async () => {
+      console.log('MongoDB Conectado');
+      await bootstrapInitialAdmin();
+      await migrateLegacyPasswords();
+      passwordMigrationComplete = true;
+    })
+    .catch(error => {
+      databaseInitializationPromise = null;
+      console.error('Error conectando a MongoDB o migrando contraseñas:', error);
+      throw error;
+    });
+  return databaseInitializationPromise;
+}
+
+if (!desktopDownloaderOnly) {
+  ensureDatabaseConnection().catch(error => {
+    console.error('La conexión inicial a MongoDB falló; se reintentará con la próxima petición.', error);
+  });
 }
 
 function isValidObjectId(value) {
@@ -250,8 +278,21 @@ function normalizeUserId(value) {
 
 const publicApiRoutes = new Set([
   'POST /auth/login',
-  'GET /songs'
+  'GET /songs',
+  'GET /health'
 ]);
+
+app.use('/api', async (_req, res, next) => {
+  try {
+    await ensureDatabaseConnection();
+    next();
+  } catch (error) {
+    console.error('La API no pudo conectarse a MongoDB.', error);
+    res.status(503).json({
+      error: 'La base de datos no está disponible. Verifica MONGO_URI y el acceso de red de MongoDB Atlas.'
+    });
+  }
+});
 
 app.use('/api', async (req, res, next) => {
   if (process.env.NODE_ENV === 'production' && !req.secure) {
@@ -294,6 +335,10 @@ app.use('/api', async (req, res, next) => {
     }
     return next(error);
   }
+});
+
+app.get('/api/health', (_req, res) => {
+  res.json({ status: 'ok', database: isDatabaseReady() ? 'connected' : 'disconnected' });
 });
 
 const messageSchema = new mongoose.Schema({
@@ -576,9 +621,10 @@ async function downloadYoutubeAudio(ytLink) {
   try {
     return await downloadWithYtDlp(ytLink);
   } catch (ytDlpError) {
+    const requestSource = desktopDownloaderOnly ? 'este equipo' : 'el servidor alojado';
     if (/429|too many requests|rate limit/i.test(ytDlpError.message || '')) {
       const error = new Error(
-        'YouTube limitó temporalmente las solicitudes desde la IP del servidor alojado. No es un problema de tu PC ni se soluciona limpiando el DNS; espera y vuelve a intentarlo más tarde.'
+        `YouTube limitó temporalmente las solicitudes desde la IP de ${requestSource}. Espera y vuelve a intentarlo más tarde.`
       );
       error.statusCode = 429;
       throw error;
@@ -594,7 +640,7 @@ async function downloadYoutubeAudio(ytLink) {
       const message = fallbackError?.message || 'El enlace no pudo ser procesado por YouTube.';
       if (/429|too many requests|rate limit/i.test(`${ytDlpError.message} ${message}`)) {
         const error = new Error(
-          'YouTube limitó temporalmente las solicitudes desde la IP del servidor alojado. No es un problema de tu PC ni se soluciona limpiando el DNS; espera y vuelve a intentarlo más tarde.'
+          `YouTube limitó temporalmente las solicitudes desde la IP de ${requestSource}. Espera y vuelve a intentarlo más tarde.`
         );
         error.statusCode = 429;
         throw error;
@@ -603,6 +649,35 @@ async function downloadYoutubeAudio(ytLink) {
     }
   }
 }
+
+app.post('/desktop/yt-download', async (req, res) => {
+  const remoteAddress = req.socket.remoteAddress || '';
+  const isLoopback = remoteAddress === '127.0.0.1'
+    || remoteAddress === '::1'
+    || remoteAddress === '::ffff:127.0.0.1';
+  const expectedKey = process.env.MMAMGC_DESKTOP_DOWNLOAD_KEY || '';
+  const receivedKey = req.get('x-desktop-download-key') || '';
+  const expectedKeyBuffer = Buffer.from(expectedKey);
+  const receivedKeyBuffer = Buffer.from(receivedKey);
+  const hasValidKey = expectedKeyBuffer.length > 0
+    && expectedKeyBuffer.length === receivedKeyBuffer.length
+    && timingSafeEqual(expectedKeyBuffer, receivedKeyBuffer);
+
+  if (!desktopDownloaderOnly || !isLoopback || !hasValidKey) {
+    return res.sendStatus(404);
+  }
+
+  try {
+    const { ytLink } = req.body;
+    if (!isValidYoutubeUrl(ytLink)) {
+      return res.status(400).json({ error: 'El enlace de YouTube no es válido.' });
+    }
+    const { title, buffer } = await downloadYoutubeAudio(ytLink);
+    res.json({ title, audio: buffer.toString('base64') });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ error: error.message });
+  }
+});
 
 app.post('/api/auth/register', async (req, res) => {
   try {
@@ -851,7 +926,12 @@ app.post('/api/users/status', async (req, res) => {
     if (!userId) return res.status(400).json({ error: 'Falta userId' });
 
     const updateData = { lastActive: new Date() };
-    if (typeof isOnline === 'boolean') updateData.isOnline = isOnline;
+    if (typeof isOnline === 'boolean') {
+      const activeSockets = isOnline === false && realtimeIo
+        ? await realtimeIo.in(`user:${userId}`).fetchSockets()
+        : [];
+      if (isOnline || activeSockets.length === 0) updateData.isOnline = isOnline;
+    }
     let previousUser = null;
     if (lastPlayed) {
       previousUser = await User.findById(userId).select('lastPlayed lastPlayedHistory');
@@ -885,8 +965,20 @@ app.post('/api/users/status', async (req, res) => {
       }
       updateData['stats.lastPlayedAt'] = new Date();
     }
-    await User.findByIdAndUpdate(userId, updateData);
+    const updatedUser = await User.findByIdAndUpdate(userId, updateData, {
+      returnDocument: 'after'
+    }).select('friends isOnline lastPlayed lastActive').lean();
     if (lastPlayed) emitUserStatsChanged(userId);
+    if (updatedUser && (typeof isOnline === 'boolean' || lastPlayed)) {
+      for (const friendId of updatedUser.friends || []) {
+        realtimeIo?.to(`user:${friendId}`).emit('presenceChanged', {
+          userId: String(updatedUser._id),
+          isOnline: updatedUser.isOnline,
+          lastPlayed: updatedUser.lastPlayed,
+          updatedAt: updatedUser.lastActive
+        });
+      }
+    }
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1923,6 +2015,25 @@ app.post('/api/yt-download', async (req, res) => {
   }
 });
 
+app.post('/api/yt-download/upload', upload.single('mp3'), async (req, res) => {
+  try {
+    if (!req.file?.buffer?.length) {
+      return res.status(400).json({ error: 'No se recibió un archivo de audio válido.' });
+    }
+    const title = String(req.body.title || req.file.originalname || 'audio').trim();
+    const localFile = await saveMp3Locally(title, req.file.buffer, req.body.fileName);
+    res.json({
+      success: true,
+      title,
+      path: localFile.filePath,
+      fileName: localFile.fileName,
+      size: req.file.size
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/media/:fileId', async (req, res) => {
   try {
     const { fileId } = req.params;
@@ -2010,12 +2121,20 @@ const isMainModule = process.argv[1]
   && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 
 if (isMainModule) {
-  const port = process.env.PORT || 5000;
-  const server = app.listen(port, () => console.log(`Servidor corriendo en puerto ${port}`));
-  const io = new SocketIOServer(server, {
-    cors: { origin: true, credentials: true }
+  const requestedPort = process.env.PORT === '0' ? 0 : Number(process.env.PORT) || 5000;
+  const host = desktopDownloaderOnly ? '127.0.0.1' : undefined;
+  const server = app.listen(requestedPort, host, () => {
+    const boundPort = server.address().port;
+    console.log(desktopDownloaderOnly
+      ? `MMAMGC_DESKTOP_DOWNLOADER_READY:${boundPort}`
+      : `Servidor corriendo en puerto ${boundPort}`);
   });
-  realtimeIo = io;
+
+  if (!desktopDownloaderOnly) {
+    const io = new SocketIOServer(server, {
+      cors: { origin: true, credentials: true }
+    });
+    realtimeIo = io;
 
   io.use(async (socket, next) => {
     try {
@@ -2052,14 +2171,20 @@ if (isMainModule) {
       socket.data.friendIds = (user?.friends || []).map(String);
       return socket.data.friendIds;
     };
-    refreshFriendIds().then(friendIds => {
+    const onlinePresencePromise = User.findByIdAndUpdate(
+      authenticatedUserId,
+      { isOnline: true, lastActive: new Date() },
+      { returnDocument: 'after' }
+    ).select('lastActive').lean();
+    Promise.all([refreshFriendIds(), onlinePresencePromise]).then(([friendIds, onlineUser]) => {
       for (const friendId of friendIds) {
-        io.to(`user:${friendId}`).emit('presenceChanged', { userId: authenticatedUserId, isOnline: true });
+        io.to(`user:${friendId}`).emit('presenceChanged', {
+          userId: authenticatedUserId,
+          isOnline: true,
+          updatedAt: onlineUser?.lastActive
+        });
       }
-    }).catch(error => console.error('Error cargando amigos del socket:', error));
-    User.findByIdAndUpdate(authenticatedUserId, { isOnline: true, lastActive: new Date() }).catch(error => {
-      console.error('Error actualizando presencia en línea:', error);
-    });
+    }).catch(error => console.error('Error actualizando presencia y amigos del socket:', error));
 
     socket.on('friendsChanged', () => {
       refreshFriendIds().catch(error => console.error('Error actualizando amigos del socket:', error));
@@ -2140,12 +2265,13 @@ if (isMainModule) {
           normalizedId,
           { isOnline: false, lastActive: new Date() },
           { returnDocument: 'after' }
-        ).select('friends lastPlayed').lean();
+        ).select('friends lastPlayed lastActive').lean();
         for (const friendId of user?.friends || []) {
           io.to(`user:${friendId}`).emit('presenceChanged', {
             userId: normalizedId,
             isOnline: false,
-            lastPlayed: user.lastPlayed
+            lastPlayed: user.lastPlayed,
+            updatedAt: user.lastActive
           });
         }
       } catch (error) {
@@ -2153,6 +2279,7 @@ if (isMainModule) {
       }
     });
   });
+  }
   server.requestTimeout = 0;
   server.timeout = 0;
 }

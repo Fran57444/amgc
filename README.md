@@ -89,9 +89,20 @@ La API y Socket.IO deben ejecutarse en un proceso Node persistente. No despliegu
 
 El servicio usa el plan Starter para evitar la suspensión por inactividad y un disco persistente para que los MP3 locales generados no desaparezcan al reiniciar. El servidor de medios de Google Drive requiere las variables OAuth indicadas; sin ellas, esa función no estará disponible en producción.
 
+## Desplegar también en Vercel
+
+Vercel puede alojar una segunda instancia del frontend y de la API, conectada directamente a la misma base de MongoDB Atlas que Render. Esto no reemplaza ni modifica Render: ambos servicios siguen activos y leen/escriben la misma base.
+
+1. En Vercel, importa el mismo repositorio como un proyecto separado. `vercel.json` configura el frontend estático y enruta `/api/*` a `api/index.js`; `build:vercel` compila el cliente sin intentar abrir una conexión Socket.IO serverless.
+2. En **Project Settings → Environment Variables**, configura `MONGO_URI` con la misma URI de Atlas que usa Render y `JWT_SECRET` con el mismo secreto persistente para compartir sesiones. Si se usan, configura también `DRIVE_FOLDER_ID`, `GOOGLE_OAUTH_CREDENTIALS_JSON` y `GOOGLE_OAUTH_TOKEN_JSON`. No guardes secretos en Git.
+3. Si Atlas limita el acceso de red, permite la salida de Vercel con una opción de egress/IP estática disponible para tu plan. No abras Atlas a cualquier IP (`0.0.0.0/0`) salvo que comprendas y aceptes el riesgo.
+4. Despliega y comprueba `https://<proyecto>.vercel.app/api/health`; debe devolver `{"status":"ok","database":"connected"}`.
+
+Render conserva Socket.IO y el realtime completo para sus propios clientes. La versión de Vercel comparte los datos de Atlas, pero no recibe ni emite eventos de Socket.IO: presencia, actividad, mensajes y playlists modificados desde Vercel no se propagan instantáneamente a clientes de Render/Vercel. La persistencia de MP3 bajo `/mp3` también pertenece al disco de Render; el almacenamiento temporal de funciones Vercel no es un reemplazo de ese disco. Usa Render para estas funciones hasta migrarlas a almacenamiento compartido y un proveedor realtime compatible con serverless.
+
 ## Aplicación de escritorio Electron
 
-La versión de escritorio abre `https://mmamgc.onrender.com`, por lo que comparte el mismo servidor, las mismas cuentas y las mismas conexiones Socket.IO que la web. Presencia, actividad, seguimiento de reproducción, playlists y mensajes realtime siguen funcionando entre clientes. La autenticación y los datos offline permanecen en el perfil persistente de Electron. Para iniciar sesión y sincronizar con otras cuentas se necesita conexión al servidor; el modo offline de la aplicación usa las descargas locales ya guardadas.
+La versión de escritorio abre `https://mmamgc.onrender.com`, por lo que comparte el mismo servidor, las mismas cuentas y las mismas conexiones Socket.IO que la web. Presencia, actividad, seguimiento de reproducción, playlists y mensajes realtime siguen funcionando entre clientes. Para las descargas de YouTube, Electron inicia un proceso local limitado a esa tarea; el audio resultante se sube a Render para guardarlo en Drive o en su disco persistente. Así, la solicitud a YouTube sale desde el equipo que ejecuta Electron, mientras que la cuenta, la biblioteca y el realtime siguen usando Render. La autenticación y los datos offline permanecen en el perfil persistente de Electron. Para iniciar sesión y sincronizar con otras cuentas se necesita conexión al servidor; el modo offline de la aplicación usa las descargas locales ya guardadas.
 
 Para ejecutar el cliente contra el servidor publicado:
 
@@ -112,7 +123,7 @@ Para generar el instalador NSIS de Windows:
 npm run desktop:build
 ```
 
-El instalador se genera en `dist-electron`. Electron mantiene `nodeIntegration` desactivado, aislamiento de contexto y sandbox habilitados; los enlaces externos HTTP(S) se abren en el navegador predeterminado.
+El instalador se genera en `dist-electron`. El servicio local de descargas escucha solo en loopback, no carga la configuración MongoDB/Google del proyecto y usa una clave aleatoria efímera entre Electron y el proceso local. Electron mantiene `nodeIntegration` desactivado, aislamiento de contexto y sandbox habilitados; los enlaces externos HTTP(S) se abren en el navegador predeterminado.
 
 
 ## Comprobar cambios
