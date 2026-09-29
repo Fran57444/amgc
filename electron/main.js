@@ -212,10 +212,19 @@ async function publishDiscordPresence() {
                 end: startTimestamp + duration * 1000
             };
         }
-        await discordRpcClient.request('SET_ACTIVITY', {
+        const rpcResult = await discordRpcClient.request('SET_ACTIVITY', {
             pid: process.pid,
             activity
         });
+        if (largeImageKey && presence.assetApplicationId === discordRpcClientId) {
+            const acknowledgedImage = rpcResult?.assets?.large_image;
+            logDiscordArtworkStatus(
+                typeof acknowledgedImage === 'string' ? 'rpc-ack-with-image' : 'rpc-ack-no-image',
+                typeof acknowledgedImage === 'string'
+                    ? `Discord confirmó una imagen RPC (${acknowledgedImage.startsWith('mp:external/') ? 'mp:external' : 'otro formato'}).`
+                    : 'Discord aceptó SET_ACTIVITY, pero no devolvió la clave de imagen en la confirmación.'
+            );
+        }
         discordRpcLastError = null;
         discordRpcLastActivityAt = new Date().toISOString();
         logDiscordRpc('Presencia actualizada (reproduciendo).');
@@ -241,7 +250,9 @@ function connectDiscordRpc() {
         const activity = message.data?.activity || message.data?.data?.activity || message.data;
         const storedImage = activity?.assets?.large_image;
         if (typeof storedImage === 'string') {
-            logDiscordRpc(`Discord devolvió actividad con imagen (${storedImage.startsWith('mp:external/') ? 'mp:external' : 'otro formato'}).`);
+            logDiscordRpc(`Discord envió una actualización con imagen (${storedImage.startsWith('mp:external/') ? 'mp:external' : 'otro formato'}).`);
+        } else if (message.data?.activity || message.data?.data?.activity) {
+            logDiscordRpc('Discord envió una actualización de actividad sin large_image.');
         }
     });
 

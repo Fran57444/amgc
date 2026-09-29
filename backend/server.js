@@ -472,7 +472,10 @@ async function getDiscordExternalAssetKey(imageUrl) {
       },
       body: JSON.stringify({ urls: [imageUrl] })
     });
-    if (!response.ok) throw new Error(`Discord external-assets respondió ${response.status}.`);
+    if (!response.ok) {
+      const responseBody = (await response.text()).slice(0, 500);
+      throw new Error(`Discord external-assets respondió ${response.status}: ${responseBody || 'sin detalle'}`);
+    }
     const result = await response.json();
     const assetPath = result?.[0]?.external_asset_path;
     if (typeof assetPath !== 'string' || !assetPath) {
@@ -480,6 +483,11 @@ async function getDiscordExternalAssetKey(imageUrl) {
     }
 
     const assetKey = assetPath.startsWith('mp:') ? assetPath : `mp:${assetPath}`;
+    console.info(
+      `Discord external asset registrado (formato ${
+        assetKey.startsWith('mp:external/') ? 'mp:external' : 'inesperado'
+      }, ${assetKey.length} caracteres).`
+    );
     discordExternalAssetCache.set(imageUrl, assetKey);
     if (discordExternalAssetCache.size > 200) {
       discordExternalAssetCache.delete(discordExternalAssetCache.keys().next().value);
