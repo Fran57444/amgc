@@ -1388,10 +1388,16 @@ app.post('/api/discord/external-assets', async (req, res) => {
     }
 
     const largeImageKey = await getDiscordExternalAssetKey(imageUrl.href);
-    return res.json({ largeImageKey });
+    return res.json({
+      applicationId: process.env.DISCORD_CLIENT_ID,
+      largeImageKey
+    });
   } catch (error) {
     console.error('No se pudo registrar la portada de la canción en Discord:', error);
-    return res.status(502).json({ error: 'Discord no pudo registrar la portada de esta canción.' });
+    return res.status(502).json({
+      error: 'Discord no pudo registrar la portada de esta canción.',
+      reason: error.message || 'Error desconocido al registrar el asset.'
+    });
   }
 });
 

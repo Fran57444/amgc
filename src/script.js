@@ -4532,19 +4532,37 @@ export function initMusicPlayer() {
         const pendingRequest = discordArtworkRequests.get(cacheKey);
         if (pendingRequest) return pendingRequest;
 
-        const request = fetchJsonWithRetry(`${API_URL}/discord/external-assets`, {
+        const request = apiFetch(`${API_URL}/discord/external-assets`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ songId: track._id })
-        }, 1).then(result => {
-            if (typeof result.largeImageKey !== 'string' || !result.largeImageKey.startsWith('mp:')) {
+        }).then(async response => {
+            let result;
+            try {
+                result = await response.json();
+            } catch {
+                throw new Error(`El servidor devolvió una respuesta inválida al preparar la portada (${response.status}).`);
+            }
+            if (!result || typeof result !== 'object') {
+                throw new Error('El servidor devolvió datos inválidos al preparar la portada.');
+            }
+            if (!response.ok) {
+                const reason = typeof result.reason === 'string' ? ` ${result.reason}` : '';
+                throw new Error(`${result.error || 'No se pudo registrar la portada en Discord.'}${reason}`);
+            }
+            if (typeof result.largeImageKey !== 'string' || !result.largeImageKey.startsWith('mp:')
+                || typeof result.applicationId !== 'string') {
                 throw new Error('El servidor no devolvió una clave válida para la portada de Discord.');
             }
-            discordArtworkCache.set(cacheKey, result.largeImageKey);
+            const artwork = {
+                applicationId: result.applicationId,
+                largeImageKey: result.largeImageKey
+            };
+            discordArtworkCache.set(cacheKey, artwork);
             if (discordArtworkCache.size > 200) {
                 discordArtworkCache.delete(discordArtworkCache.keys().next().value);
             }
-            return result.largeImageKey;
+            return artwork;
         }).finally(() => {
             discordArtworkRequests.delete(cacheKey);
         });
@@ -4556,10 +4574,10 @@ export function initMusicPlayer() {
         const track = playlist[currentTrackIndex];
         if (!track) return;
         const publishPresence = async () => {
-            let largeImageKey = null;
+            let artwork = null;
             if (!audio.paused && !audio.ended) {
                 try {
-                    largeImageKey = await resolveDiscordArtworkKey(track);
+                    artwork = await resolveDiscordArtworkKey(track);
                 } catch (error) {
                     console.warn('No se pudo preparar la portada para Discord.', error);
                 }
@@ -4571,7 +4589,8 @@ export function initMusicPlayer() {
                 currentTime: Number.isFinite(audio.currentTime) ? audio.currentTime : 0,
                 duration: Number.isFinite(audio.duration) ? audio.duration : Number(track.duration) || 0,
                 isPlaying: !audio.paused && !audio.ended,
-                largeImageKey
+                largeImageKey: artwork?.largeImageKey || null,
+                assetApplicationId: artwork?.applicationId || null
             });
             if (status && (!status.configured || !status.connected || !status.published)) {
                 console.warn('Discord Rich Presence no está activa:', status);

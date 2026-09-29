@@ -193,9 +193,14 @@ async function publishDiscordPresence() {
             status_display_type: 2,
             instance: false
         };
-        if (largeImageKey) {
+        if (largeImageKey && presence.assetApplicationId === discordRpcClientId) {
             activity.assets = { large_image: largeImageKey };
             logDiscordArtworkStatus('attached', 'Portada externa añadida al payload RPC.');
+        } else if (largeImageKey) {
+            logDiscordArtworkStatus(
+                'application-mismatch',
+                'La portada fue registrada para otro DISCORD_CLIENT_ID; se publica la presencia sin portada.'
+            );
         } else {
             logDiscordArtworkStatus('no-cover', 'No se recibió una clave de portada para esta canción.');
         }
@@ -345,7 +350,9 @@ ipcMain.handle('mmamgc:discord-presence', async (event, presence) => {
         || !Number.isFinite(presence.currentTime)
         || !Number.isFinite(presence.duration)
         || (presence.largeImageKey !== undefined && presence.largeImageKey !== null
-            && typeof presence.largeImageKey !== 'string')) {
+            && typeof presence.largeImageKey !== 'string')
+        || (presence.assetApplicationId !== undefined && presence.assetApplicationId !== null
+            && (typeof presence.assetApplicationId !== 'string' || !/^\d{17,20}$/.test(presence.assetApplicationId)))) {
         throw new Error('La información de reproducción para Discord no es válida.');
     }
 
@@ -363,7 +370,8 @@ ipcMain.handle('mmamgc:discord-presence', async (event, presence) => {
         currentTime: Math.max(0, Math.min(presence.currentTime, duration)),
         duration,
         isPlaying: presence.isPlaying,
-        largeImageKey
+        largeImageKey,
+        assetApplicationId: presence.assetApplicationId || null
     };
     const published = await publishDiscordPresence();
     if (!discordRpcReady) logDiscordRpc('La interfaz envió el estado, pero Discord aún no está conectado.');
