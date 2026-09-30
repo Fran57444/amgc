@@ -212,19 +212,10 @@ async function publishDiscordPresence() {
                 end: startTimestamp + duration * 1000
             };
         }
-        const rpcResult = await discordRpcClient.request('SET_ACTIVITY', {
+        await discordRpcClient.request('SET_ACTIVITY', {
             pid: process.pid,
             activity
         });
-        if (largeImageKey && presence.assetApplicationId === discordRpcClientId) {
-            const acknowledgedImage = rpcResult?.assets?.large_image;
-            logDiscordArtworkStatus(
-                typeof acknowledgedImage === 'string' ? 'rpc-ack-with-image' : 'rpc-ack-no-image',
-                typeof acknowledgedImage === 'string'
-                    ? `Discord confirmó una imagen RPC (${acknowledgedImage.startsWith('mp:external/') ? 'mp:external' : 'otro formato'}).`
-                    : 'Discord aceptó SET_ACTIVITY, pero no devolvió la clave de imagen en la confirmación.'
-            );
-        }
         discordRpcLastError = null;
         discordRpcLastActivityAt = new Date().toISOString();
         logDiscordRpc('Presencia actualizada (reproduciendo).');

@@ -451,6 +451,34 @@ async function getDiscordAppAccessToken() {
   return discordAccessToken;
 }
 
+async function verifyDiscordCoverUrl(imageUrl) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch(imageUrl, {
+      headers: { Range: 'bytes=0-0' },
+      signal: controller.signal
+    });
+    const contentType = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() || '';
+    const finalUrl = new URL(response.url);
+    await response.body?.cancel();
+    if (!response.ok) {
+      throw new Error(`la URL de portada respondió HTTP ${response.status} desde ${finalUrl.host}`);
+    }
+    if (finalUrl.protocol !== 'https:') {
+      throw new Error(`la URL de portada redirigió a un destino no HTTPS (${finalUrl.host})`);
+    }
+    if (!contentType.startsWith('image/')) {
+      throw new Error(`la URL de portada respondió "${contentType || 'sin Content-Type'}" desde ${finalUrl.host}`);
+    }
+    console.info(
+      `Discord portada accesible (HTTP ${response.status}, ${contentType}, destino HTTPS ${finalUrl.host}).`
+    );
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function getDiscordExternalAssetKey(imageUrl) {
   const cachedKey = discordExternalAssetCache.get(imageUrl);
   if (cachedKey) return cachedKey;
@@ -463,6 +491,7 @@ async function getDiscordExternalAssetKey(imageUrl) {
       throw new Error('Discord external assets no están configurados en el servidor.');
     }
 
+    await verifyDiscordCoverUrl(imageUrl);
     const accessToken = await getDiscordAppAccessToken();
     const response = await fetch(`https://discord.com/api/v10/applications/${clientId}/external-assets`, {
       method: 'POST',
