@@ -1,13 +1,13 @@
 services:
   - type: web
-    name: mmamgc
+    name: amgc
     runtime: node
     plan: starter
     buildCommand: npm ci --include=dev && npm run build
     startCommand: npm start
     healthCheckPath: /healthz
     disk:
-      name: mmamgc-audio
+      name: amgc-audio
       mountPath: /opt/render/project/src/public/mp3
       sizeGB: 10
     envVars:

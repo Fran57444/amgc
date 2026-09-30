@@ -91,9 +91,9 @@ function startLocalDownloader() {
         env: {
             ...inheritedEnvironment,
             ELECTRON_RUN_AS_NODE: '1',
-            MMAMGC_DESKTOP_DOWNLOADER: 'true',
-            MMAMGC_DESKTOP_DOWNLOAD_KEY: desktopDownloadKey,
-            MMAMGC_DESKTOP_DOWNLOAD_DIRECTORY: getLocalMp3Directory(),
+            amgc_DESKTOP_DOWNLOADER: 'true',
+            amgc_DESKTOP_DOWNLOAD_KEY: desktopDownloadKey,
+            amgc_DESKTOP_DOWNLOAD_DIRECTORY: getLocalMp3Directory(),
             NODE_ENV: 'development',
             PORT: '0',
             ...(youtubeCookiesFile ? { YOUTUBE_COOKIES_FILE: youtubeCookiesFile } : {})
@@ -116,7 +116,7 @@ function startLocalDownloader() {
 
         downloaderProcess.stdout.on('data', chunk => {
             stdoutBuffer += chunk.toString();
-            const readyMatch = stdoutBuffer.match(/MMAMGC_DESKTOP_DOWNLOADER_READY:(\d+)/);
+            const readyMatch = stdoutBuffer.match(/amgc_DESKTOP_DOWNLOADER_READY:(\d+)/);
             if (!readyMatch || settled) return;
             settled = true;
             clearTimeout(timeout);
@@ -297,7 +297,7 @@ function startDiscordRpc() {
     }
 }
 
-ipcMain.handle('mmamgc:download-youtube', async (event, ytLink, fileName, saveLocally = false) => {
+ipcMain.handle('amgc:download-youtube', async (event, ytLink, fileName, saveLocally = false) => {
     if (!isTrustedSender(event)) throw new Error('Origen no autorizado para usar el descargador local.');
     let url;
     try {
@@ -341,7 +341,7 @@ ipcMain.handle('mmamgc:download-youtube', async (event, ytLink, fileName, saveLo
     };
 });
 
-ipcMain.handle('mmamgc:discord-presence', async (event, presence) => {
+ipcMain.handle('amgc:discord-presence', async (event, presence) => {
     if (!isTrustedSender(event)) throw new Error('Origen no autorizado para actualizar Discord.');
     if (!presence || typeof presence !== 'object'
         || typeof presence.songName !== 'string'
@@ -357,7 +357,7 @@ ipcMain.handle('mmamgc:discord-presence', async (event, presence) => {
 
     const songName = presence.songName.trim().slice(0, 128);
     const artist = presence.artist.trim().slice(0, 128) || 'Artista desconocido';
-    const discordImageText = (presence.discordImageText === undefined ? 'mmamgc' : presence.discordImageText).trim();
+    const discordImageText = (presence.discordImageText === undefined ? 'amgc' : presence.discordImageText).trim();
     if (discordImageText.length > 128) throw new Error('El texto de portada para Discord no puede superar 128 caracteres.');
     if (!songName) throw new Error('La canción para Discord no puede estar vacía.');
     const duration = Math.max(0, Math.min(presence.duration, 86400));
@@ -395,7 +395,7 @@ ipcMain.handle('mmamgc:discord-presence', async (event, presence) => {
     };
 });
 
-ipcMain.handle('mmamgc:discord-status', event => {
+ipcMain.handle('amgc:discord-status', event => {
     if (!isTrustedSender(event)) throw new Error('Origen no autorizado para consultar Discord.');
     return {
         configured: Boolean(discordRpcClientId),
@@ -405,7 +405,7 @@ ipcMain.handle('mmamgc:discord-status', event => {
     };
 });
 
-ipcMain.handle('mmamgc:open-local-mp3-folder', async event => {
+ipcMain.handle('amgc:open-local-mp3-folder', async event => {
     if (!isTrustedSender(event)) throw new Error('Origen no autorizado para abrir esta carpeta.');
     const directory = getLocalMp3Directory();
     await mkdir(directory, { recursive: true });

@@ -1,5 +1,5 @@
-const SHELL_CACHE = 'mmamgc-app-shell-v4';
-const DATABASE_NAME = 'mmamgc-offline-cache';
+const SHELL_CACHE = 'amgc-app-shell-v4';
+const DATABASE_NAME = 'amgc-offline-cache';
 const DATABASE_VERSION = 3;
 
 self.addEventListener('install', event => {
@@ -22,7 +22,7 @@ self.addEventListener('activate', event => {
     event.waitUntil((async () => {
         const cacheNames = await caches.keys();
         await Promise.all(cacheNames
-            .filter(name => name.startsWith('mmamgc-app-shell-') && name !== SHELL_CACHE)
+            .filter(name => name.startsWith('amgc-app-shell-') && name !== SHELL_CACHE)
             .map(name => caches.delete(name)));
         await self.clients.claim();
     })());

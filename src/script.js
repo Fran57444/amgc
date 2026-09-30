@@ -18,11 +18,11 @@ import {
 export function initMusicPlayer() {
     const API_URL = import.meta.env.VITE_API_URL || '/api';
     const realtimeEnabled = import.meta.env.VITE_REALTIME_ENABLED !== 'false';
-    const desktopYoutubeDownloader = window.mmamgcDesktop?.downloadYoutubeAudio;
-    const desktopYoutubeLocalSaver = window.mmamgcDesktop?.saveYoutubeAudioLocally;
-    const desktopOpenLocalMp3Folder = window.mmamgcDesktop?.openLocalMp3Folder;
-    const desktopSetDiscordPresence = window.mmamgcDesktop?.setDiscordPresence;
-    const accessTokenStorageKey = 'mmamgc-access-token';
+    const desktopYoutubeDownloader = window.amgcDesktop?.downloadYoutubeAudio;
+    const desktopYoutubeLocalSaver = window.amgcDesktop?.saveYoutubeAudioLocally;
+    const desktopOpenLocalMp3Folder = window.amgcDesktop?.openLocalMp3Folder;
+    const desktopSetDiscordPresence = window.amgcDesktop?.setDiscordPresence;
+    const accessTokenStorageKey = 'amgc-access-token';
     let accessToken = localStorage.getItem(accessTokenStorageKey) || '';
     let isLoggingOut = false;
     let offlineOnly = false;
@@ -177,7 +177,7 @@ export function initMusicPlayer() {
         localStorage.removeItem(accessTokenStorageKey);
         socket.disconnect();
         setStoredUser(null);
-        localStorage.removeItem('mmamgc-offline-user');
+        localStorage.removeItem('amgc-offline-user');
         showAuthOverlay();
         showToast('Esta cuenta fue eliminada. Inicia sesión con otra cuenta.', true);
     });
@@ -233,7 +233,7 @@ export function initMusicPlayer() {
         if (response.status === 401 && !String(url).includes('/auth/login')) {
             accessToken = '';
             localStorage.removeItem(accessTokenStorageKey);
-            localStorage.removeItem('mmamgc-user');
+            localStorage.removeItem('amgc-user');
             socket.disconnect();
             const overlay = document.getElementById('auth-overlay');
             if (overlay) overlay.style.display = 'flex';
@@ -348,13 +348,13 @@ export function initMusicPlayer() {
             `friend:${user._id}:photo`
         );
         if (!profilePhoto) return;
-        localStorage.setItem('mmamgc-user', JSON.stringify({ ...user, profilePhoto }));
+        localStorage.setItem('amgc-user', JSON.stringify({ ...user, profilePhoto }));
         renderProfile();
     };
     const handleOfflineStorageChange = event => {
-        if (!event.key?.startsWith('mmamgc-offline-enabled-')) return;
+        if (!event.key?.startsWith('amgc-offline-enabled-')) return;
         const user = getStoredUser() || getCachedOfflineUser();
-        if (!user?._id || event.key !== `mmamgc-offline-enabled-${user._id}`) return;
+        if (!user?._id || event.key !== `amgc-offline-enabled-${user._id}`) return;
         offlineModeEnabled = event.newValue === 'true';
         if (offlineModeToggle) offlineModeToggle.checked = offlineModeEnabled;
         if (offlineModeEnabled) syncOfflineResources();
@@ -725,7 +725,7 @@ export function initMusicPlayer() {
     let adminUsersCache = null;
     let adminUsersCacheOwnerId = null;
     let adminUsersRequestToken = 0;
-    const timedLyricsStorageKey = 'mmamgc-timed-lyrics-v1';
+    const timedLyricsStorageKey = 'amgc-timed-lyrics-v1';
     const defaultSecretPhrases = [];
     let timedLyricsByTrack = {};
     let secretPhrases = defaultSecretPhrases;
@@ -1218,7 +1218,7 @@ export function initMusicPlayer() {
     const syncDiscordImageTextFromUser = (user) => {
         const imageText = user?.settings?.discordImageText;
         if (discordPresenceImageTextInput) {
-            discordPresenceImageTextInput.value = typeof imageText === 'string' ? imageText : 'mmamgc';
+            discordPresenceImageTextInput.value = typeof imageText === 'string' ? imageText : 'amgc';
         }
     };
 
@@ -1236,7 +1236,7 @@ export function initMusicPlayer() {
 
     const getStoredUser = () => {
         try {
-            const raw = localStorage.getItem('mmamgc-user');
+            const raw = localStorage.getItem('amgc-user');
             return raw ? JSON.parse(raw) : null;
         } catch {
             return null;
@@ -1245,7 +1245,7 @@ export function initMusicPlayer() {
 
     const getCachedOfflineUser = () => {
         try {
-            const record = JSON.parse(localStorage.getItem('mmamgc-offline-user') || 'null');
+            const record = JSON.parse(localStorage.getItem('amgc-offline-user') || 'null');
             return record?.user || null;
         } catch {
             return null;
@@ -1262,7 +1262,7 @@ export function initMusicPlayer() {
         if (!user?._id || offlineListeningBuffer <= 0) return;
         const now = Date.now();
         if (!force && offlineListeningBuffer < 5 && now - offlineListeningLastPersistAt < 10000) return;
-        const key = `mmamgc-offline-listening-${user._id}`;
+        const key = `amgc-offline-listening-${user._id}`;
         try {
             const stored = JSON.parse(localStorage.getItem(key) || 'null') || {};
             const seconds = Math.max(0, Number(stored.seconds) || 0) + offlineListeningBuffer;
@@ -1293,7 +1293,7 @@ export function initMusicPlayer() {
         offlineListeningSyncInProgress = true;
         let syncedAnyBatch = false;
         try {
-            const key = `mmamgc-offline-listening-${user._id}`;
+            const key = `amgc-offline-listening-${user._id}`;
             while (navigator.onLine && !offlineOnly) {
                 let pending;
                 try {
@@ -1349,11 +1349,11 @@ export function initMusicPlayer() {
         if (!user?._id) return;
         let verifier = null;
         try {
-            verifier = JSON.parse(localStorage.getItem('mmamgc-offline-user') || 'null')?.verifier || null;
+            verifier = JSON.parse(localStorage.getItem('amgc-offline-user') || 'null')?.verifier || null;
         } catch {
             verifier = null;
         }
-        localStorage.setItem('mmamgc-offline-user', JSON.stringify({ user, verifier }));
+        localStorage.setItem('amgc-offline-user', JSON.stringify({ user, verifier }));
     };
 
     async function deriveOfflinePasswordVerifier(password, salt) {
@@ -1378,19 +1378,19 @@ export function initMusicPlayer() {
     }
 
     async function saveOfflineCredential(password) {
-        const record = JSON.parse(localStorage.getItem('mmamgc-offline-user') || 'null') || {};
+        const record = JSON.parse(localStorage.getItem('amgc-offline-user') || 'null') || {};
         const salt = crypto.getRandomValues(new Uint8Array(16));
         const verifier = await deriveOfflinePasswordVerifier(password, salt);
         record.verifier = {
             salt: Array.from(salt),
             hash: Array.from(verifier)
         };
-        localStorage.setItem('mmamgc-offline-user', JSON.stringify(record));
+        localStorage.setItem('amgc-offline-user', JSON.stringify(record));
     }
 
     async function verifyOfflineCredential(password, userId) {
         try {
-            const record = JSON.parse(localStorage.getItem('mmamgc-offline-user') || 'null');
+            const record = JSON.parse(localStorage.getItem('amgc-offline-user') || 'null');
             if (
                 String(record?.user?._id) !== String(userId)
                 || !Array.isArray(record?.verifier?.salt)
@@ -1414,16 +1414,16 @@ export function initMusicPlayer() {
     };
 
     const isOfflineEnabledFor = (userId) => (
-        localStorage.getItem(`mmamgc-offline-enabled-${userId}`) === 'true'
+        localStorage.getItem(`amgc-offline-enabled-${userId}`) === 'true'
     );
 
     const setStoredUser = (user) => {
         if (!user) {
-            localStorage.removeItem('mmamgc-user');
+            localStorage.removeItem('amgc-user');
             syncDiscordImageTextFromUser(null);
             return;
         }
-        localStorage.setItem('mmamgc-user', JSON.stringify(user));
+        localStorage.setItem('amgc-user', JSON.stringify(user));
         saveCachedOfflineUser(user);
         syncDiscordImageTextFromUser(user);
     };
@@ -1617,7 +1617,7 @@ export function initMusicPlayer() {
             if (!profileStats || !user?._id) return;
             const requestToken = ++profileStatsRequestToken;
             const profileId = String(user._id);
-            const cacheKey = `mmamgc-profile-stats-${profileId}`;
+            const cacheKey = `amgc-profile-stats-${profileId}`;
             const currentProfileId = () => String((selectedProfileUser || getStoredUser())?._id || '');
             const isCurrentProfileRequest = () => (
                 isProfileMode
@@ -1642,7 +1642,7 @@ export function initMusicPlayer() {
                 let pendingListeningSeconds = 0;
                 if (String(getStoredUser()?._id) === String(user._id)) {
                     try {
-                        const pending = JSON.parse(localStorage.getItem(`mmamgc-offline-listening-${user._id}`) || 'null');
+                        const pending = JSON.parse(localStorage.getItem(`amgc-offline-listening-${user._id}`) || 'null');
                         pendingListeningSeconds = Math.max(0, Number(pending?.seconds) || 0) + offlineListeningBuffer;
                     } catch (error) {
                         console.warn('No se pudo leer la escucha offline pendiente del perfil.', error);
@@ -1898,7 +1898,7 @@ export function initMusicPlayer() {
         const now = Date.now();
         if (!force && now - lastPlaybackPersistenceAt < 5000) return;
         lastPlaybackPersistenceAt = now;
-        localStorage.setItem(`mmamgc-last-playback-${user._id}`, JSON.stringify({
+        localStorage.setItem(`amgc-last-playback-${user._id}`, JSON.stringify({
             songId: track._id,
             currentTime: Number.isFinite(audio.currentTime) ? audio.currentTime : 0
         }));
@@ -2329,7 +2329,7 @@ export function initMusicPlayer() {
     }
 
     function chatDraftsKey(userId, friendId) {
-        return `mmamgc-chat-drafts-${userId}-${friendId}`;
+        return `amgc-chat-drafts-${userId}-${friendId}`;
     }
 
     function readLocalChatMessages(userId, friendId) {
@@ -2470,7 +2470,7 @@ export function initMusicPlayer() {
         }
         localChatMessages = readLocalChatMessages(getStoredUser()?._id, friendId);
         serverChatMessages = [];
-        localStorage.setItem(`mmamgc-chat-read-${friendId}`, new Date().toISOString());
+        localStorage.setItem(`amgc-chat-read-${friendId}`, new Date().toISOString());
         if (chatTitle) chatTitle.textContent = `${activeChatFriendName}`;
         if (chatTitleStatus) {
             chatTitleStatus.hidden = false;
@@ -3227,7 +3227,7 @@ export function initMusicPlayer() {
             customQueue = [];
             resetPlaybackHistory();
             if (loggingOutUser?._id) localStorage.removeItem(getOfflinePreferenceKey(loggingOutUser._id));
-            localStorage.removeItem('mmamgc-offline-user');
+            localStorage.removeItem('amgc-offline-user');
             if (offlineModeToggle) offlineModeToggle.checked = false;
             setStoredUser(null);
             syncOfflineStatusIndicators();
@@ -3910,7 +3910,7 @@ export function initMusicPlayer() {
     }
 
     function getOfflinePreferenceKey(userId) {
-        return `mmamgc-offline-enabled-${userId}`;
+        return `amgc-offline-enabled-${userId}`;
     }
 
     function getOfflineResourceUrl(resource) {
@@ -4393,7 +4393,7 @@ export function initMusicPlayer() {
             let savedPlayback = null;
             if (user?._id) {
                 try {
-                    savedPlayback = JSON.parse(localStorage.getItem(`mmamgc-last-playback-${user._id}`) || 'null');
+                    savedPlayback = JSON.parse(localStorage.getItem(`amgc-last-playback-${user._id}`) || 'null');
                 } catch {
                     savedPlayback = null;
                 }
@@ -4624,7 +4624,7 @@ export function initMusicPlayer() {
             largeImageUrl: resolveDiscordArtworkUrl(track),
             discordImageText: typeof discordImageText === 'string'
                 ? discordImageText
-                : 'mmamgc'
+                : 'amgc'
         });
         void statusPromise.then(status => {
             if (status && (!status.configured || !status.connected || !status.published)) {
@@ -6724,7 +6724,7 @@ export function initMusicPlayer() {
             }
         }
         if (currentUser?._id && shouldPlay) {
-            localStorage.setItem(`mmamgc-last-playback-${currentUser._id}`, JSON.stringify({
+            localStorage.setItem(`amgc-last-playback-${currentUser._id}`, JSON.stringify({
                 songId: track._id,
                 currentTime: Number.isFinite(audio.currentTime) ? audio.currentTime : 0
             }));

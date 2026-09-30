@@ -1,4 +1,4 @@
-const DATABASE_NAME = 'mmamgc-offline-cache';
+const DATABASE_NAME = 'amgc-offline-cache';
 const DATABASE_VERSION = 3;
 
 let databasePromise;

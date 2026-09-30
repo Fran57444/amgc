@@ -22,7 +22,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 
-const desktopDownloaderOnly = process.env.MMAMGC_DESKTOP_DOWNLOADER === 'true';
+const desktopDownloaderOnly = process.env.amgc_DESKTOP_DOWNLOADER === 'true';
 if (!desktopDownloaderOnly) dotenv.config();
 
 const app = express();
@@ -161,7 +161,7 @@ const userSchema = new mongoose.Schema({
     seekSeconds: { type: Number, default: 5 },
     maxVolume: { type: Number, default: 200 },
     secretPhrases: { type: [String], default: [] },
-    discordImageText: { type: String, default: 'mmamgc' }
+    discordImageText: { type: String, default: 'amgc' }
   },
   stats: {
     songsPlayed: { type: Number, default: 0 },
@@ -694,7 +694,7 @@ app.post('/desktop/yt-download', async (req, res) => {
   const isLoopback = remoteAddress === '127.0.0.1'
     || remoteAddress === '::1'
     || remoteAddress === '::ffff:127.0.0.1';
-  const expectedKey = process.env.MMAMGC_DESKTOP_DOWNLOAD_KEY || '';
+  const expectedKey = process.env.amgc_DESKTOP_DOWNLOAD_KEY || '';
   const receivedKey = req.get('x-desktop-download-key') || '';
   const expectedKeyBuffer = Buffer.from(expectedKey);
   const receivedKeyBuffer = Buffer.from(receivedKey);
@@ -719,7 +719,7 @@ app.post('/desktop/yt-download', async (req, res) => {
       title,
       buffer,
       fileName,
-      process.env.MMAMGC_DESKTOP_DOWNLOAD_DIRECTORY
+      process.env.amgc_DESKTOP_DOWNLOAD_DIRECTORY
     );
     res.json({ title, fileName: localFile.fileName, path: localFile.filePath });
   } catch (error) {
@@ -2218,7 +2218,7 @@ if (isMainModule) {
   const server = app.listen(requestedPort, host, () => {
     const boundPort = server.address().port;
     console.log(desktopDownloaderOnly
-      ? `MMAMGC_DESKTOP_DOWNLOADER_READY:${boundPort}`
+      ? `amgc_DESKTOP_DOWNLOADER_READY:${boundPort}`
       : `Servidor corriendo en puerto ${boundPort}`);
   });
 

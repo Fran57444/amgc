@@ -1,5 +1,5 @@
 {
-  "name": "massivemodelamiraclegrowingconstantly",
+  "name": "amiraclegrowingconstantly",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -18,8 +18,8 @@
     "preview": "vite preview"
   },
   "build": {
-    "appId": "com.fran57444.mmamgc",
-    "productName": "MMAMGC",
+    "appId": "com.fran57444.amgc",
+    "productName": "AMGC",
     "directories": {
       "output": "dist-electron"
     },

@@ -27,9 +27,9 @@ function App() {
       <div id="auth-overlay" className="auth-overlay">
         <div className="auth-box">
           <pre className="auth-ascii">{appAscii}</pre>
-          <label htmlFor="auth-username">private@mmamgc~$User</label>
+          <label htmlFor="auth-username">private@amgc~$User</label>
           <input type="text" id="auth-username" autoComplete="username" />
-          <label htmlFor="auth-password">private@mmamgc~$Password</label>
+          <label htmlFor="auth-password">private@amgc~$Password</label>
           <input type="password" id="auth-password" autoComplete="current-password" />
           <button id="auth-btn-submit" className="main-play-btn">Ingresar</button>
           <div id="auth-error" className="auth-error"></div>
