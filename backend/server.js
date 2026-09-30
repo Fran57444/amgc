@@ -160,7 +160,8 @@ const userSchema = new mongoose.Schema({
   settings: {
     seekSeconds: { type: Number, default: 5 },
     maxVolume: { type: Number, default: 200 },
-    secretPhrases: { type: [String], default: [] }
+    secretPhrases: { type: [String], default: [] },
+    discordImageText: { type: String, default: 'mmamgc' }
   },
   stats: {
     songsPlayed: { type: Number, default: 0 },
@@ -1105,6 +1106,12 @@ app.post('/api/users/settings', async (req, res) => {
     )) {
       return res.status(400).json({ error: 'secretPhrases debe ser una lista de frases de texto.' });
     }
+    if (settings.discordImageText !== undefined && (
+      typeof settings.discordImageText !== 'string'
+      || settings.discordImageText.length > 128
+    )) {
+      return res.status(400).json({ error: 'discordImageText debe ser texto de hasta 128 caracteres.' });
+    }
     const user = await User.findById(userId);
     if (!user) return res.status(404).json({ error: 'Usuario no encontrado.' });
 
@@ -1119,6 +1126,9 @@ app.post('/api/users/settings', async (req, res) => {
         : {}),
       ...(settings.secretPhrases !== undefined
         ? { secretPhrases: settings.secretPhrases.map(phrase => phrase.trim()).filter(Boolean) }
+        : {}),
+      ...(settings.discordImageText !== undefined
+        ? { discordImageText: settings.discordImageText.trim() }
         : {})
     };
     await user.save();

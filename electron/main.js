@@ -178,7 +178,7 @@ async function publishDiscordPresence() {
             return true;
         }
 
-        const { songName, artist, currentTime, duration, isPlaying, largeImageUrl } = presence;
+        const { songName, artist, currentTime, duration, isPlaying, largeImageUrl, discordImageText } = presence;
         if (!isPlaying) {
             await discordRpcClient.clearActivity();
             discordRpcLastActivityAt = null;
@@ -196,7 +196,7 @@ async function publishDiscordPresence() {
         if (largeImageUrl) {
             activity.assets = {
                 large_image: largeImageUrl,
-                large_text: 'mmamgc'
+                ...(discordImageText ? { large_text: discordImageText } : {})
             };
             logDiscordArtworkStatus('attached', 'URL HTTPS de portada adjuntada al payload RPC.');
         } else {
@@ -350,12 +350,15 @@ ipcMain.handle('mmamgc:discord-presence', async (event, presence) => {
         || !Number.isFinite(presence.currentTime)
         || !Number.isFinite(presence.duration)
         || (presence.largeImageUrl !== undefined && presence.largeImageUrl !== null
-            && typeof presence.largeImageUrl !== 'string')) {
+            && typeof presence.largeImageUrl !== 'string')
+        || (presence.discordImageText !== undefined && typeof presence.discordImageText !== 'string')) {
         throw new Error('La información de reproducción para Discord no es válida.');
     }
 
     const songName = presence.songName.trim().slice(0, 128);
     const artist = presence.artist.trim().slice(0, 128) || 'Artista desconocido';
+    const discordImageText = (presence.discordImageText === undefined ? 'mmamgc' : presence.discordImageText).trim();
+    if (discordImageText.length > 128) throw new Error('El texto de portada para Discord no puede superar 128 caracteres.');
     if (!songName) throw new Error('La canción para Discord no puede estar vacía.');
     const duration = Math.max(0, Math.min(presence.duration, 86400));
     let largeImageUrl = null;
@@ -378,7 +381,8 @@ ipcMain.handle('mmamgc:discord-presence', async (event, presence) => {
         currentTime: Math.max(0, Math.min(presence.currentTime, duration)),
         duration,
         isPlaying: presence.isPlaying,
-        largeImageUrl
+        largeImageUrl,
+        discordImageText
     };
     const published = await publishDiscordPresence();
     if (!discordRpcReady) logDiscordRpc('La interfaz envió el estado, pero Discord aún no está conectado.');

@@ -256,6 +256,23 @@ function App() {
             </div>
 
             <div className="settings-section">
+              <h3>Discord Rich Presence</h3>
+              <p>Personaliza el texto que aparece en discord. Déjalo vacío para que no se muestre.</p>
+              <label htmlFor="discord-presence-image-text">TEXTO DS</label>
+              <input
+                type="text"
+                id="discord-presence-image-text"
+                defaultValue=""
+                maxLength="128"
+                className="settings-input-dark"
+              />
+              <div className="lyrics-editor-actions">
+                <button id="btn-save-discord-presence-image-text" className="main-play-btn lyrics-editor-btn" type="button">Guardar texto</button>
+                <span id="discord-presence-image-text-status" className="lyrics-editor-status" aria-live="polite"></span>
+              </div>
+            </div>
+
+            <div className="settings-section">
               <h3>Modo offline</h3>
               <p>Se descargan canciones, fotos y playlists en la cache para escuchar incluso sin conexión.</p>
               <label className="offline-mode-toggle" htmlFor="offline-mode-toggle">

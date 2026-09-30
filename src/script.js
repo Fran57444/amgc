@@ -549,6 +549,9 @@ export function initMusicPlayer() {
     const allSongsSearch = document.getElementById("all-songs-search");
     const inputSeekSeconds = document.getElementById("input-seek-seconds");
     const inputMaxVolume = document.getElementById("input-max-volume");
+    const discordPresenceImageTextInput = document.getElementById("discord-presence-image-text");
+    const btnSaveDiscordPresenceImageText = document.getElementById("btn-save-discord-presence-image-text");
+    const discordPresenceImageTextStatus = document.getElementById("discord-presence-image-text-status");
     const offlineModeToggle = document.getElementById('offline-mode-toggle');
     const offlineCacheProgress = document.getElementById('offline-cache-progress');
     const offlineCacheStatus = document.getElementById('offline-cache-status');
@@ -1211,6 +1214,13 @@ export function initMusicPlayer() {
         if (secretText && !previousSecretPhrase && secretPhrases.length > 0) showRandomSecretPhrase();
     };
 
+    const syncDiscordImageTextFromUser = (user) => {
+        const imageText = user?.settings?.discordImageText;
+        if (discordPresenceImageTextInput) {
+            discordPresenceImageTextInput.value = typeof imageText === 'string' ? imageText : 'mmamgc';
+        }
+    };
+
     const hideAuthOverlay = () => {
         if (authOverlay) {
             authOverlay.style.display = 'none';
@@ -1409,10 +1419,12 @@ export function initMusicPlayer() {
     const setStoredUser = (user) => {
         if (!user) {
             localStorage.removeItem('mmamgc-user');
+            syncDiscordImageTextFromUser(null);
             return;
         }
         localStorage.setItem('mmamgc-user', JSON.stringify(user));
         saveCachedOfflineUser(user);
+        syncDiscordImageTextFromUser(user);
     };
 
     const canCurrentUser = (permission) => {
@@ -4523,6 +4535,7 @@ export function initMusicPlayer() {
     audio.volume = currentVolume;
     const discordArtworkCache = new Map();
     const discordArtworkRequests = new Map();
+    let discordPresenceUpdateId = 0;
     const resolveDiscordArtworkUrl = async track => {
         if (offlineOnly || !navigator.onLine || !accessToken || !track?._id || !track.cover
             || track.cover === '/img/vinculo.png') return null;
@@ -4572,29 +4585,40 @@ export function initMusicPlayer() {
         if (!desktopSetDiscordPresence) return;
         const track = playlist[currentTrackIndex];
         if (!track) return;
-        const publishPresence = async () => {
-            let largeImageUrl = null;
-            if (!audio.paused && !audio.ended) {
-                try {
-                    largeImageUrl = await resolveDiscordArtworkUrl(track);
-                } catch (error) {
-                    console.warn('No se pudo preparar la portada para Discord.', error);
-                }
-            }
-            if (playlist[currentTrackIndex] !== track) return;
+        const updateId = ++discordPresenceUpdateId;
+        const publishPresence = async largeImageUrl => {
+            const discordImageText = getStoredUser()?.settings?.discordImageText;
             const status = await desktopSetDiscordPresence({
                 songName: track.name || 'Canción desconocida',
                 artist: track.artist || 'Artista desconocido',
                 currentTime: Number.isFinite(audio.currentTime) ? audio.currentTime : 0,
                 duration: Number.isFinite(audio.duration) ? audio.duration : Number(track.duration) || 0,
                 isPlaying: !audio.paused && !audio.ended,
-                largeImageUrl
+                largeImageUrl,
+                discordImageText: typeof discordImageText === 'string'
+                    ? discordImageText
+                    : 'mmamgc'
             });
             if (status && (!status.configured || !status.connected || !status.published)) {
                 console.warn('Discord Rich Presence no está activa:', status);
             }
         };
-        void publishPresence().catch(error => console.warn('No se pudo actualizar Discord Rich Presence.', error));
+        const isPlaying = !audio.paused && !audio.ended;
+        const cacheKey = `${track._id}:${track.cover}`;
+        const cachedImageUrl = discordArtworkCache.get(cacheKey) || null;
+
+        void publishPresence(cachedImageUrl).catch(error => {
+            console.warn('No se pudo actualizar Discord Rich Presence.', error);
+        });
+
+        if (!isPlaying || cachedImageUrl) return;
+        void resolveDiscordArtworkUrl(track).then(largeImageUrl => {
+            if (!largeImageUrl || updateId !== discordPresenceUpdateId
+                || playlist[currentTrackIndex] !== track || audio.paused || audio.ended) return;
+            return publishPresence(largeImageUrl);
+        }).catch(error => {
+            console.warn('No se pudo preparar la portada para Discord.', error);
+        });
     };
     if (editLyricsPreview) {
         editLyricsPreview.addEventListener('click', event => {
@@ -4629,6 +4653,7 @@ export function initMusicPlayer() {
         });
     }
     syncSecretPhrasesFromUser(getStoredUser());
+    syncDiscordImageTextFromUser(getStoredUser());
 
     if (btnSaveSecretPhrases) {
         btnSaveSecretPhrases.addEventListener('click', async () => {
@@ -4638,6 +4663,7 @@ export function initMusicPlayer() {
                 setEditorStatus(secretPhrasesStatus, 'Inicia sesión para guardar tus frases secretas.', true);
                 return;
             }
+
             btnSaveSecretPhrases.disabled = true;
             setEditorStatus(secretPhrasesStatus, 'Guardando frases...');
             try {
@@ -4660,6 +4686,43 @@ export function initMusicPlayer() {
                 setEditorStatus(secretPhrasesStatus, error.message || 'No se pudieron guardar las frases secretas.', true);
             } finally {
                 btnSaveSecretPhrases.disabled = false;
+            }
+        });
+    }
+
+    if (btnSaveDiscordPresenceImageText) {
+        btnSaveDiscordPresenceImageText.addEventListener('click', async () => {
+            const user = getStoredUser();
+            if (!user?._id) {
+                setEditorStatus(discordPresenceImageTextStatus, 'Inicia sesión para guardar este ajuste.', true);
+                return;
+            }
+            const discordImageText = (discordPresenceImageTextInput?.value || '').trim();
+            if (discordImageText.length > 128) {
+                setEditorStatus(discordPresenceImageTextStatus, 'El texto no puede superar 128 caracteres.', true);
+                return;
+            }
+            btnSaveDiscordPresenceImageText.disabled = true;
+            setEditorStatus(discordPresenceImageTextStatus, 'Guardando texto...');
+            try {
+                const response = await apiFetch(`${API_URL}/users/settings`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        userId: user._id,
+                        settings: { ...user.settings, discordImageText }
+                    })
+                });
+                const result = await response.json().catch(() => null);
+                if (!response.ok) throw new Error(result?.error || 'No se pudo guardar el texto de Discord.');
+                setStoredUser({ ...user, settings: result });
+                updateDiscordPresence();
+                setEditorStatus(discordPresenceImageTextStatus, discordImageText ? 'Texto guardado.' : 'Texto eliminado.');
+            } catch (error) {
+                console.error('No se pudo guardar el texto de Discord.', error);
+                setEditorStatus(discordPresenceImageTextStatus, error.message || 'No se pudo guardar el texto de Discord.', true);
+            } finally {
+                btnSaveDiscordPresenceImageText.disabled = false;
             }
         });
     }
