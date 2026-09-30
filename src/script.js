@@ -6960,6 +6960,7 @@ export function initMusicPlayer() {
     });
 
     audio.addEventListener('seeked', () => {
+        updateDiscordPresence();
         persistPlaybackPosition(true);
         broadcastPlaybackState(true);
         if (isEditSongMode) updateEditLyricsPreview();

@@ -194,7 +194,10 @@ async function publishDiscordPresence() {
             instance: false
         };
         if (largeImageUrl) {
-            activity.assets = { large_image: largeImageUrl };
+            activity.assets = {
+                large_image: largeImageUrl,
+                large_text: 'mmamgc'
+            };
             logDiscordArtworkStatus('attached', 'URL HTTPS de portada adjuntada al payload RPC.');
         } else {
             logDiscordArtworkStatus('no-cover', 'No se recibió una URL de portada para esta canción.');
