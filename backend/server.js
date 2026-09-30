@@ -479,6 +479,33 @@ async function verifyDiscordCoverUrl(imageUrl) {
   }
 }
 
+async function verifyDiscordExternalAsset(assetPath) {
+  const assetUrl = new URL(assetPath, 'https://media.discordapp.net/');
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch(assetUrl, {
+      headers: { Range: 'bytes=0-0' },
+      signal: controller.signal
+    });
+    const contentType = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() || '';
+    const finalUrl = new URL(response.url);
+    await response.body?.cancel();
+    if (!response.ok) {
+      throw new Error(`el CDN de Discord respondió HTTP ${response.status}`);
+    }
+    if (finalUrl.protocol !== 'https:' || finalUrl.hostname !== 'media.discordapp.net') {
+      throw new Error('el CDN de Discord redirigió a un destino inesperado');
+    }
+    if (!contentType.startsWith('image/')) {
+      throw new Error(`el CDN de Discord respondió "${contentType || 'sin Content-Type'}"`);
+    }
+    console.info(`Discord CDN de portada accesible (HTTP ${response.status}, ${contentType}).`);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function getDiscordExternalAssetKey(imageUrl) {
   const cachedKey = discordExternalAssetCache.get(imageUrl);
   if (cachedKey) return cachedKey;
@@ -517,6 +544,11 @@ async function getDiscordExternalAssetKey(imageUrl) {
         assetKey.startsWith('mp:external/') ? 'mp:external' : 'inesperado'
       }, ${assetKey.length} caracteres).`
     );
+    try {
+      await verifyDiscordExternalAsset(assetKey.slice(3));
+    } catch (error) {
+      console.warn('Discord no pudo validar la portada en su CDN:', error.message || error);
+    }
     discordExternalAssetCache.set(imageUrl, assetKey);
     if (discordExternalAssetCache.size > 200) {
       discordExternalAssetCache.delete(discordExternalAssetCache.keys().next().value);
