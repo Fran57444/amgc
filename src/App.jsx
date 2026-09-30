@@ -231,11 +231,11 @@ function App() {
               <h3>Reproducción</h3>
               <div className="field-row">
                 <label>TIEMPO DE SALTO EN SEGUNDOS</label>
-                <input 
-                  type="number" 
-                  id="input-seek-seconds" 
-                  defaultValue="5" 
-                  min="1" 
+                <input
+                  type="number"
+                  id="input-seek-seconds"
+                  defaultValue="5"
+                  min="1"
                   className="settings-input-dark settings-input-narrow"
                 />
               </div>
@@ -279,8 +279,8 @@ function App() {
                 <input type="checkbox" id="offline-mode-toggle" />
                 <span>Descargar</span>
               </label>
-              <span id="offline-cache-status" className="lyrics-editor-status" aria-live="polite">Descargas offline desactivadas.</span><br></br>
-            </div><br></br>
+              <span id="offline-cache-status" className="lyrics-editor-status" aria-live="polite">Descargas offline desactivadas.</span>
+            </div>
 
             <div className="settings-section">
               <h3>Frases</h3>
@@ -613,7 +613,7 @@ function App() {
 
               <div className="track-controls">
                 <button id="btn-rewind" className="control-btn seek-btn" type="button" title="Retroceder">
-                  «<span id="rewind-label" style={{fontSize:'0.7rem', marginLeft:'2px', opacity: 0.8}}></span>
+                  «
                 </button>
                 <button id="btn-prev" className="control-btn" type="button">⏮</button>
                 <button id="btn-playpause" className="control-btn" type="button">
@@ -621,7 +621,7 @@ function App() {
                 </button>
                 <button id="btn-next" className="control-btn" type="button">⏭</button>
                 <button id="btn-forward" className="control-btn seek-btn" type="button" title="Adelantar">
-                  <span id="forward-label" style={{fontSize:'0.7rem', marginRight:'2px', opacity: 0.8}}></span>»
+                  »
                 </button>
               </div>
               

@@ -68,7 +68,7 @@ export function initMusicPlayer() {
     socket.off('userStatsChanged').on('userStatsChanged', ({ userId } = {}) => {
         const profileUser = selectedProfileUser || getStoredUser();
         if (isProfileMode && profileUser?._id && String(profileUser._id) === String(userId)) {
-            renderProfile();
+            renderProfile(true);
         }
     });
     socket.off('userChanged').on('userChanged', async ({ userId } = {}) => {
@@ -86,8 +86,6 @@ export function initMusicPlayer() {
             if (Number.isFinite(Number(updatedUser.settings?.seekSeconds))) {
                 seekSeconds = Number(updatedUser.settings.seekSeconds);
                 if (inputSeekSeconds) inputSeekSeconds.value = String(seekSeconds);
-                if (rewindLabel) rewindLabel.textContent = `${seekSeconds}s`;
-                if (forwardLabel) forwardLabel.textContent = `${seekSeconds}s`;
             }
             if (Number.isFinite(Number(updatedUser.settings?.maxVolume))) {
                 maxVolume = Math.min(10, Math.max(1, Number(updatedUser.settings.maxVolume) / 100));
@@ -497,8 +495,6 @@ export function initMusicPlayer() {
     const btnNext = document.getElementById("btn-next");
     const btnRewind = document.getElementById("btn-rewind");
     const btnForward = document.getElementById("btn-forward");
-    const rewindLabel = document.getElementById("rewind-label");
-    const forwardLabel = document.getElementById("forward-label");
     const progressContainer = document.getElementById("progress-container");
     const progressBar = document.getElementById("progress-bar");
     const bottomBarCover = document.getElementById("bottom-bar-cover");
@@ -724,6 +720,11 @@ export function initMusicPlayer() {
     let lastPlaybackPersistenceAt = 0;
     let publicProfilePlaylists = null;
     let profilePlaylistsRequestToken = 0;
+    let profileStatsRequestToken = 0;
+    const profileStatsCache = new Map();
+    let adminUsersCache = null;
+    let adminUsersCacheOwnerId = null;
+    let adminUsersRequestToken = 0;
     const timedLyricsStorageKey = 'mmamgc-timed-lyrics-v1';
     const defaultSecretPhrases = [];
     let timedLyricsByTrack = {};
@@ -1455,7 +1456,7 @@ export function initMusicPlayer() {
         }
     }
 
-    function renderProfile() {
+    function renderProfile(forceStatsRefresh = false) {
         syncOfflineStatusIndicators();
         const user = selectedProfileUser || getStoredUser();
         const currentUser = getStoredUser();
@@ -1541,7 +1542,7 @@ export function initMusicPlayer() {
         };
 
         if (profileStats) {
-            loadProfileStats(user);
+            loadProfileStats(user, forceStatsRefresh);
         }
 
         if (profilePlaylists) {
@@ -1612,12 +1613,32 @@ export function initMusicPlayer() {
             }
         }
 
-        async function loadProfileStats(user) {
+        async function loadProfileStats(user, forceRefresh = false) {
             if (!profileStats || !user?._id) return;
-            const cacheKey = `mmamgc-profile-stats-${user._id}`;
+            const requestToken = ++profileStatsRequestToken;
+            const profileId = String(user._id);
+            const cacheKey = `mmamgc-profile-stats-${profileId}`;
             const currentProfileId = () => String((selectedProfileUser || getStoredUser())?._id || '');
+            const isCurrentProfileRequest = () => (
+                isProfileMode
+                && requestToken === profileStatsRequestToken
+                && currentProfileId() === profileId
+            );
+            const statElements = [
+                'profile-stat-role',
+                'profile-stat-hours',
+                'profile-stat-added',
+                'profile-stat-edited',
+                'profile-stat-friends',
+                'profile-stat-messages',
+                'profile-stat-created-at'
+            ];
+            statElements.forEach(id => {
+                const element = document.getElementById(id);
+                if (element) element.textContent = '…';
+            });
             const applyStats = stats => {
-                if (currentProfileId() !== String(user._id)) return;
+                if (!isCurrentProfileRequest()) return;
                 let pendingListeningSeconds = 0;
                 if (String(getStoredUser()?._id) === String(user._id)) {
                     try {
@@ -1647,16 +1668,25 @@ export function initMusicPlayer() {
                 });
             };
 
-            try {
-                const cachedStats = JSON.parse(localStorage.getItem(cacheKey) || 'null');
-                if (cachedStats) applyStats(cachedStats);
-            } catch (error) {
-                console.warn('No se pudieron leer las estadísticas guardadas del perfil.', error);
+            const isOwnProfile = String(getStoredUser()?._id) === profileId;
+            const memoryCachedStats = profileStatsCache.get(profileId);
+            if (memoryCachedStats) applyStats(memoryCachedStats.stats);
+            if (isOwnProfile) {
+                try {
+                    const cachedStats = JSON.parse(localStorage.getItem(cacheKey) || 'null');
+                    if (cachedStats && !memoryCachedStats) applyStats(cachedStats);
+                } catch (error) {
+                    console.warn('No se pudieron leer las estadísticas guardadas del perfil.', error);
+                }
             }
+
+            if (!forceRefresh && memoryCachedStats && Date.now() - memoryCachedStats.cachedAt < 30000) return;
 
             try {
                 const stats = await fetchJsonWithRetry(`${API_URL}/users/${user._id}/stats`, {}, 2);
-                if (String(getStoredUser()?._id) === String(user._id)) {
+                if (!isCurrentProfileRequest()) return;
+                profileStatsCache.set(profileId, { stats, cachedAt: Date.now() });
+                if (isOwnProfile) {
                     try {
                         localStorage.setItem(cacheKey, JSON.stringify(stats));
                     } catch (error) {
@@ -1666,6 +1696,12 @@ export function initMusicPlayer() {
                 applyStats(stats);
             } catch (error) {
                 console.warn('No se pudieron cargar las estadísticas del perfil', error);
+                if (isCurrentProfileRequest()) {
+                    statElements.forEach(id => {
+                        const element = document.getElementById(id);
+                        if (element) element.textContent = '—';
+                    });
+                }
             }
         }
 
@@ -3138,6 +3174,7 @@ export function initMusicPlayer() {
                 syncSecretPhrasesFromUser(restoredUser);
                 renderProfile();
                 syncAccessControls();
+                if (canCurrentUser('manage_users')) void loadAdminUsers();
                 startRealtime();
                 fetchMusicData();
                 loadPlaylists();
@@ -3271,6 +3308,7 @@ export function initMusicPlayer() {
                 syncSecretPhrasesFromUser(userPayload);
                 renderProfile();
                 syncAccessControls();
+                if (canCurrentUser('manage_users')) void loadAdminUsers();
                 startRealtime();
                 fetchMusicData();
                 loadPlaylists();
@@ -3411,17 +3449,11 @@ export function initMusicPlayer() {
             return;
         }
 
-        adminUsersList.innerHTML = '<li class="admin-user-row"><span class="admin-user-name">Cargando usuarios...</span></li>';
-
-        try {
-            const response = await apiFetch(`${API_URL}/users?requesterId=${encodeURIComponent(requester._id)}`);
-            const data = await response.json().catch(() => null);
-            if (!response.ok || !Array.isArray(data)) {
-                throw new Error(data?.error || 'No se pudieron cargar los usuarios.');
-            }
-
-            const users = data;
-
+        const requestToken = ++adminUsersRequestToken;
+        const canApplyResult = () => requestToken === adminUsersRequestToken
+            && String(getStoredUser()?._id || '') === String(requester._id)
+            && canCurrentUser('manage_users');
+        const renderAdminUsers = users => {
             if (!users.length) {
                 adminUsersList.innerHTML = '<li class="admin-user-row"><span class="admin-user-name">No hay usuarios disponibles.</span></li>';
                 return;
@@ -3471,9 +3503,29 @@ export function initMusicPlayer() {
                     </li>
                 `;
             }).join('');
+        };
+
+        if (adminUsersCache && adminUsersCacheOwnerId === String(requester._id)) {
+            renderAdminUsers(adminUsersCache);
+        } else {
+            adminUsersList.innerHTML = '<li class="admin-user-row"><span class="admin-user-name">Cargando usuarios...</span></li>';
+        }
+
+        try {
+            const response = await apiFetch(`${API_URL}/users?requesterId=${encodeURIComponent(requester._id)}`);
+            const data = await response.json().catch(() => null);
+            if (!response.ok || !Array.isArray(data)) {
+                throw new Error(data?.error || 'No se pudieron cargar los usuarios.');
+            }
+            if (!canApplyResult()) return;
+            adminUsersCache = data;
+            adminUsersCacheOwnerId = String(requester._id);
+            renderAdminUsers(data);
         } catch (error) {
             console.error(error);
-            adminUsersList.innerHTML = '<li class="admin-user-row"><span class="admin-user-name">No se pudieron cargar los usuarios.</span></li>';
+            if (canApplyResult() && (!adminUsersCache || adminUsersCacheOwnerId !== String(requester._id))) {
+                adminUsersList.innerHTML = '<li class="admin-user-row"><span class="admin-user-name">No se pudieron cargar los usuarios.</span></li>';
+            }
         }
     }
 
@@ -3549,6 +3601,13 @@ export function initMusicPlayer() {
                 const responseBody = await response.json().catch(() => null);
                 if (!response.ok) {
                     throw new Error(responseBody?.error || (editUserId ? 'No se pudo guardar el usuario.' : 'No se pudo crear el usuario.'));
+                }
+
+                const adminViewerId = String(getStoredUser()?._id || '');
+                if (adminUsersCache && adminUsersCacheOwnerId === adminViewerId && responseBody?._id) {
+                    const updatedUsers = adminUsersCache.filter(user => String(user._id) !== String(responseBody._id));
+                    updatedUsers.push(responseBody);
+                    adminUsersCache = updatedUsers.sort((left, right) => left.username.localeCompare(right.username));
                 }
 
                 adminUserForm.reset();
@@ -3690,6 +3749,9 @@ export function initMusicPlayer() {
                 if (!response.ok) {
                     throw new Error(result?.error || 'No se pudo eliminar el usuario.');
                 }
+                if (adminUsersCache && adminUsersCacheOwnerId === String(requester._id)) {
+                    adminUsersCache = adminUsersCache.filter(user => String(user._id) !== String(userId));
+                }
                 await loadAdminUsers();
             } catch (error) {
                 console.error(error);
@@ -3749,6 +3811,7 @@ export function initMusicPlayer() {
 
     let userPlaylists = [];
     let playlistRealtimeRefresh = Promise.resolve();
+    const pendingPlaylistTrackChanges = new Set();
     let songsRenderToken = 0;
     let statusHeartbeatTimer = null;
     let playlistIdPendingShare = null;
@@ -4533,91 +4596,42 @@ export function initMusicPlayer() {
     const audio = new Audio();
     audio.crossOrigin = "anonymous";
     audio.volume = currentVolume;
-    const discordArtworkCache = new Map();
-    const discordArtworkRequests = new Map();
-    let discordPresenceUpdateId = 0;
-    const resolveDiscordArtworkUrl = async track => {
-        if (offlineOnly || !navigator.onLine || !accessToken || !track?._id || !track.cover
+    const resolveDiscordArtworkUrl = track => {
+        if (offlineOnly || !navigator.onLine || !accessToken || !track?.cover
             || track.cover === '/img/vinculo.png') return null;
-        const cacheKey = `${track._id}:${track.cover}`;
-        const cachedImageUrl = discordArtworkCache.get(cacheKey);
-        if (cachedImageUrl) return cachedImageUrl;
-        const pendingRequest = discordArtworkRequests.get(cacheKey);
-        if (pendingRequest) return pendingRequest;
-
-        const request = apiFetch(`${API_URL}/discord/artwork-url`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ songId: track._id })
-        }).then(async response => {
-            let result;
-            try {
-                result = await response.json();
-            } catch {
-                throw new Error(`El servidor devolvió una respuesta inválida al preparar la portada (${response.status}).`);
-            }
-            if (!result || typeof result !== 'object') {
-                throw new Error('El servidor devolvió datos inválidos al preparar la portada.');
-            }
-            if (!response.ok) {
-                const reason = typeof result.reason === 'string' ? ` ${result.reason}` : '';
-                throw new Error(`${result.error || 'No se pudo registrar la portada en Discord.'}${reason}`);
-            }
-            if (typeof result.largeImageUrl !== 'string') {
-                throw new Error('El servidor no devolvió una URL válida para la portada de Discord.');
-            }
-            const artworkUrl = new URL(result.largeImageUrl);
-            if (artworkUrl.protocol !== 'https:') {
-                throw new Error('La portada de Discord debe usar una URL HTTPS.');
-            }
-            discordArtworkCache.set(cacheKey, artworkUrl.href);
-            if (discordArtworkCache.size > 200) {
-                discordArtworkCache.delete(discordArtworkCache.keys().next().value);
-            }
+        try {
+            const apiOrigin = new URL(API_URL, window.location.href).origin;
+            const artworkUrl = new URL(track.cover, `${apiOrigin}/`);
+            if (artworkUrl.protocol !== 'https:' || artworkUrl.origin !== apiOrigin
+                || artworkUrl.username || artworkUrl.password) return null;
             return artworkUrl.href;
-        }).finally(() => {
-            discordArtworkRequests.delete(cacheKey);
-        });
-        discordArtworkRequests.set(cacheKey, request);
-        return request;
+        } catch (error) {
+            console.warn('La URL de portada para Discord no es válida.', error);
+            return null;
+        }
     };
     const updateDiscordPresence = () => {
         if (!desktopSetDiscordPresence) return;
         const track = playlist[currentTrackIndex];
         if (!track) return;
-        const updateId = ++discordPresenceUpdateId;
-        const publishPresence = async largeImageUrl => {
-            const discordImageText = getStoredUser()?.settings?.discordImageText;
-            const status = await desktopSetDiscordPresence({
-                songName: track.name || 'Canción desconocida',
-                artist: track.artist || 'Artista desconocido',
-                currentTime: Number.isFinite(audio.currentTime) ? audio.currentTime : 0,
-                duration: Number.isFinite(audio.duration) ? audio.duration : Number(track.duration) || 0,
-                isPlaying: !audio.paused && !audio.ended,
-                largeImageUrl,
-                discordImageText: typeof discordImageText === 'string'
-                    ? discordImageText
-                    : 'mmamgc'
-            });
+        const discordImageText = getStoredUser()?.settings?.discordImageText;
+        const statusPromise = desktopSetDiscordPresence({
+            songName: track.name || 'Canción desconocida',
+            artist: track.artist || 'Artista desconocido',
+            currentTime: Number.isFinite(audio.currentTime) ? audio.currentTime : 0,
+            duration: Number.isFinite(audio.duration) ? audio.duration : Number(track.duration) || 0,
+            isPlaying: !audio.paused && !audio.ended,
+            largeImageUrl: resolveDiscordArtworkUrl(track),
+            discordImageText: typeof discordImageText === 'string'
+                ? discordImageText
+                : 'mmamgc'
+        });
+        void statusPromise.then(status => {
             if (status && (!status.configured || !status.connected || !status.published)) {
                 console.warn('Discord Rich Presence no está activa:', status);
             }
-        };
-        const isPlaying = !audio.paused && !audio.ended;
-        const cacheKey = `${track._id}:${track.cover}`;
-        const cachedImageUrl = discordArtworkCache.get(cacheKey) || null;
-
-        void publishPresence(cachedImageUrl).catch(error => {
-            console.warn('No se pudo actualizar Discord Rich Presence.', error);
-        });
-
-        if (!isPlaying || cachedImageUrl) return;
-        void resolveDiscordArtworkUrl(track).then(largeImageUrl => {
-            if (!largeImageUrl || updateId !== discordPresenceUpdateId
-                || playlist[currentTrackIndex] !== track || audio.paused || audio.ended) return;
-            return publishPresence(largeImageUrl);
         }).catch(error => {
-            console.warn('No se pudo preparar la portada para Discord.', error);
+            console.warn('No se pudo actualizar Discord Rich Presence.', error);
         });
     };
     if (editLyricsPreview) {
@@ -5865,7 +5879,8 @@ export function initMusicPlayer() {
         ));
 
         visiblePlaylists.forEach(pl => {
-            const alreadyAdded = pl.tracks.some(track => track._id === songId);
+            const alreadyAdded = pl.tracks.some(track => String(track._id) === String(songId));
+            const song = playlist[trackToAddIndex];
             const li = document.createElement('li');
             li.className = 'add-pl-item';
             li.innerHTML = `
@@ -5874,34 +5889,64 @@ export function initMusicPlayer() {
                 ${alreadyAdded ? '<small class="playlist-membership-status">Ya está añadida</small>' : ''}
             `;
             li.addEventListener('click', () => {
-                const isDuplicate = pl.tracks.some(track => track._id === songId);
+                if (li.dataset.saving === 'true') return;
+                const isDuplicate = pl.tracks.some(track => String(track._id) === String(songId));
                 if (isDuplicate) {
                     const status = li.querySelector('.playlist-membership-status');
-                    if (li.dataset.duplicateConfirm !== 'true') {
-                        li.dataset.duplicateConfirm = 'true';
-                        if (status) status.textContent = '¿Confirmar?';
-                        return;
-                    }
+                    if (status) status.textContent = 'Ya está añadida';
+                    return;
                 }
                 const currentUser = getStoredUser();
+                if (!currentUser?._id) {
+                    showToast('Inicia sesión para añadir canciones a una playlist.', true);
+                    return;
+                }
+                li.dataset.saving = 'true';
+                li.setAttribute('aria-disabled', 'true');
+                li.querySelector('.playlist-membership-status')?.remove();
+                const loadingStatus = document.createElement('small');
+                loadingStatus.className = 'playlist-membership-status';
+                loadingStatus.textContent = 'Añadiendo…';
+                li.appendChild(loadingStatus);
                 li.classList.add('is-loading');
+                const previousDuration = Number(pl.duration) || 0;
+                const optimisticAddedAt = new Date().toISOString();
+                pl.tracks.push({
+                    ...song,
+                    addedBy: { _id: currentUser._id, username: currentUser.username },
+                    addedAt: optimisticAddedAt
+                });
+                pl.duration = previousDuration + Math.max(0, Number(song.duration) || 0);
+                pl.updatedAt = optimisticAddedAt;
+                hideAllModals();
+                if (activePlaylistId === pl.id) openPlaylistView(pl.id);
+                showToast(`Añadiendo “${song?.name || 'la canción'}” a “${pl.name}”…`);
                 apiFetch(`${API_URL}/playlists/${encodeURIComponent(pl.id)}/tracks`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        userId: currentUser?._id,
+                        userId: currentUser._id,
                         songId
                     })
                 })
                     .then(async response => {
                         const result = await response.json().catch(() => null);
                         if (!response.ok) throw new Error(result?.error || 'No se pudo añadir la canción');
-                        await loadPlaylists();
-                        hideAllModals();
+                        if (Number.isFinite(Number(result?.duration))) pl.duration = Number(result.duration);
+                        if (offlineModeEnabled) {
+                            void saveOfflinePlaylists(currentUser._id, userPlaylists).catch(error => {
+                                console.error('No se pudo actualizar la caché offline de playlists.', error);
+                            });
+                        }
                         if (activePlaylistId === pl.id) openPlaylistView(pl.id);
+                        showToast(`“${song?.name || 'La canción'}” se añadió a “${pl.name}”.`);
                     })
-                    .catch(error => showToast(error.message, true))
-                    .finally(() => li.classList.remove('is-loading'));
+                    .catch(error => {
+                        pl.tracks = pl.tracks.filter(track => String(track._id) !== String(songId));
+                        pl.duration = previousDuration;
+                        if (activePlaylistId === pl.id) openPlaylistView(pl.id);
+                        showToast(error.message || 'No se pudo añadir la canción.', true);
+                    });
             });
             addToPlList.appendChild(li);
         });
@@ -6193,6 +6238,19 @@ export function initMusicPlayer() {
                         showToast('No se pudo identificar la canción.', true);
                         return;
                     }
+                    const changeKey = `${id}:${songId}`;
+                    if (pendingPlaylistTrackChanges.has(changeKey)) return;
+                    const trackPosition = pl.tracks.findIndex(item => String(item._id || item.id) === String(songId));
+                    if (trackPosition < 0) return;
+                    pendingPlaylistTrackChanges.add(changeKey);
+                    const previousTracks = pl.tracks;
+                    const previousDuration = Number(pl.duration) || 0;
+                    const removedTrack = previousTracks[trackPosition];
+                    pl.tracks = previousTracks.filter((item, index) => index !== trackPosition);
+                    pl.duration = Math.max(0, previousDuration - Math.max(0, Number(removedTrack.duration) || 0));
+                    pl.updatedAt = new Date().toISOString();
+                    openPlaylistView(id);
+                    showToast(`Eliminando “${removedTrack.name || 'la canción'}” de “${pl.name}”…`);
                     apiFetch(`${API_URL}/playlists/${encodeURIComponent(id)}/tracks/${encodeURIComponent(String(songId))}`, {
                         method: 'DELETE',
                         headers: { 'Content-Type': 'application/json' },
@@ -6201,10 +6259,23 @@ export function initMusicPlayer() {
                         .then(async response => {
                             const result = await response.json().catch(() => null);
                             if (!response.ok) throw new Error(result?.error || 'No se pudo eliminar la canción');
-                            await loadPlaylists();
-                            openPlaylistView(id);
+                            const serverDuration = Number(result?.playlist?.duration);
+                            if (Number.isFinite(serverDuration)) pl.duration = serverDuration;
+                            if (offlineModeEnabled && currentUser?._id) {
+                                void saveOfflinePlaylists(currentUser._id, userPlaylists).catch(error => {
+                                    console.error('No se pudo actualizar la caché offline de playlists.', error);
+                                });
+                            }
+                            if (activePlaylistId === id) openPlaylistView(id);
+                            showToast(`“${removedTrack.name || 'La canción'}” se eliminó de “${pl.name}”.`);
                         })
-                        .catch(error => showToast(error.message, true));
+                        .catch(error => {
+                            pl.tracks = previousTracks;
+                            pl.duration = previousDuration;
+                            if (activePlaylistId === id) openPlaylistView(id);
+                            showToast(error.message || 'No se pudo eliminar la canción.', true);
+                        })
+                        .finally(() => pendingPlaylistTrackChanges.delete(changeKey));
                     return;
                 }
                 if (playlistIndex !== -1) {
@@ -6757,8 +6828,6 @@ export function initMusicPlayer() {
             const val = parseInt(e.target.value, 10);
             if (!isNaN(val) && val > 0) {
                 seekSeconds = val;
-                if (rewindLabel) rewindLabel.textContent = `${seekSeconds}s`;
-                if (forwardLabel) forwardLabel.textContent = `${seekSeconds}s`;
             }
         });
     }

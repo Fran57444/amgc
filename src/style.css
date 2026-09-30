@@ -476,9 +476,9 @@ input, textarea, select {
 .profile-friend-card { display: flex; }
 
 #settings-panel { align-items: flex-start !important; padding-left: 80px; background: transparent !important; }
-.settings-wrapper { display: flex; flex-direction: column; gap: 25px; align-items: flex-start; width: 100%; max-width: 700px; }
+.settings-wrapper { display: flex; flex-direction: column; gap: 18px; align-items: flex-start; width: 100%; max-width: 700px; }
 .settings-section { display: flex; flex-direction: column; gap: 10px; width: 100%; border-bottom: 1px solid rgba(255,255,255,0.2); }
-.settings-section h3 { margin-bottom: 5px; font-size: 1.3rem; color: #fff; padding-bottom: 8px; }
+.settings-section h3 { margin: 0 0 5px; font-size: 1.3rem; color: #fff; padding-bottom: 8px; }
 .settings-section p { font-size: 0.85rem; color: rgba(255,255,255,0.6); margin-top: 0; }
 .offline-mode-toggle { display: flex; align-items: center; gap: 10px; color: rgba(255,255,255,0.85); font-size: 0.9rem; cursor: pointer; }
 #offline-cache-progress { width: min(100%, 420px); height: 8px; accent-color: #ff8a00; }
@@ -1299,6 +1299,7 @@ pre { text-align:left; line-height: 1; font-size: 4px; margin: 0; user-select:no
 
 #add-to-pl-list { list-style: none; padding: 0; margin: 0; max-height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
 .add-pl-item { display: flex; align-items: center; gap: 10px; padding: 10px; background: #252525; border-radius: 6px; cursor: pointer; transition: background 0.2s; }
+.add-pl-item.is-loading { opacity: 0.6; cursor: wait; pointer-events: none; }
 .playlist-membership-status { margin-left: auto; color: #ff6b6b; font-size: 0.72rem; font-weight: 700; white-space: nowrap; }
 .add-pl-item:hover { background: #353535; }
 .add-pl-item img { width: 30px; height: 30px; border-radius: 4px; object-fit: cover; }

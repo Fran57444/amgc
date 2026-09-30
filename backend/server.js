@@ -1706,20 +1706,6 @@ app.post('/api/playlists', upload.single('photo'), async (req, res) => {
   }
 });
 
-async function recalculatePlaylistDuration(playlist) {
-  const currentPlaylist = await Playlist.findById(playlist._id).select('id userId sharedWith tracks');
-  if (!currentPlaylist) return null;
-  const songs = currentPlaylist.tracks.length
-    ? await Song.find({ _id: { $in: currentPlaylist.tracks } }).select('duration')
-    : [];
-  const duration = songs.reduce((total, song) => total + Math.max(0, Number(song.duration) || 0), 0);
-  await Playlist.updateOne(
-    { _id: currentPlaylist._id },
-    { $set: { duration, updatedAt: new Date() } }
-  );
-  return Playlist.findById(currentPlaylist._id);
-}
-
 function emitPlaylistChanged(playlist, changedBy) {
   if (!realtimeIo || !playlist) return;
   const recipients = new Set([
@@ -1741,8 +1727,10 @@ app.post('/api/playlists/:id/tracks', async (req, res) => {
     if (!isValidObjectId(userId) || !isValidObjectId(songId)) {
       return res.status(400).json({ error: 'Usuario o canción no válidos' });
     }
-    const song = await Song.findById(songId);
+    const song = await Song.findById(songId).select('duration').lean();
     if (!song) return res.status(404).json({ error: 'Canción no encontrada' });
+    const addedAt = new Date();
+    const songDuration = Math.max(0, Number(song.duration) || 0);
 
     const updated = await Playlist.findOneAndUpdate(
       {
@@ -1752,10 +1740,11 @@ app.post('/api/playlists/:id/tracks', async (req, res) => {
       },
       {
         $addToSet: { tracks: songId },
-        $push: { trackDetails: { songId, addedBy: userId, addedAt: new Date() } },
-        $set: { updatedAt: new Date() }
+        $push: { trackDetails: { songId, addedBy: userId, addedAt } },
+        $inc: { duration: songDuration },
+        $set: { updatedAt: addedAt }
       },
-      { returnDocument: 'after' }
+      { returnDocument: 'after', projection: 'id userId sharedWith duration' }
     );
     if (!updated) {
       const existing = await Playlist.findOne({ id: req.params.id }).select('tracks');
@@ -1766,9 +1755,8 @@ app.post('/api/playlists/:id/tracks', async (req, res) => {
       return res.status(403).json({ error: 'No tienes permiso para editar esta playlist' });
     }
 
-    const currentPlaylist = await recalculatePlaylistDuration(updated);
-    emitPlaylistChanged(currentPlaylist, userId);
-    res.json({ success: true, playlist: currentPlaylist });
+    emitPlaylistChanged(updated, userId);
+    res.json({ success: true, duration: updated.duration });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -1790,25 +1778,27 @@ app.delete('/api/playlists/:id/tracks/:songId', async (req, res) => {
       return res.status(404).json({ error: 'La canción ya no está en la playlist' });
     }
 
-    const updated = await Playlist.findOneAndUpdate(
-      {
-        id: req.params.id,
-        tracks: songId
-      },
+    const song = await Song.findById(songId).select('duration').lean();
+    if (!song) return res.status(404).json({ error: 'Canción no encontrada' });
+    const removedAt = new Date();
+    const updated = await Playlist.findOneAndUpdate({
+      id: req.params.id,
+      tracks: songId
+    },
       {
         $pull: {
           tracks: songId,
           trackDetails: { songId }
         },
-        $set: { updatedAt: new Date() }
+        $inc: { duration: -Math.max(0, Number(song.duration) || 0) },
+        $set: { updatedAt: removedAt }
       },
-      { returnDocument: 'after' }
+      { returnDocument: 'after', projection: 'id userId sharedWith duration' }
     );
     if (!updated) return res.status(404).json({ error: 'La canción ya no está en la playlist' });
 
-    const currentPlaylist = await recalculatePlaylistDuration(updated);
-    emitPlaylistChanged(currentPlaylist, userId);
-    res.json({ success: true, playlist: currentPlaylist });
+    emitPlaylistChanged(updated, userId);
+    res.json({ success: true, playlist: { id: updated.id, duration: updated.duration } });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
