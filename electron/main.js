@@ -178,7 +178,7 @@ async function publishDiscordPresence() {
             return true;
         }
 
-        const { songName, artist, currentTime, duration, isPlaying, largeImageKey } = presence;
+        const { songName, artist, currentTime, duration, isPlaying, largeImageUrl } = presence;
         if (!isPlaying) {
             await discordRpcClient.clearActivity();
             discordRpcLastActivityAt = null;
@@ -193,16 +193,11 @@ async function publishDiscordPresence() {
             status_display_type: 2,
             instance: false
         };
-        if (largeImageKey && presence.assetApplicationId === discordRpcClientId) {
-            activity.assets = { large_image: largeImageKey };
-            logDiscordArtworkStatus('attached', 'Portada externa añadida al payload RPC.');
-        } else if (largeImageKey) {
-            logDiscordArtworkStatus(
-                'application-mismatch',
-                'La portada fue registrada para otro DISCORD_CLIENT_ID; se publica la presencia sin portada.'
-            );
+        if (largeImageUrl) {
+            activity.assets = { large_image: largeImageUrl };
+            logDiscordArtworkStatus('attached', 'URL HTTPS de portada adjuntada al payload RPC.');
         } else {
-            logDiscordArtworkStatus('no-cover', 'No se recibió una clave de portada para esta canción.');
+            logDiscordArtworkStatus('no-cover', 'No se recibió una URL de portada para esta canción.');
         }
         if (pendingDiscordPresence !== presence) return false;
         if (duration > currentTime) {
@@ -351,10 +346,8 @@ ipcMain.handle('mmamgc:discord-presence', async (event, presence) => {
         || typeof presence.isPlaying !== 'boolean'
         || !Number.isFinite(presence.currentTime)
         || !Number.isFinite(presence.duration)
-        || (presence.largeImageKey !== undefined && presence.largeImageKey !== null
-            && typeof presence.largeImageKey !== 'string')
-        || (presence.assetApplicationId !== undefined && presence.assetApplicationId !== null
-            && (typeof presence.assetApplicationId !== 'string' || !/^\d{17,20}$/.test(presence.assetApplicationId)))) {
+        || (presence.largeImageUrl !== undefined && presence.largeImageUrl !== null
+            && typeof presence.largeImageUrl !== 'string')) {
         throw new Error('La información de reproducción para Discord no es válida.');
     }
 
@@ -362,9 +355,19 @@ ipcMain.handle('mmamgc:discord-presence', async (event, presence) => {
     const artist = presence.artist.trim().slice(0, 128) || 'Artista desconocido';
     if (!songName) throw new Error('La canción para Discord no puede estar vacía.');
     const duration = Math.max(0, Math.min(presence.duration, 86400));
-    const largeImageKey = presence.largeImageKey?.trim() || null;
-    if (largeImageKey && (largeImageKey.length > 256 || !largeImageKey.startsWith('mp:'))) {
-        throw new Error('La clave de portada para Discord no es válida.');
+    let largeImageUrl = null;
+    if (presence.largeImageUrl) {
+        if (presence.largeImageUrl.length > 2048) throw new Error('La URL de portada para Discord es demasiado larga.');
+        let parsedImageUrl;
+        try {
+            parsedImageUrl = new URL(presence.largeImageUrl);
+        } catch {
+            throw new Error('La URL de portada para Discord no es válida.');
+        }
+        if (parsedImageUrl.protocol !== 'https:' || parsedImageUrl.username || parsedImageUrl.password) {
+            throw new Error('La portada para Discord debe ser una URL HTTPS pública.');
+        }
+        largeImageUrl = parsedImageUrl.href;
     }
     pendingDiscordPresence = {
         songName,
@@ -372,8 +375,7 @@ ipcMain.handle('mmamgc:discord-presence', async (event, presence) => {
         currentTime: Math.max(0, Math.min(presence.currentTime, duration)),
         duration,
         isPlaying: presence.isPlaying,
-        largeImageKey,
-        assetApplicationId: presence.assetApplicationId || null
+        largeImageUrl
     };
     const published = await publishDiscordPresence();
     if (!discordRpcReady) logDiscordRpc('La interfaz envió el estado, pero Discord aún no está conectado.');
