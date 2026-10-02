@@ -68,7 +68,7 @@ input, textarea, select {
 }
 
 .sidebar-shell {
-    z-index: 11000;
+    z-index: 9000;
 }
 
 .unread-message-indicator {
@@ -237,7 +237,7 @@ input, textarea, select {
 
 #bottom-bar-wrapper {
     position: fixed; bottom: 0; left: 0; width: 100%; height: 85px; 
-    z-index: 10000; overflow: visible; 
+    z-index: 12000; overflow: visible;
 }
 
 .listening-together-status {
@@ -278,6 +278,7 @@ input, textarea, select {
     position: absolute; bottom: 0; left: 0; width: 100%;
     background-color: rgba(10, 10, 10, 0.8); backdrop-filter: blur(10px);
     transform: translateY(0); transition: transform 0.6s cubic-bezier(0.2, 0.8, 0.2, 1);
+    z-index: 1;
 }
 #perro-gif { position: absolute; left: 27px; bottom: 10px; width: 70px; pointer-events: none; z-index: 10; }
 
@@ -509,6 +510,10 @@ input, textarea, select {
 
 #pl-view-panel { align-items: flex-start; padding-left: 80px; padding-right: 40px; }
 #pl-view-panel .pl-header-main, #pl-view-panel .pl-tracks-grid { max-width: 100%; width: 100%; }
+#pl-view-panel .pl-header-main {
+    flex: 0 0 auto;
+    min-height: 150px;
+}
 
 .pl-header { display: flex; align-items: center; gap: 30px; margin-bottom: 40px; width: 100%; max-width: 800px; }
 #pl-view-photo { width: 150px; height: 150px; border-radius: 8px; object-fit: cover; box-shadow: 0 5px 20px rgba(0,0,0,0.5); }
@@ -686,12 +691,27 @@ input, textarea, select {
 
 #all-songs-list { list-style: none; padding: 0; margin: 0; width: 100%; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 15px; }
 #all-songs-list > .all-songs-item { overflow: visible; }
-.pl-tracks-grid { list-style: none; padding: 0; margin: 0; width: 100%; max-width: 1200px; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.pl-tracks-grid {
+    box-sizing: border-box;
+    flex: 0 0 auto;
+    align-self: stretch;
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    width: 100%;
+    max-width: 1200px;
+    min-width: 0;
+    min-height: max-content;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
 
 .playlist-track-row {
-    box-sizing: border-box; position: relative; z-index: 1; width: 100%; min-height: 70px;
+    box-sizing: border-box; position: relative; z-index: 1; flex: 0 0 auto; width: 100%; min-height: 70px;
     background: rgba(0,0,0,0.4); border-radius: 8px;
-    padding: 10px 15px; display: grid; grid-template-columns: 40px minmax(0, 1fr) minmax(0, 1.8fr) 30px;
+    padding: 10px 15px; display: grid;
+    grid-template-columns: 40px minmax(180px, 1.7fr) minmax(110px, 0.9fr) minmax(100px, 1.9fr) 100px 30px;
     align-items: center; gap: 15px; cursor: pointer; touch-action: pan-y; transition: background 0.2s ease;
 }
 .playlist-track-row:hover { background: rgba(255,255,255,0.1); }
@@ -821,8 +841,9 @@ img.no-image { font-size: 0.65rem; object-fit: none; }
 .edit-song-lyrics-section { display: flex; flex-direction: column; gap: 12px; }
 #edit-input-lyrics { min-height: 180px; resize: vertical; line-height: 1.6; }
 .edit-song-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 20px; align-items: center; margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 25px; }
-.edit-song-delete-confirmation,
-.edit-song-delete-actions {
+#btn-delete-song.is-delete-confirming,
+#btn-delete-song[hidden] { display: none !important; }
+.edit-song-delete-confirmation {
     display: flex;
     flex-direction: column;
     gap: 12px;
@@ -833,10 +854,8 @@ img.no-image { font-size: 0.65rem; object-fit: none; }
     max-width: 560px;
     margin: 0 auto 4px;
     padding: 18px;
-    border: 1px solid rgba(255, 77, 77, 0.45);
     border-radius: 12px;
-    background: linear-gradient(145deg, rgba(92, 20, 20, 0.32), rgba(20, 20, 20, 0.86));
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28);
+    background:none;
     text-align: left;
 }
 .edit-song-delete-confirmation[hidden] { display: none; }
@@ -845,11 +864,18 @@ img.no-image { font-size: 0.65rem; object-fit: none; }
 .edit-song-delete-confirmation p { margin: 0; color: rgba(255, 255, 255, 0.72); font-size: 0.86rem; line-height: 1.45; }
 .edit-song-delete-title {
     overflow-wrap: anywhere;
-    padding: 10px 12px;
-    border-radius: 8px;
-    background: rgba(0, 0, 0, 0.34);
     color: #fff;
     font-weight: 700;
+}
+.edit-song-delete-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+}
+.edit-song-delete-title-row .edit-song-delete-title {
+    min-width: 0;
+    flex: 1 1 auto;
 }
 .edit-song-delete-confirmation input {
     box-sizing: border-box;
@@ -864,19 +890,19 @@ img.no-image { font-size: 0.65rem; object-fit: none; }
     font: inherit;
 }
 .edit-song-delete-confirmation input:focus { border-color: rgba(255, 133, 133, 0.85); }
-.edit-song-delete-actions { flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
-.edit-song-delete-actions .edit-song-delete-button {
+.edit-song-delete-title-row .edit-song-delete-button {
+    flex: 0 0 auto;
     min-height: 42px;
     padding: 9px 14px;
-    border: 1px solid rgba(255, 77, 77, 0.58);
+    border: none;
     border-radius: 8px;
-    background: rgba(164, 36, 36, 0.76);
-    color: #fff;
+    background: none;
+    color: rgb(253, 62, 62);
     font: inherit;
     font-weight: 700;
 }
-.edit-song-delete-actions .edit-song-delete-button:hover:not(:disabled) { background: #c73535; }
-.edit-song-delete-actions .edit-song-delete-button:disabled { cursor: not-allowed; opacity: 0.42; }
+
+.edit-song-delete-title-row .edit-song-delete-button:disabled { cursor: not-allowed; opacity: 0.42; }
 
 #admin-panel { padding-top: 38px; background: #000; align-items: flex-start; }
 #admin-panel .view-header-bar { margin-bottom: 36px; width: 100%; max-width: 1160px; }
@@ -1218,11 +1244,7 @@ img.no-image { font-size: 0.65rem; object-fit: none; }
 }
 
 .playlist-track-meta {
-    display: grid;
-    grid-template-columns: minmax(0, 1.2fr) minmax(70px, 0.7fr) minmax(0, 1fr) auto;
-    gap: 8px 12px;
-    align-items: center;
-    width: 100%;
+    display: contents;
 }
 
 .playlist-track-meta > span {
@@ -1232,10 +1254,35 @@ img.no-image { font-size: 0.65rem; object-fit: none; }
     white-space: nowrap;
 }
 
+.playlist-track-meta .playlist-added-by {
+    grid-column: 3;
+    grid-row: 1;
+    justify-self: start;
+    max-width: 100%;
+    overflow: hidden;
+}
+
+.playlist-track-added-date {
+    grid-column: 4;
+    grid-row: 1;
+    justify-self: center;
+    color: rgba(255,255,255,0.55);
+    font-size: 0.72rem;
+}
+
 .playlist-track-duration {
+    grid-column: 5;
+    grid-row: 1;
     justify-self: end;
     min-width: 48px;
     text-align: right;
+    color: rgba(255,255,255,0.55);
+    font-size: 0.72rem;
+}
+
+.playlist-track-row .remove-from-pl-btn {
+    grid-column: 6;
+    grid-row: 1;
 }
 
 
@@ -1255,14 +1302,6 @@ img.no-image { font-size: 0.65rem; object-fit: none; }
 
 .playlist-track-meta .playlist-user-link {
     padding: 0;
-}
-
-.playlist-track-meta {
-    display: block;
-    margin-top: 3px;
-    color: rgba(255, 255, 255, 0.55);
-    font-size: 0.7rem;
-    line-height: 1.2;
 }
 
 .pl-sidebar-item {
@@ -1551,13 +1590,6 @@ pre { text-align:left; line-height: 1; font-size: 4px; margin: 0; user-select:no
     margin-bottom: 8px;
 }
 
-.playlist-track-meta {
-    display: block;
-    margin-top: 4px;
-    color: rgba(255,255,255,0.55);
-    font-size: 0.72rem;
-}
-
 /* Chat layout */
 .chat-header {
     min-height: 52px;
@@ -1762,27 +1794,6 @@ pre { text-align:left; line-height: 1; font-size: 4px; margin: 0; user-select:no
     color: #ff8585;
 }
 
-.playlist-track-meta {
-    display: grid;
-    grid-template-columns: minmax(0, 1.2fr) minmax(70px, 0.7fr) minmax(0, 1fr) auto;
-    gap: 8px 12px;
-    align-items: center;
-    width: 100%;
-}
-
-.playlist-track-meta > span {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.playlist-track-duration {
-    justify-self: end;
-    min-width: 48px;
-    text-align: right;
-}
-
 @media (max-width: 800px) {
     .playlist-track-row {
         grid-template-columns: 40px minmax(0, 1fr) 30px;
@@ -1795,8 +1806,26 @@ pre { text-align:left; line-height: 1; font-size: 4px; margin: 0; user-select:no
     }
 
     .playlist-track-row .playlist-track-meta {
+        display: grid;
         grid-column: 2 / -1;
         grid-row: 2;
+        grid-template-columns: minmax(0, 1fr) auto auto;
+        gap: 6px 10px;
+        align-items: center;
+        width: 100%;
+        margin: 0;
+        color: rgba(255,255,255,0.55);
+        font-size: 0.66rem;
+        line-height: 1.2;
+    }
+
+    .playlist-track-meta .playlist-added-by,
+    .playlist-track-added-date,
+    .playlist-track-duration {
+        grid-column: auto;
+        grid-row: auto;
+        justify-self: start;
+        font-size: inherit;
     }
 
     .playlist-track-row .remove-from-pl-btn {
@@ -1811,9 +1840,8 @@ pre { text-align:left; line-height: 1; font-size: 4px; margin: 0; user-select:no
     }
 
     .playlist-track-meta {
-        grid-template-columns: minmax(0, 1fr) auto;
-        gap: 6px 10px;
-        font-size: 0.66rem;
+        grid-template-columns: minmax(0, 1fr) auto auto;
+        gap: 6px 8px;
     }
 }
 

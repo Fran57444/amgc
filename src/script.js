@@ -727,7 +727,6 @@ export function initMusicPlayer() {
     const deleteSongConfirmationTitle = document.getElementById("delete-song-confirmation-title");
     const deleteSongNameConfirmation = document.getElementById("delete-song-name-confirmation");
     const btnConfirmDeleteSong = document.getElementById("btn-confirm-delete-song");
-    const btnCancelDeleteSongFinal = document.getElementById("btn-cancel-delete-song-final");
     const songImageEditWrapper = document.getElementById("song-image-edit-wrapper");
     const editSongPhoto = document.getElementById("edit-song-photo");
 
@@ -775,6 +774,10 @@ export function initMusicPlayer() {
     let activeChatFriendName = '';
     let localChatMessages = [];
     let serverChatMessages = [];
+    let lastChatMessageOrderTime = 0;
+    const chatMessageDisplayTimes = new Map();
+    const chatSendQueues = new Map();
+    let chatMessagesRequestSequence = 0;
     let chatPollTimer = null;
     let friendsUiTimer = null;
     let friendsRealtimeFallbackTimer = null;
@@ -2486,8 +2489,17 @@ export function initMusicPlayer() {
             status: String(message.sender) === String(user._id) ? (message.readAt ? 'visto' : 'enviado') : undefined
         }));
         const pendingMessages = localChatMessages.filter(message => ['enviando', 'fallido'].includes(message.status));
+        const getMessageDisplayTime = message => {
+            const clientId = message.clientId || message._localId;
+            const optimisticTimestamp = clientId ? chatMessageDisplayTimes.get(clientId) : null;
+            return optimisticTimestamp
+                ?? chatMessageDisplayTimes.get(String(message._id || ''))
+                ?? new Date(message.timestamp).getTime();
+        };
         const allMessages = [...serverMessages, ...pendingMessages].sort((a, b) => (
-            new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+            getMessageDisplayTime(a) - getMessageDisplayTime(b)
+            || new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+            || String(a.clientId || a._localId || a._id).localeCompare(String(b.clientId || b._localId || b._id))
         ));
         let previousSenderId = null;
         let lastOwnMessageIndex = -1;
@@ -2495,8 +2507,8 @@ export function initMusicPlayer() {
             if (String(message.sender) === String(user._id)) lastOwnMessageIndex = index;
         });
         chatMessages.innerHTML = allMessages.length
-            ? allMessages.map(message => {
-                const messageIndex = allMessages.indexOf(message);
+            ? allMessages.map((message, index) => {
+                const messageIndex = index;
                 const isSelf = String(message.sender) === String(user._id);
                 const friend = currentFriends.find(item => String(item._id) === String(message.sender));
                 const senderId = String(message.sender);
@@ -2553,19 +2565,24 @@ export function initMusicPlayer() {
 
     async function loadChatMessages(forceScrollToBottom = false) {
         const user = getStoredUser();
-        if (!user || !activeChatFriendId || !chatMessages) return;
+        const friendId = activeChatFriendId;
+        if (!user || !friendId || !chatMessages) return;
+        const requestSequence = ++chatMessagesRequestSequence;
         if (offlineOnly || !navigator.onLine) {
             chatMessages.textContent = 'Los mensajes estarán disponibles cuando vuelvas a conectarte.';
             return;
         }
         try {
-            const messages = await fetchJsonWithRetry(`${API_URL}/messages/${user._id}/${activeChatFriendId}`);
+            const messages = await fetchJsonWithRetry(`${API_URL}/messages/${user._id}/${friendId}`);
+            if (requestSequence !== chatMessagesRequestSequence || String(activeChatFriendId) !== String(friendId)) return;
             serverChatMessages = messages;
             refreshChatNotifications();
+            const serverClientIds = new Set(messages.map(message => String(message.clientId || '')).filter(Boolean));
             const serverKeys = new Set(messages.map(message => `${message.content}|${message.sender}`));
             localChatMessages = localChatMessages.filter(message => (
                 ['enviando', 'fallido'].includes(message.status)
-                && !serverKeys.has(`${message.content}|${message.sender}`)
+                && !serverClientIds.has(String(message.clientId || ''))
+                && (message.clientId || !serverKeys.has(`${message.content}|${message.sender}`))
             ));
             saveLocalChatMessages(user._id, activeChatFriendId);
             renderChatMessages(messages, user, forceScrollToBottom);
@@ -2606,6 +2623,7 @@ export function initMusicPlayer() {
     }
 
     function closeChat() {
+        chatMessagesRequestSequence += 1;
         if (chatModal) chatModal.classList.remove('active');
         if (chatFriendsView) chatFriendsView.hidden = false;
         if (chatConversationView) chatConversationView.hidden = true;
@@ -2626,46 +2644,66 @@ export function initMusicPlayer() {
         const content = chatInput?.value.trim();
         if (!user || !receiverId || !content) return;
         chatInput.value = '';
+        const clientId = `local-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        const timestamp = new Date().toISOString();
+        lastChatMessageOrderTime = Math.max(Date.now(), lastChatMessageOrderTime + 1);
         const localMessage = {
-            _localId: `local-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+            _localId: clientId,
+            clientId,
             sender: user._id,
             receiver: receiverId,
             content,
-            timestamp: new Date().toISOString(),
+            timestamp,
             status: 'enviando'
         };
+        chatMessageDisplayTimes.set(clientId, lastChatMessageOrderTime);
+        if (chatMessageDisplayTimes.size > 500) {
+            chatMessageDisplayTimes.delete(chatMessageDisplayTimes.keys().next().value);
+        }
         localChatMessages.push(localMessage);
         saveLocalChatMessages(user._id, receiverId);
         renderChatMessages(serverChatMessages, user);
-        try {
-            const response = await apiFetch(`${API_URL}/messages`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ sender: user._id, receiver: receiverId, content })
-            });
-            const result = await response.json().catch(() => null);
-            if (!response.ok || !result?._id) throw new Error(result?.error || 'No se pudo enviar el mensaje');
-            updateStoredChatDraft(user._id, receiverId, localMessage._localId, 'enviado');
-            if (String(activeChatFriendId) !== String(receiverId)) return;
-            localChatMessages = localChatMessages.filter(message => message._localId !== localMessage._localId);
-            saveLocalChatMessages(user._id, receiverId);
-            if (!serverChatMessages.some(message => String(message._id) === String(result._id))) {
-                serverChatMessages = [...serverChatMessages, result].sort((a, b) => (
-                    new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-                ));
-            }
-            renderChatMessages(serverChatMessages, user);
-        } catch (e) {
-            localMessage.status = 'fallido';
-            updateStoredChatDraft(user._id, receiverId, localMessage._localId, 'fallido');
-            if (String(activeChatFriendId) === String(receiverId)) {
-                localChatMessages = localChatMessages.map(message => (
-                    message._localId === localMessage._localId ? localMessage : message
-                ));
+        const send = async () => {
+            try {
+                const response = await apiFetch(`${API_URL}/messages`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        sender: user._id,
+                        receiver: receiverId,
+                        content,
+                        clientId: localMessage.clientId
+                    })
+                });
+                const result = await response.json().catch(() => null);
+                if (!response.ok || !result?._id) throw new Error(result?.error || 'No se pudo enviar el mensaje');
+                const acknowledgedMessage = { ...result, clientId: result.clientId || localMessage.clientId };
+                chatMessageDisplayTimes.set(String(acknowledgedMessage._id), chatMessageDisplayTimes.get(localMessage.clientId));
+                updateStoredChatDraft(user._id, receiverId, localMessage._localId, 'enviado');
+                if (String(activeChatFriendId) !== String(receiverId)) return;
+                localChatMessages = localChatMessages.filter(message => message._localId !== localMessage._localId);
+                saveLocalChatMessages(user._id, receiverId);
+                if (!serverChatMessages.some(message => String(message._id) === String(acknowledgedMessage._id))) {
+                    serverChatMessages = [...serverChatMessages, acknowledgedMessage];
+                }
                 renderChatMessages(serverChatMessages, user);
+            } catch (error) {
+                localMessage.status = 'fallido';
+                updateStoredChatDraft(user._id, receiverId, localMessage._localId, 'fallido');
+                if (String(activeChatFriendId) === String(receiverId)) {
+                    localChatMessages = localChatMessages.map(message => (
+                        message._localId === localMessage._localId ? localMessage : message
+                    ));
+                    renderChatMessages(serverChatMessages, user);
+                }
+                console.warn('No se pudo enviar el mensaje', error);
             }
-            console.warn('No se pudo enviar el mensaje', e);
-        }
+        };
+        const previousSend = chatSendQueues.get(String(receiverId)) || Promise.resolve();
+        const queuedSend = previousSend.catch(() => {}).then(send);
+        chatSendQueues.set(String(receiverId), queuedSend);
+        await queuedSend;
+        if (chatSendQueues.get(String(receiverId)) === queuedSend) chatSendQueues.delete(String(receiverId));
     }
 
     async function updateUserStatus(isOnline) {
@@ -5469,6 +5507,7 @@ export function initMusicPlayer() {
         }
         if (btnDeleteSong) {
             btnDeleteSong.hidden = false;
+            btnDeleteSong.classList.remove('is-delete-confirming');
             btnDeleteSong.dataset.confirmDelete = 'false';
             btnDeleteSong.textContent = 'Eliminar Canción';
         }
@@ -5486,6 +5525,7 @@ export function initMusicPlayer() {
             return;
         }
         const trackId = String(track._id);
+        const confirmationName = deleteSongNameConfirmation?.value.trim() || '';
         if (pendingSongDeletes.has(trackId)) return;
         if (
             !isEditSongMode
@@ -5493,7 +5533,8 @@ export function initMusicPlayer() {
             || btnDeleteSong?.dataset.confirmDelete !== 'true'
             || deleteSongConfirmation?.hidden !== false
             || deleteSongNameStep?.hidden !== false
-            || deleteSongNameConfirmation?.value.trim() !== getSongDeleteConfirmationName(track)
+            || !confirmationName
+            || confirmationName !== getSongDeleteConfirmationName(track)
         ) {
             showToast('Escribe el nombre exacto de la canción en el editor para confirmar su eliminación.', true);
             return;
@@ -5508,7 +5549,7 @@ export function initMusicPlayer() {
             const response = await apiFetch(`${API_URL}/songs/${encodeURIComponent(trackId)}`, {
                 method: 'DELETE',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ userId: user._id })
+                body: JSON.stringify({ userId: user._id, confirmationName })
             });
             const result = await response.json().catch(() => null);
             if (!response.ok) throw new Error(result?.error || 'No se pudo eliminar la canción.');
@@ -5883,6 +5924,7 @@ export function initMusicPlayer() {
             deleteSongConfirmation.hidden = false;
             deleteSongNameStep.hidden = false;
             btnDeleteSong.hidden = true;
+            btnDeleteSong.classList.add('is-delete-confirming');
             deleteSongNameConfirmation.focus();
         });
     }
@@ -5901,13 +5943,6 @@ export function initMusicPlayer() {
         btnConfirmDeleteSong.addEventListener('click', () => {
             if (btnConfirmDeleteSong.disabled) return;
             deleteSong(editingTrackId);
-        });
-    }
-
-    if (btnCancelDeleteSongFinal) {
-        btnCancelDeleteSongFinal.addEventListener('click', () => {
-            resetSongDeleteConfirmation();
-            btnDeleteSong?.focus();
         });
     }
 
@@ -6436,19 +6471,27 @@ export function initMusicPlayer() {
             const li = document.createElement('li');
             li.className = 'playlist-track-row';
             const addedBy = typeof track.addedBy === 'object' ? track.addedBy : null;
-            const editedBy = typeof track.editedBy === 'object' ? track.editedBy : null;
             const addedByName = addedBy?.username || track.addedByName || 'Desconocido';
-            const editedByName = editedBy?.username || '—';
             const addedByPhoto = addedBy?.profilePhoto
                 || currentFriends.find(friend => String(friend._id) === String(addedBy?._id))?.profilePhoto
                 || '';
+            const addedAtLabel = track.addedAt
+                ? new Date(track.addedAt).toLocaleDateString('es-CL', { timeZone: 'America/Santiago' })
+                : '--';
             li.innerHTML = `
                 ${createImageMarkup(getSongCover(track), 'item-cover')}
                 <div class="all-songs-item-info">
                     <span class="all-songs-item-name">${escapeHtml(track.name)}</span>
                     <span class="all-songs-item-artist">${escapeHtml(track.artist)}</span>
                 </div>
-                <small class="playlist-track-meta"><span class="playlist-added-by">${addedByPhoto ? `<img src="${escapeHtml(addedByPhoto)}" alt="" class="playlist-meta-avatar" />` : ''} ${addedBy?._id ? `<button type="button" class="playlist-user-link" data-user-id="${escapeHtml(addedBy._id)}" style="background:transparent; border:none; cursor:pointer;">${escapeHtml(addedByName)}</button>` : escapeHtml(addedByName)}</span><span>${track.addedAt ? new Date(track.addedAt).toLocaleDateString('es-CL', { timeZone: 'America/Santiago' }) : '--'}</span><span>Editada por: ${editedBy?._id ? `<button type="button" class="playlist-user-link" data-user-id="${escapeHtml(editedBy._id)}">${escapeHtml(editedByName)}</button>` : escapeHtml(editedByName)}</span><span class="playlist-track-duration">${formatTrackTime(Number(track.duration) || 0)}</span></small>
+                <small class="playlist-track-meta">
+                    <span class="playlist-added-by">
+                        ${addedByPhoto ? `<img src="${escapeHtml(addedByPhoto)}" alt="" class="playlist-meta-avatar" />` : ''}
+                        ${addedBy?._id ? `<button type="button" class="playlist-user-link" data-user-id="${escapeHtml(addedBy._id)}" style="background:transparent; border:none; cursor:pointer;">${escapeHtml(addedByName)}</button>` : escapeHtml(addedByName)}
+                    </span>
+                    <span class="playlist-track-added-date">${addedAtLabel}</span>
+                    <span class="playlist-track-duration">${formatTrackTime(Number(track.duration) || 0)}</span>
+                </small>
                 ${canDeletePlaylistTracks ? `
                     <button class="remove-from-pl-btn" style="background:transparent; border:none; cursor:pointer; justify-self:end;" type="button">
                         <img src="/img/cancel.png" draggable="false" class="no-drag" alt="Remove" style="width:20px;">

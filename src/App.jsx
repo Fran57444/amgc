@@ -456,15 +456,13 @@ function App() {
             <div className="edit-song-actions">
               <button id="btn-delete-song" className="modal-btn-text" style={{color: '#ff4d4d', display: 'none'}}>Eliminar Canción</button>
               <div id="delete-song-confirmation" className="edit-song-delete-confirmation" hidden>
-                <strong>Confirmar eliminación</strong>
                 <div id="delete-song-name-step" className="edit-song-delete-step" hidden>
-                  <p>Escribe el nombre de la canción exactamente como aparece:</p>
-                  <span id="delete-song-confirmation-title" className="edit-song-delete-title"></span>
-                  <input id="delete-song-name-confirmation" type="text" autoComplete="off" aria-label="Escribe el nombre de la canción para confirmar su eliminación" />
-                  <div className="edit-song-delete-actions">
+                  <p>Escribe el nombre de la canción:</p>
+                  <div className="edit-song-delete-title-row">
+                    <span id="delete-song-confirmation-title" className="edit-song-delete-title"></span>
                     <button id="btn-confirm-delete-song" className="edit-song-delete-button" type="button" disabled>Eliminar</button>
-                    <button id="btn-cancel-delete-song-final" className="modal-btn-text" type="button">Cancelar</button>
                   </div>
+                  <input id="delete-song-name-confirmation" type="text" autoComplete="off" aria-label="Escribe el nombre de la canción para confirmar su eliminación" />
                 </div>
               </div>
               <button id="btn-save-edited-song" className="main-play-btn">Guardar Cambios</button>

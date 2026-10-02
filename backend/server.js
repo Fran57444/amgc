@@ -360,6 +360,7 @@ const messageSchema = new mongoose.Schema({
   type: { type: String, enum: ['chat', 'playlist_invitation'], default: 'chat' },
   playlistId: String,
   invitationStatus: { type: String, enum: ['pending', 'accepted', 'declined'], default: undefined },
+  clientId: String,
   readAt: Date,
   timestamp: { type: Date, default: Date.now }
 });
@@ -1239,10 +1240,17 @@ app.get('/api/messages/:userId/:friendId', async (req, res) => {
 
 app.post('/api/messages', async (req, res) => {
   try {
-    const { sender, receiver, content } = req.body;
+    const { sender, receiver, content, clientId } = req.body;
     if (!sender || !receiver || !String(content || '').trim()) return res.status(400).json({ error: 'Datos incompletos' });
     if (!isValidObjectId(sender) || !isValidObjectId(receiver) || String(sender) === String(receiver)) {
       return res.status(400).json({ error: 'Usuarios no válidos' });
+    }
+    if (clientId !== undefined && (
+      typeof clientId !== 'string'
+      || clientId.length > 100
+      || !clientId.trim()
+    )) {
+      return res.status(400).json({ error: 'Identificador de mensaje no válido' });
     }
     const [senderUser, receiverUser] = await Promise.all([requireUser(sender), requireUser(receiver)]);
     if (!senderUser || !receiverUser) return res.status(404).json({ error: 'Usuario no encontrado' });
@@ -1250,7 +1258,16 @@ app.post('/api/messages', async (req, res) => {
       return res.status(403).json({ error: 'Solo puedes enviar mensajes a tus amigos' });
     }
 
-    const message = new Message({ sender, receiver, content: String(content).trim() });
+    if (clientId) {
+      const existingMessage = await Message.findOne({ sender, receiver, clientId });
+      if (existingMessage) return res.json(existingMessage);
+    }
+    const message = new Message({
+      sender,
+      receiver,
+      content: String(content).trim(),
+      ...(clientId ? { clientId } : {})
+    });
     await message.save();
     await User.findByIdAndUpdate(sender, { $inc: { 'stats.messagesSent': 1 } });
     emitUserStatsChanged(sender);
@@ -1465,9 +1482,20 @@ app.delete('/api/songs/:id', async (req, res) => {
   try {
     if (!await authorizePermission(res, req.user, 'delete_songs')) return;
     const { id } = req.params;
+    const { confirmationName } = req.body || {};
     if (!isValidObjectId(id)) return res.status(400).json({ error: 'Canción no válida' });
-    const deletedSong = await Song.findByIdAndDelete(id);
-    if (!deletedSong) return res.status(404).json({ error: 'Canción no encontrada' });
+    if (typeof confirmationName !== 'string' || !confirmationName.trim()) {
+      return res.status(400).json({ error: 'Escribe el nombre exacto de la canción para confirmar su eliminación.' });
+    }
+    const song = await Song.findById(id).select('name');
+    if (!song) return res.status(404).json({ error: 'Canción no encontrada' });
+    if (confirmationName.trim() !== String(song.name || '').trim()) {
+      return res.status(400).json({ error: 'El nombre escrito no coincide con la canción que intentas eliminar.' });
+    }
+    const deletedSong = await Song.findOneAndDelete({ _id: id, name: song.name });
+    if (!deletedSong) {
+      return res.status(409).json({ error: 'La canción cambió mientras se confirmaba. Vuelve a revisar su nombre e inténtalo otra vez.' });
+    }
     const affectedPlaylists = await Playlist.find({ tracks: id }).select('tracks');
     await Playlist.updateMany({}, { $pull: { tracks: id, trackDetails: { songId: id } } });
     await Promise.all(affectedPlaylists.map(async playlist => {

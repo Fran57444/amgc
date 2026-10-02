@@ -6,7 +6,9 @@ import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import dotenv from 'dotenv';
 import DiscordRPC from 'discord-rpc';
-import { autoUpdater } from 'electron-updater';
+import updaterPackage from 'electron-updater';
+
+const { autoUpdater } = updaterPackage;
 
 const productionUrl = 'https://mmamgc.onrender.com/';
 const developmentUrl = 'http://127.0.0.1:5163/';
