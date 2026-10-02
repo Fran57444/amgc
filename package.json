@@ -1,7 +1,7 @@
 {
   "name": "amiraclegrowingconstantly",
   "private": true,
-  "version": "3.0.3",
+  "version": "3.0.4",
   "type": "module",
   "main": "electron/main.js",
   "scripts": {
@@ -21,6 +21,7 @@
   "build": {
     "appId": "com.fran57444.amgc",
     "productName": "AMGC",
+    "artifactName": "${productName}-Setup-${version}.${ext}",
     "directories": {
       "output": "dist-electron"
     },
@@ -46,7 +47,7 @@
     "publish": {
       "provider": "github",
       "owner": "Fran57444",
-      "repo": "mmamgc",
+      "repo": "amgc",
       "releaseType": "release"
     }
   },
