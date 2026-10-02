@@ -2125,46 +2125,10 @@ app.delete('/api/playlists/:id', async (req, res) => {
   }
 });
 
-app.post('/api/yt-download', async (req, res) => {
-  try {
-    const { ytLink, fileName } = req.body;
-    if (!ytLink) return res.status(400).json({ error: 'Falta el link de YouTube' });
-    if (!isValidYoutubeUrl(ytLink)) {
-      return res.status(400).json({ error: 'El enlace de YouTube no es válido.' });
-    }
-
-    const { buffer, title } = await downloadYoutubeAudio(ytLink);
-    const localFile = await saveMp3Locally(title, buffer, fileName);
-
-    res.json({
-      success: true,
-      title,
-      path: localFile.filePath,
-      fileName: localFile.fileName,
-      size: buffer.length
-    });
-  } catch (error) {
-    res.status(error.statusCode || 500).json({ error: error.message });
-  }
-});
-
-app.post('/api/yt-download/upload', upload.single('mp3'), async (req, res) => {
-  try {
-    if (!req.file?.buffer?.length) {
-      return res.status(400).json({ error: 'No se recibió un archivo de audio válido.' });
-    }
-    const title = String(req.body.title || req.file.originalname || 'audio').trim();
-    const localFile = await saveMp3Locally(title, req.file.buffer, req.body.fileName);
-    res.json({
-      success: true,
-      title,
-      path: localFile.filePath,
-      fileName: localFile.fileName,
-      size: req.file.size
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+app.post(['/api/yt-download', '/api/yt-download/upload'], (_req, res) => {
+  res.status(410).json({
+    error: 'La descarga local de MP3 solo está disponible en la aplicación de escritorio.'
+  });
 });
 
 app.get('/api/media/:fileId', async (req, res) => {

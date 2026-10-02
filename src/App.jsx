@@ -17,6 +17,9 @@ const appAscii = `
              ;x            `
 
 function App() {
+  const canSaveMp3Locally = typeof window !== 'undefined'
+    && typeof window.amgcDesktop?.saveYoutubeAudioLocally === 'function';
+
   useEffect(() => {
     const cleanup = initMusicPlayer();
     return cleanup;
@@ -298,29 +301,35 @@ function App() {
 
             <div className="settings-section">
               <h3>Descargar de YouTube</h3>
-              <p>Ingresa un enlace de YouTube limpio, sin &list= ni &start_radio=. La descarga se guarda localmente en MP3</p>
-              <div className="field-row" style={{ maxWidth: '400px' }}>
-                <input 
-                  type="text" 
-                  id="settings-yt-link" 
-                  placeholder="https://www.youtube.com/watch?v=..."
-                  className="settings-input-dark"
-                />
-                <input
-                  type="text"
-                  id="settings-yt-name"
-                  placeholder="Nombre del archivo (opcional)"
-                  maxLength="80"
-                  className="settings-input-dark settings-input-spaced"
-                />
-                <button id="btn-settings-yt-download" className="main-play-btn" style={{backgroundColor: '#ff7221', marginTop: '10px', justifyContent: 'center', padding: '10px', width: '100%' }}>
-                  Descargar Audio
-                </button>
-                <button id="btn-open-local-mp3-folder" className="main-play-btn" hidden type="button" style={{backgroundColor: '#333', marginTop: '8px', justifyContent: 'center', padding: '10px', width: '100%' }}>
-                  Abrir carpeta de MP3
-                </button>
-                <span id="settings-yt-status" style={{ fontSize: '0.85rem', color: '#e79f32', marginTop: '5px', display: 'none' }}></span>
-              </div><br></br>
+              {canSaveMp3Locally ? (
+                <>
+                  <p>Ingresa un enlace de YouTube limpio, sin &list= ni &start_radio=. El MP3 se guarda en este equipo.</p>
+                  <div className="field-row" style={{ maxWidth: '400px' }}>
+                    <input
+                      type="text"
+                      id="settings-yt-link"
+                      placeholder="https://www.youtube.com/watch?v=..."
+                      className="settings-input-dark"
+                    />
+                    <input
+                      type="text"
+                      id="settings-yt-name"
+                      placeholder="Nombre del archivo (opcional)"
+                      maxLength="80"
+                      className="settings-input-dark settings-input-spaced"
+                    />
+                    <button id="btn-settings-yt-download" className="main-play-btn" style={{backgroundColor: '#ff7221', marginTop: '10px', justifyContent: 'center', padding: '10px', width: '100%' }}>
+                      Descargar Audio
+                    </button>
+                    <button id="btn-open-local-mp3-folder" className="main-play-btn" hidden type="button" style={{backgroundColor: '#333', marginTop: '8px', justifyContent: 'center', padding: '10px', width: '100%' }}>
+                      Abrir carpeta de MP3
+                    </button>
+                    <span id="settings-yt-status" style={{ fontSize: '0.85rem', color: '#e79f32', marginTop: '5px', display: 'none' }}></span>
+                  </div><br></br>
+                </>
+              ) : (
+                <p>La descarga local de MP3 solo está disponible en la aplicación de escritorio.</p>
+              )}
             </div>
 
 

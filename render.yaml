@@ -2,14 +2,10 @@ services:
   - type: web
     name: amgc
     runtime: node
-    plan: starter
+    plan: free
     buildCommand: npm ci --include=dev && npm run build
     startCommand: npm start
     healthCheckPath: /healthz
-    disk:
-      name: amgc-audio
-      mountPath: /opt/render/project/src/public/mp3
-      sizeGB: 10
     envVars:
       - key: NODE_ENV
         value: production
