@@ -1314,11 +1314,17 @@ export function initMusicPlayer() {
         if (authOverlay) {
             authOverlay.style.display = 'none';
         }
+        if (bottomBarWrapper) {
+            bottomBarWrapper.style.display = 'block';
+        }
     };
 
     const showAuthOverlay = () => {
         if (authOverlay) {
             authOverlay.style.display = 'flex';
+        }
+        if (bottomBarWrapper) {
+            bottomBarWrapper.style.display = 'none';
         }
     };
 
