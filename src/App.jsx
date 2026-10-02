@@ -111,6 +111,10 @@ function App() {
               <img src="/img/chat.png" draggable="false" className="no-drag" alt="Mensajes" />
               <span id="chat-notification-dot" aria-hidden="true"></span>
             </button>
+            <button id="btn-desktop-update" className="sidebar-btn desktop-update-btn" type="button" aria-label="Descargar actualización" hidden>
+              <span className="desktop-update-icon" aria-hidden="true">↓</span>
+              <span id="desktop-update-dot" aria-hidden="true"></span>
+            </button>
           </nav>
         </div>
         
@@ -169,7 +173,7 @@ function App() {
               <h3>Estadísticas</h3>
               <div id="profile-stats" className="profile-stats-grid">
                 <div><span>Rol</span><strong id="profile-stat-role">Usuario</strong></div>
-                <div><span>Horas escuchadas</span><strong id="profile-stat-hours">0 h</strong></div>
+                <div><span>Horas escuchadas</span><strong id="profile-stat-hours">0 h 0 min</strong></div>
                 <div><span>Canciones añadidas</span><strong id="profile-stat-added">0</strong></div>
                 <div><span>Canciones editadas</span><strong id="profile-stat-edited">0</strong></div>
                 <div><span>Amigos</span><strong id="profile-stat-friends">0</strong></div>
@@ -451,6 +455,18 @@ function App() {
 
             <div className="edit-song-actions">
               <button id="btn-delete-song" className="modal-btn-text" style={{color: '#ff4d4d', display: 'none'}}>Eliminar Canción</button>
+              <div id="delete-song-confirmation" className="edit-song-delete-confirmation" hidden>
+                <strong>Confirmar eliminación</strong>
+                <div id="delete-song-name-step" className="edit-song-delete-step" hidden>
+                  <p>Escribe el nombre de la canción exactamente como aparece:</p>
+                  <span id="delete-song-confirmation-title" className="edit-song-delete-title"></span>
+                  <input id="delete-song-name-confirmation" type="text" autoComplete="off" aria-label="Escribe el nombre de la canción para confirmar su eliminación" />
+                  <div className="edit-song-delete-actions">
+                    <button id="btn-confirm-delete-song" className="edit-song-delete-button" type="button" disabled>Eliminar</button>
+                    <button id="btn-cancel-delete-song-final" className="modal-btn-text" type="button">Cancelar</button>
+                  </div>
+                </div>
+              </div>
               <button id="btn-save-edited-song" className="main-play-btn">Guardar Cambios</button>
               <button id="btn-cancel-edited-song" className="modal-btn-text">Cancelar</button>
             </div>

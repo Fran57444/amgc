@@ -1299,7 +1299,10 @@ app.get('/api/songs', async (req, res) => {
   }
 
   try {
-    const songs = await Song.find().lean();
+    const songs = await Song.find()
+      .populate('addedBy', 'username profilePhoto')
+      .populate('editedBy', 'username profilePhoto')
+      .lean();
     const songsWithProxy = songs.map(song => {
       const songObj = song;
       if (songObj.path && songObj.path.includes('drive.google.com')) {
@@ -1307,6 +1310,11 @@ app.get('/api/songs', async (req, res) => {
       }
       if (songObj.cover && songObj.cover.includes('drive.google.com')) {
         songObj.cover = `${req.protocol}://${req.get('host')}/api/media/${extractDriveId(songObj.cover)}`;
+      }
+      for (const contributor of [songObj.addedBy, songObj.editedBy]) {
+        if (contributor?.profilePhoto && contributor.profilePhoto.includes('drive.google.com')) {
+          contributor.profilePhoto = `${req.protocol}://${req.get('host')}/api/media/${extractDriveId(contributor.profilePhoto)}`;
+        }
       }
       return songObj;
     });
@@ -1399,7 +1407,9 @@ app.post('/api/songs', upload.fields([{ name: 'mp3' }, { name: 'cover' }]), asyn
       songData.editedBy = editorId || undefined;
       songData.editedAt = new Date();
       savedSong = await Song.findByIdAndUpdate(req.body.id, { $set: songData }, { returnDocument: 'after', runValidators: true })
-        .populate('editedBy', 'username');
+        .populate('addedBy', 'username profilePhoto')
+        .populate('editedBy', 'username profilePhoto');
+      if (!savedSong) return res.status(404).json({ error: 'Canción no encontrada' });
       if (editorId) await User.findByIdAndUpdate(editorId, { $inc: { 'stats.songsEdited': 1 } });
     } else {
       const newSong = new Song({
@@ -1429,6 +1439,7 @@ app.patch('/api/songs/:id/duration', async (req, res) => {
     if (!isValidObjectId(req.params.id) || duration <= 0) {
       return res.status(400).json({ error: 'Duración no válida' });
     }
+    const editorId = req.user._id;
     const song = await Song.findByIdAndUpdate(
       req.params.id,
       { $set: { duration } },
@@ -1454,7 +1465,9 @@ app.delete('/api/songs/:id', async (req, res) => {
   try {
     if (!await authorizePermission(res, req.user, 'delete_songs')) return;
     const { id } = req.params;
-    await Song.findByIdAndDelete(id);
+    if (!isValidObjectId(id)) return res.status(400).json({ error: 'Canción no válida' });
+    const deletedSong = await Song.findByIdAndDelete(id);
+    if (!deletedSong) return res.status(404).json({ error: 'Canción no encontrada' });
     const affectedPlaylists = await Playlist.find({ tracks: id }).select('tracks');
     await Playlist.updateMany({}, { $pull: { tracks: id, trackDetails: { songId: id } } });
     await Promise.all(affectedPlaylists.map(async playlist => {
@@ -1561,10 +1574,10 @@ app.get('/api/playlists', async (req, res) => {
         plObj.tracks = plObj.tracks.map(song => {
           const detail = (plObj.trackDetails || []).find(item => String(item.songId) === String(song._id));
           if (detail) {
-            song.addedBy = detail.addedBy;
-            song.addedAt = detail.addedAt;
-            song.editedBy = detail.editedBy;
-            song.editedAt = detail.editedAt;
+            song.addedBy = detail.addedBy || song.addedBy;
+            song.addedAt = detail.addedAt || song.addedAt;
+            song.editedBy = detail.editedBy || song.editedBy;
+            song.editedAt = detail.editedAt || song.editedAt;
           }
           if (song.path && song.path.includes('drive.google.com')) {
             song.path = `${req.protocol}://${req.get('host')}/api/media/${extractDriveId(song.path)}`;

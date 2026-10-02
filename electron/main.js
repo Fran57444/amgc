@@ -6,6 +6,7 @@ import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import dotenv from 'dotenv';
 import DiscordRPC from 'discord-rpc';
+import { autoUpdater } from 'electron-updater';
 
 const productionUrl = 'https://mmamgc.onrender.com/';
 const developmentUrl = 'http://127.0.0.1:5163/';
@@ -24,6 +25,87 @@ let isQuitting = false;
 let discordRpcLastError = null;
 let discordRpcLastActivityAt = null;
 let discordLastArtworkStatus = null;
+let desktopUpdateState = {
+    status: 'checking',
+    version: null,
+    progress: 0,
+    sequence: 0
+};
+
+function setDesktopUpdateState(nextState) {
+    desktopUpdateState = {
+        ...nextState,
+        sequence: desktopUpdateState.sequence + 1
+    };
+    BrowserWindow.getAllWindows().forEach(window => {
+        if (!window.webContents.isDestroyed()) {
+            window.webContents.send('amgc:update-state', desktopUpdateState);
+        }
+    });
+}
+
+function initializeDesktopUpdates() {
+    if (!app.isPackaged || process.platform !== 'win32') return;
+
+    autoUpdater.autoDownload = false;
+    autoUpdater.autoInstallOnAppQuit = false;
+    autoUpdater.on('update-available', info => {
+        setDesktopUpdateState({
+            status: 'available',
+            version: info.version,
+            progress: 0
+        });
+    });
+    autoUpdater.on('update-not-available', () => {
+        setDesktopUpdateState({
+            status: 'not-available',
+            version: null,
+            progress: 0
+        });
+    });
+    autoUpdater.on('download-progress', progress => {
+        setDesktopUpdateState({
+            status: 'downloading',
+            version: desktopUpdateState.version,
+            progress: Math.round(progress.percent)
+        });
+    });
+    autoUpdater.on('update-downloaded', info => {
+        setDesktopUpdateState({
+            status: 'downloaded',
+            version: info.version,
+            progress: 100
+        });
+    });
+    autoUpdater.on('error', error => {
+        console.error('No se pudo comprobar o descargar una actualización de AMGC.', error);
+        if (desktopUpdateState.status === 'downloading') {
+            setDesktopUpdateState({
+                status: 'available',
+                version: desktopUpdateState.version,
+                progress: 0,
+                error: error.message || 'No se pudo descargar la actualización.'
+            });
+        } else {
+            setDesktopUpdateState({
+                status: 'error',
+                version: null,
+                progress: 0,
+                error: error.message || 'No se pudo comprobar si hay actualizaciones.'
+            });
+        }
+    });
+
+    void autoUpdater.checkForUpdates().catch(error => {
+        console.error('No se pudo comprobar si hay actualizaciones de AMGC.', error);
+        setDesktopUpdateState({
+            status: 'error',
+            version: null,
+            progress: 0,
+            error: error.message || 'No se pudo comprobar si hay actualizaciones.'
+        });
+    });
+}
 
 function logDiscordRpc(message) {
     const line = `${new Date().toISOString()} ${message}\n`;
@@ -157,6 +239,43 @@ function isTrustedSender(event) {
         return false;
     }
 }
+
+ipcMain.handle('amgc:update:get-state', event => {
+    if (!isTrustedSender(event)) throw new Error('Origen no autorizado para consultar actualizaciones.');
+    return desktopUpdateState;
+});
+
+ipcMain.handle('amgc:update:download', async event => {
+    if (!isTrustedSender(event)) throw new Error('Origen no autorizado para descargar actualizaciones.');
+    if (!app.isPackaged || desktopUpdateState.status !== 'available') {
+        throw new Error('No hay una actualización disponible para descargar.');
+    }
+
+    setDesktopUpdateState({
+        status: 'downloading',
+        version: desktopUpdateState.version,
+        progress: 0
+    });
+    try {
+        return await autoUpdater.downloadUpdate();
+    } catch (error) {
+        setDesktopUpdateState({
+            status: 'available',
+            version: desktopUpdateState.version,
+            progress: 0,
+            error: error.message || 'No se pudo descargar la actualización.'
+        });
+        throw error;
+    }
+});
+
+ipcMain.handle('amgc:update:install', event => {
+    if (!isTrustedSender(event)) throw new Error('Origen no autorizado para instalar actualizaciones.');
+    if (!app.isPackaged || desktopUpdateState.status !== 'downloaded') {
+        throw new Error('La actualización aún no está lista para instalarse.');
+    }
+    autoUpdater.quitAndInstall(false, true);
+});
 
 function scheduleDiscordRpcReconnect() {
     if (isQuitting || discordRpcReconnectTimer || !discordRpcClientId) return;
@@ -469,6 +588,7 @@ app.whenReady().then(() => {
         console.error('El descargador local de YouTube no está disponible.', error);
     });
     createMainWindow();
+    initializeDesktopUpdates();
     app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) createMainWindow();
     });

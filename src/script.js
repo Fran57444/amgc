@@ -22,6 +22,7 @@ export function initMusicPlayer() {
     const desktopYoutubeLocalSaver = window.amgcDesktop?.saveYoutubeAudioLocally;
     const desktopOpenLocalMp3Folder = window.amgcDesktop?.openLocalMp3Folder;
     const desktopSetDiscordPresence = window.amgcDesktop?.setDiscordPresence;
+    const desktopUpdates = window.amgcDesktop;
     const accessTokenStorageKey = 'amgc-access-token';
     let accessToken = localStorage.getItem(accessTokenStorageKey) || '';
     let isLoggingOut = false;
@@ -56,7 +57,7 @@ export function initMusicPlayer() {
     socket.off('songCatalogChanged').on('songCatalogChanged', async () => {
         const activeTrackId = playlist[currentTrackIndex]?._id;
         const queueTrackIds = activeQueueTracks.map(track => String(track._id));
-        await Promise.all([fetchMusicData(), loadPlaylists()]);
+        await fetchMusicData();
         const refreshedIndex = playlist.findIndex(track => String(track._id) === String(activeTrackId));
         if (refreshedIndex >= 0) currentTrackIndex = refreshedIndex;
         activeQueueTracks = queueTrackIds
@@ -599,6 +600,9 @@ export function initMusicPlayer() {
     const chatMessages = document.getElementById("chat-messages");
     const btnOpenChat = document.getElementById("btn-open-chat");
     const chatNotificationDot = document.getElementById("chat-notification-dot");
+    const btnDesktopUpdate = document.getElementById("btn-desktop-update");
+    const desktopUpdateIcon = btnDesktopUpdate?.querySelector('.desktop-update-icon');
+    const desktopUpdateDot = document.getElementById("desktop-update-dot");
     const unreadMessageIndicator = document.getElementById("unread-message-indicator");
     const chatFriendsList = document.getElementById("chat-friends-list");
     const chatFriendsView = document.getElementById("chat-friends-view");
@@ -613,6 +617,73 @@ export function initMusicPlayer() {
     const btnExitListeningTogether = document.getElementById("btn-exit-listening-together");
     const profileFriendsGrid = document.getElementById("profile-friends-grid");
     const btnOpenFriendsPanel = document.getElementById("btn-open-friends-panel");
+
+    let desktopUpdateState = null;
+    const renderDesktopUpdateState = state => {
+        if (!btnDesktopUpdate || !state) return;
+        desktopUpdateState = state;
+        const versionLabel = state.version ? ` v${state.version}` : '';
+        if (!['available', 'downloading', 'downloaded'].includes(state.status)) {
+            btnDesktopUpdate.hidden = true;
+            desktopUpdateDot?.classList.remove('visible');
+            return;
+        }
+
+        btnDesktopUpdate.hidden = false;
+        desktopUpdateDot?.classList.add('visible');
+        if (state.status === 'available') {
+            btnDesktopUpdate.disabled = false;
+            btnDesktopUpdate.setAttribute('aria-label', `Descargar actualización${versionLabel}`);
+            btnDesktopUpdate.title = state.error
+                ? `${state.error} Pulsa para reintentar.`
+                : `Descargar actualización${versionLabel}`;
+            if (desktopUpdateIcon) desktopUpdateIcon.textContent = '↓';
+        } else if (state.status === 'downloading') {
+            btnDesktopUpdate.disabled = true;
+            btnDesktopUpdate.setAttribute('aria-label', `Descargando actualización${versionLabel}: ${state.progress || 0}%`);
+            btnDesktopUpdate.title = `Descargando actualización${versionLabel}: ${state.progress || 0}%`;
+            if (desktopUpdateIcon) desktopUpdateIcon.textContent = `${state.progress || 0}%`;
+        } else {
+            btnDesktopUpdate.disabled = false;
+            btnDesktopUpdate.setAttribute('aria-label', `Reiniciar para instalar actualización${versionLabel}`);
+            btnDesktopUpdate.title = `Reiniciar para instalar actualización${versionLabel}`;
+            if (desktopUpdateIcon) desktopUpdateIcon.textContent = '↻';
+        }
+    };
+    const onDesktopUpdateState = state => renderDesktopUpdateState(state);
+    if (btnDesktopUpdate && desktopUpdates?.getUpdateState
+        && desktopUpdates?.subscribeUpdateState) {
+        desktopUpdates.subscribeUpdateState(onDesktopUpdateState);
+        desktopUpdates.getUpdateState().then(renderDesktopUpdateState).catch(error => {
+            console.error('No se pudo consultar el estado de las actualizaciones.', error);
+        });
+        btnDesktopUpdate.addEventListener('click', async () => {
+            if (desktopUpdateState?.status === 'available') {
+                btnDesktopUpdate.disabled = true;
+                try {
+                    await desktopUpdates.downloadUpdate();
+                } catch (error) {
+                    console.error('No se pudo descargar la actualización.', error);
+                    renderDesktopUpdateState({
+                        ...desktopUpdateState,
+                        status: 'available',
+                        error: error.message || 'No se pudo descargar la actualización.'
+                    });
+                }
+                return;
+            }
+            if (desktopUpdateState?.status === 'downloaded') {
+                btnDesktopUpdate.disabled = true;
+                try {
+                    await desktopUpdates.installUpdate();
+                } catch (error) {
+                    console.error('No se pudo instalar la actualización.', error);
+                    btnDesktopUpdate.disabled = false;
+                    btnDesktopUpdate.title = error.message || 'No se pudo iniciar la instalación.';
+                }
+            }
+        });
+    }
 
     const modalOverlay = document.getElementById("modal-overlay");
     const addToPlModal = document.getElementById("add-to-pl-modal");
@@ -651,6 +722,12 @@ export function initMusicPlayer() {
     const btnSaveEditedSong = document.getElementById("btn-save-edited-song");
     const btnCancelEditedSong = document.getElementById("btn-cancel-edited-song");
     const btnDeleteSong = document.getElementById("btn-delete-song");
+    const deleteSongConfirmation = document.getElementById("delete-song-confirmation");
+    const deleteSongNameStep = document.getElementById("delete-song-name-step");
+    const deleteSongConfirmationTitle = document.getElementById("delete-song-confirmation-title");
+    const deleteSongNameConfirmation = document.getElementById("delete-song-name-confirmation");
+    const btnConfirmDeleteSong = document.getElementById("btn-confirm-delete-song");
+    const btnCancelDeleteSongFinal = document.getElementById("btn-cancel-delete-song-final");
     const songImageEditWrapper = document.getElementById("song-image-edit-wrapper");
     const editSongPhoto = document.getElementById("edit-song-photo");
 
@@ -716,6 +793,7 @@ export function initMusicPlayer() {
     let playbackUiTrackId = null;
     let playbackUiTime = 0;
     let playbackUiFrame = null;
+    let localPlaybackActivity = null;
     let lastPlaybackBroadcastAt = 0;
     let lastPlaybackPersistenceAt = 0;
     let publicProfilePlaylists = null;
@@ -1055,7 +1133,9 @@ export function initMusicPlayer() {
     }
 
     function getEditedTrack() {
-        return editingTrackIndex !== null ? playlist[editingTrackIndex] : null;
+        return editingTrackId
+            ? playlist.find(track => String(track._id) === editingTrackId) || null
+            : null;
     }
 
     function updateEditLyricsPreview(scrollActiveLyric = true) {
@@ -1648,14 +1728,20 @@ export function initMusicPlayer() {
                         console.warn('No se pudo leer la escucha offline pendiente del perfil.', error);
                     }
                 }
-                const totalListeningSeconds = Number(stats.listeningSeconds || 0) + pendingListeningSeconds;
-                const hours = (totalListeningSeconds / 3600).toFixed(1);
+                const totalListeningSeconds = Math.max(
+                    0,
+                    (Number.isFinite(Number(stats.listeningSeconds)) ? Number(stats.listeningSeconds) : 0)
+                    + pendingListeningSeconds
+                );
+                const totalListeningMinutes = Math.floor(totalListeningSeconds / 60);
+                const hours = Math.floor(totalListeningMinutes / 60);
+                const minutes = totalListeningMinutes % 60;
                 const createdAt = stats.createdAt
                     ? new Date(stats.createdAt).toLocaleDateString('es-CL', { timeZone: 'America/Santiago' })
                     : '-';
                 const values = {
                     'profile-stat-role': stats.role || (user.isAdmin ? 'Administrador' : 'Usuario'),
-                    'profile-stat-hours': `${hours} h`,
+                    'profile-stat-hours': `${hours} h ${minutes} min`,
                     'profile-stat-added': stats.songsAdded || 0,
                     'profile-stat-edited': stats.songsEdited || 0,
                     'profile-stat-friends': stats.friendsAdded ?? (user.friends || []).length,
@@ -1720,7 +1806,17 @@ export function initMusicPlayer() {
             const isOfflineProfile = isOwnProfile && offlineOnly;
             const currentCover = track ? getSongCover(track) : (displayTrack?.cover || '/img/vinculo.png');
             const activityColor = displayTrack?.color || '#ff8a00';
-            const lastPlayedAt = displayTrack?.updatedAt || user?.lastActive;
+            const currentTrackId = track?._id ? String(track._id) : null;
+            const localPlaybackUpdatedAt = isOwnProfile && currentTrackId
+                && localPlaybackActivity?.userId === String(user?._id || '')
+                && localPlaybackActivity?.trackId === currentTrackId
+                ? localPlaybackActivity.updatedAt
+                : null;
+            const lastPlayedAt = displayTrack?.updatedAt
+                || localPlaybackUpdatedAt
+                || recentTrack?.updatedAt
+                || user?.lastPlayed?.updatedAt
+                || user?.lastActive;
             const lastPlayedLabel = lastPlayedAt ? ` · ${timeAgo(lastPlayedAt)}` : '';
             const listeningLabel = isListening
                 ? 'Escuchando'
@@ -1810,8 +1906,10 @@ export function initMusicPlayer() {
     }
 
     function timeAgo(dateValue) {
-        if (!dateValue) return '';
-        const diffMs = Date.now() - new Date(dateValue).getTime();
+        if (dateValue === null || dateValue === undefined || dateValue === '') return '';
+        const timestamp = new Date(dateValue).getTime();
+        if (!Number.isFinite(timestamp)) return '';
+        const diffMs = Math.max(0, Date.now() - timestamp);
         const diffMin = Math.floor(diffMs / 60000);
         if (diffMin < 1) return 'justo ahora';
         if (diffMin < 60) return `hace ${diffMin} min`;
@@ -1902,6 +2000,17 @@ export function initMusicPlayer() {
             songId: track._id,
             currentTime: Number.isFinite(audio.currentTime) ? audio.currentTime : 0
         }));
+    }
+
+    function rememberLocalPlaybackActivity() {
+        const trackId = playlist[currentTrackIndex]?._id;
+        const userId = getStoredUser()?._id;
+        if (!trackId || !userId) return;
+        localPlaybackActivity = {
+            userId: String(userId),
+            trackId: String(trackId),
+            updatedAt: new Date().toISOString()
+        };
     }
 
     function recordOfflineListeningProgress(track, currentTime, includePaused = false) {
@@ -2347,6 +2456,15 @@ export function initMusicPlayer() {
         else localStorage.removeItem(chatDraftsKey(userId, friendId));
     }
 
+    function updateStoredChatDraft(userId, friendId, localId, status) {
+        const drafts = readLocalChatMessages(userId, friendId)
+            .map(message => message._localId === localId ? { ...message, status } : message)
+            .filter(message => ['enviando', 'fallido'].includes(message.status));
+        const storageKey = chatDraftsKey(userId, friendId);
+        if (drafts.length) localStorage.setItem(storageKey, JSON.stringify(drafts));
+        else localStorage.removeItem(storageKey);
+    }
+
     function formatMessageDate(value) {
         const date = new Date(value);
         const now = new Date();
@@ -2504,35 +2622,48 @@ export function initMusicPlayer() {
 
     async function sendChatMessage() {
         const user = getStoredUser();
+        const receiverId = activeChatFriendId;
         const content = chatInput?.value.trim();
-        if (!user || !activeChatFriendId || !content) return;
+        if (!user || !receiverId || !content) return;
         chatInput.value = '';
         const localMessage = {
             _localId: `local-${Date.now()}-${Math.random().toString(36).slice(2)}`,
             sender: user._id,
-            receiver: activeChatFriendId,
+            receiver: receiverId,
             content,
             timestamp: new Date().toISOString(),
             status: 'enviando'
         };
         localChatMessages.push(localMessage);
-        saveLocalChatMessages(user._id, activeChatFriendId);
+        saveLocalChatMessages(user._id, receiverId);
         renderChatMessages(serverChatMessages, user);
         try {
             const response = await apiFetch(`${API_URL}/messages`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ sender: user._id, receiver: activeChatFriendId, content })
+                body: JSON.stringify({ sender: user._id, receiver: receiverId, content })
             });
             const result = await response.json().catch(() => null);
-            if (!response.ok) throw new Error(result?.error || 'No se pudo enviar el mensaje');
+            if (!response.ok || !result?._id) throw new Error(result?.error || 'No se pudo enviar el mensaje');
+            updateStoredChatDraft(user._id, receiverId, localMessage._localId, 'enviado');
+            if (String(activeChatFriendId) !== String(receiverId)) return;
             localChatMessages = localChatMessages.filter(message => message._localId !== localMessage._localId);
-            saveLocalChatMessages(user._id, activeChatFriendId);
-            await loadChatMessages(false);
+            saveLocalChatMessages(user._id, receiverId);
+            if (!serverChatMessages.some(message => String(message._id) === String(result._id))) {
+                serverChatMessages = [...serverChatMessages, result].sort((a, b) => (
+                    new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+                ));
+            }
+            renderChatMessages(serverChatMessages, user);
         } catch (e) {
             localMessage.status = 'fallido';
-            saveLocalChatMessages(user._id, activeChatFriendId);
-            renderChatMessages(serverChatMessages, user);
+            updateStoredChatDraft(user._id, receiverId, localMessage._localId, 'fallido');
+            if (String(activeChatFriendId) === String(receiverId)) {
+                localChatMessages = localChatMessages.map(message => (
+                    message._localId === localMessage._localId ? localMessage : message
+                ));
+                renderChatMessages(serverChatMessages, user);
+            }
             console.warn('No se pudo enviar el mensaje', e);
         }
     }
@@ -2608,7 +2739,8 @@ export function initMusicPlayer() {
                 renderProfile();
             }
         });
-        socket.off('playlistChanged').on('playlistChanged', ({ playlistId, deleted } = {}) => {
+        socket.off('playlistChanged').on('playlistChanged', ({ playlistId, deleted, changedBy } = {}) => {
+            if (String(changedBy || '') === String(getStoredUser()?._id || '')) return;
             playlistRealtimeRefresh = playlistRealtimeRefresh.then(async () => {
                 await loadPlaylists();
                 if (isPlaylistViewMode && activePlaylistId === playlistId) {
@@ -3794,6 +3926,8 @@ export function initMusicPlayer() {
     let activePlaylistId = null;
     let trackToAddIndex = null;
     let editingTrackIndex = null;
+    let editingTrackId = null;
+    let songSaveInProgress = false;
     let playlistEditorPreviousView = null;
     let originalEditLyrics = '';
     let lyricsCancelPromptIndex = 0;
@@ -3812,6 +3946,8 @@ export function initMusicPlayer() {
     let userPlaylists = [];
     let playlistRealtimeRefresh = Promise.resolve();
     const pendingPlaylistTrackChanges = new Set();
+    const pendingPlaylistOrderSaves = new Map();
+    const pendingSongDeletes = new Set();
     let songsRenderToken = 0;
     let statusHeartbeatTimer = null;
     let playlistIdPendingShare = null;
@@ -4156,6 +4292,18 @@ export function initMusicPlayer() {
         }
     }
 
+    function savePlaylistOrder(plData) {
+        const playlistId = String(plData.id);
+        const previousSave = pendingPlaylistOrderSaves.get(playlistId) || Promise.resolve();
+        const currentSave = previousSave.catch(() => {}).then(() => savePlaylistsToDB(plData));
+        pendingPlaylistOrderSaves.set(playlistId, currentSave);
+        return currentSave.finally(() => {
+            if (pendingPlaylistOrderSaves.get(playlistId) === currentSave) {
+                pendingPlaylistOrderSaves.delete(playlistId);
+            }
+        });
+    }
+
     async function loadPlaylists() {
         try {
             const user = getStoredUser();
@@ -4387,6 +4535,17 @@ export function initMusicPlayer() {
         
         activeQueueTracks = [...playlist];
         resetPlaybackHistory();
+        if (editingTrackId) {
+            editingTrackIndex = playlist.findIndex(track => String(track._id) === editingTrackId);
+            const trackStillExists = editingTrackIndex !== -1;
+            if (!songSaveInProgress) {
+                if (btnSaveEditedSong) btnSaveEditedSong.disabled = !trackStillExists;
+                if (btnDeleteSong) btnDeleteSong.disabled = !trackStillExists;
+            }
+            if (!trackStillExists && isEditSongMode) {
+                setEditorStatus(editLyricsStatus, 'Esta canción ya no está en el catálogo. Cancela la edición para continuar.', true);
+            }
+        }
         renderAllSongs();
         if (playlist.length > 0 && !audio.src && userAtRequestStart?._id) {
             const user = userAtRequestStart;
@@ -4797,7 +4956,6 @@ export function initMusicPlayer() {
 
     function createSongContextMenuHtml(i, isSongsTab = false) {
         const editBtnHtml = isSongsTab && canCurrentUser('edit_songs') ? `<button class="action-edit" data-index="${i}">Editar canción</button>` : '';
-        const deleteBtnHtml = isSongsTab && canCurrentUser('delete_songs') ? `<button class="action-delete" data-index="${i}">Eliminar canción</button>` : '';
         const copyBtnHtml = isSongsTab ? `<button class="action-copy" data-index="${i}">Copiar nombre y artista</button>` : '';
         return `
             <div class="song-actions-wrapper" style="display:flex; gap:8px; align-items:center;">
@@ -4809,7 +4967,6 @@ export function initMusicPlayer() {
                     <button class="action-add-queue" data-index="${i}">Añadir a cola</button>
                     <button class="action-add-pl" data-index="${i}">Añadir a playlist</button>
                     ${editBtnHtml}
-                    ${deleteBtnHtml}
                 </div>
             </div>
         `;
@@ -5000,10 +5157,19 @@ export function initMusicPlayer() {
         element.draggable = true;
         setupNativeReorderDrag(element, `playlist:${playlistData.id}`, trackPosition, (fromPosition, toPosition) => {
             if (fromPosition >= playlistData.tracks.length || toPosition >= playlistData.tracks.length) return;
+            const previousTracks = [...playlistData.tracks];
             const [movedTrack] = playlistData.tracks.splice(fromPosition, 1);
             playlistData.tracks.splice(toPosition, 0, movedTrack);
-            savePlaylistsToDB(playlistData);
+            const movedTrackIds = playlistData.tracks.map(track => String(track._id || track.id));
             openPlaylistView(playlistData.id);
+            savePlaylistOrder(playlistData).catch(error => {
+                const currentTrackIds = playlistData.tracks.map(track => String(track._id || track.id));
+                if (currentTrackIds.every((trackId, index) => trackId === movedTrackIds[index])) {
+                    playlistData.tracks = previousTracks;
+                    if (activePlaylistId === playlistData.id) openPlaylistView(playlistData.id);
+                    showToast(error.message || 'No se pudo guardar el nuevo orden de la playlist.', true);
+                }
+            });
         });
     }
 
@@ -5036,7 +5202,6 @@ export function initMusicPlayer() {
             const actionAddQueue = e.target.closest('.action-add-queue');
             const actionAddPl = e.target.closest('.action-add-pl');
             const actionEdit = e.target.closest('.action-edit');
-            const actionDelete = e.target.closest('.action-delete');
             const actionCopy = e.target.closest('.action-copy');
             const removeQueueItem = e.target.closest('.remove-queue-btn');
 
@@ -5097,14 +5262,6 @@ export function initMusicPlayer() {
                 if (!canCurrentUser('edit_songs')) return;
                 document.querySelectorAll('.song-actions-menu').forEach(m => m.classList.remove('show'));
                 openEditSongPanel(trackIndex);
-                return;
-            }
-
-            if (actionDelete) {
-                e.stopPropagation();
-                if (!canCurrentUser('delete_songs')) return;
-                document.querySelectorAll('.song-actions-menu').forEach(m => m.classList.remove('show'));
-                if (window.confirm('¿Eliminar esta canción?')) deleteSong(trackIndex);
                 return;
             }
 
@@ -5288,7 +5445,7 @@ export function initMusicPlayer() {
             el.addEventListener('dblclick', (e) => {
                 e.stopPropagation();
                 if (pl.tracks.length > 0) {
-                    activeQueueTracks = pl.tracks.map(t => playlist.find(main => main._id === t._id)).filter(Boolean);
+                    activeQueueTracks = pl.tracks.map(t => playlist.find(main => String(main._id) === String(t._id))).filter(Boolean);
                     customQueue = []; 
                     resetPlaybackHistory();
                     renderQueue();
@@ -5301,31 +5458,76 @@ export function initMusicPlayer() {
 
     function generateId() { return 'pl-' + Math.random().toString(36).substring(2, 9); }
 
-    async function deleteSong(index) {
-        const track = playlist[index];
+    function resetSongDeleteConfirmation() {
+        if (deleteSongConfirmation) deleteSongConfirmation.hidden = true;
+        if (deleteSongNameStep) deleteSongNameStep.hidden = true;
+        if (deleteSongConfirmationTitle) deleteSongConfirmationTitle.textContent = '';
+        if (deleteSongNameConfirmation) deleteSongNameConfirmation.value = '';
+        if (btnConfirmDeleteSong) {
+            btnConfirmDeleteSong.disabled = true;
+            btnConfirmDeleteSong.textContent = 'Eliminar';
+        }
+        if (btnDeleteSong) {
+            btnDeleteSong.hidden = false;
+            btnDeleteSong.dataset.confirmDelete = 'false';
+            btnDeleteSong.textContent = 'Eliminar Canción';
+        }
+    }
+
+    function getSongDeleteConfirmationName(track) {
+        return String(track?.name || 'Canción sin nombre').trim();
+    }
+
+    async function deleteSong(songId) {
+        const track = playlist.find(item => String(item._id) === String(songId));
         const user = getStoredUser();
         if (!track || !user?._id || !canCurrentUser('delete_songs')) {
             showToast('No tienes permiso para eliminar canciones.', true);
             return;
         }
-        if (loadingSpinner) loadingSpinner.style.display = 'flex';
+        const trackId = String(track._id);
+        if (pendingSongDeletes.has(trackId)) return;
+        if (
+            !isEditSongMode
+            || editingTrackId !== trackId
+            || btnDeleteSong?.dataset.confirmDelete !== 'true'
+            || deleteSongConfirmation?.hidden !== false
+            || deleteSongNameStep?.hidden !== false
+            || deleteSongNameConfirmation?.value.trim() !== getSongDeleteConfirmationName(track)
+        ) {
+            showToast('Escribe el nombre exacto de la canción en el editor para confirmar su eliminación.', true);
+            return;
+        }
+        pendingSongDeletes.add(trackId);
+        const deletingFromEditor = editingTrackId === trackId && isEditSongMode;
+        if (btnConfirmDeleteSong) {
+            btnConfirmDeleteSong.disabled = true;
+            btnConfirmDeleteSong.textContent = 'Eliminando...';
+        }
         try {
-            const response = await apiFetch(`${API_URL}/songs/${track._id}`, {
+            const response = await apiFetch(`${API_URL}/songs/${encodeURIComponent(trackId)}`, {
                 method: 'DELETE',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ userId: user._id })
             });
             const result = await response.json().catch(() => null);
             if (!response.ok) throw new Error(result?.error || 'No se pudo eliminar la canción.');
-            await fetchMusicData();
+            if (!socket.connected) await fetchMusicData();
+            resetSongDeleteConfirmation();
             isEditSongMode = false;
+            editingTrackIndex = null;
+            editingTrackId = null;
             isAllSongsMode = true;
             updateBackgroundAndViews();
         } catch (error) {
             console.error('No se pudo eliminar la canción.', error);
             showToast(error.message || 'Error al eliminar la canción.', true);
         } finally {
-            if (loadingSpinner) loadingSpinner.style.display = 'none';
+            pendingSongDeletes.delete(trackId);
+            if (deletingFromEditor && isEditSongMode && editingTrackId === trackId && btnConfirmDeleteSong) {
+                btnConfirmDeleteSong.disabled = deleteSongNameConfirmation?.value.trim() !== getSongDeleteConfirmationName(track);
+                btnConfirmDeleteSong.textContent = 'Eliminar';
+            }
         }
     }
 
@@ -5338,10 +5540,9 @@ export function initMusicPlayer() {
         btnCancelEditedSong.textContent = cancelEditedSongLabel;
         stopEditPreviewAudio();
         editingTrackIndex = index;
-        if (btnDeleteSong) {
-            btnDeleteSong.dataset.confirmDelete = 'false';
-            btnDeleteSong.textContent = 'Eliminar Canción';
-        }
+        editingTrackId = index !== null && playlist[index]?._id ? String(playlist[index]._id) : null;
+        resetSongDeleteConfirmation();
+        if (btnDeleteSong) btnDeleteSong.disabled = false;
         
         if (index !== null && playlist[index]) {
             const track = playlist[index];
@@ -5446,12 +5647,16 @@ export function initMusicPlayer() {
                 playEditAudioFile(selectedAudioFile);
                 return;
             }
-            if (editingTrackIndex === null || !playlist[editingTrackIndex]) {
+            const editedTrack = getEditedTrack();
+            const editedTrackIndex = editedTrack
+                ? playlist.findIndex(track => String(track._id) === editingTrackId)
+                : -1;
+            if (editedTrackIndex < 0) {
                 setEditorStatus(editLyricsStatus, 'Selecciona un archivo de audio para poder escucharlo y sincronizar la letra.', true);
                 return;
             }
             stopEditPreviewAudio();
-            loadAndPlayTrack(editingTrackIndex);
+            loadAndPlayTrack(editedTrackIndex);
             setEditorStatus(editLyricsStatus, 'Reproduciendo la canción editada.');
         });
     }
@@ -5501,20 +5706,29 @@ export function initMusicPlayer() {
     }
 
     btnSaveEditedSong.addEventListener('click', async () => {
+        if (songSaveInProgress) return;
         if (!canCurrentUser('edit_songs')) {
             showToast('No tienes permiso para editar canciones.', true);
             return;
         }
+        const trackBeingEdited = editingTrackId
+            ? playlist.find(track => String(track._id) === editingTrackId)
+            : null;
+        if (editingTrackId && !trackBeingEdited) {
+            setEditorStatus(editLyricsStatus, 'Esta canción ya no está en el catálogo. Cancela la edición para continuar.', true);
+            return;
+        }
+        songSaveInProgress = true;
         btnSaveEditedSong.textContent = "Guardando...";
         btnSaveEditedSong.disabled = true;
-        if (loadingSpinner) loadingSpinner.style.display = 'flex';
+        if (btnDeleteSong) btnDeleteSong.disabled = true;
 
         const lyricsWereEdited = editInputLyrics.value !== originalEditLyrics;
         const formData = new FormData();
-        if (editingTrackIndex !== null && playlist[editingTrackIndex]) {
-            formData.append('id', playlist[editingTrackIndex]._id);
-            formData.append('existingPath', playlist[editingTrackIndex].path || '');
-            formData.append('existingCover', playlist[editingTrackIndex].cover || '');
+        if (trackBeingEdited) {
+            formData.append('id', trackBeingEdited._id);
+            formData.append('existingPath', trackBeingEdited.path || '');
+            formData.append('existingCover', trackBeingEdited.cover || '');
         }
 
         formData.append('name', editInputName.value.trim() || 'Canción Sin Título');
@@ -5526,20 +5740,21 @@ export function initMusicPlayer() {
                 lyricsForSave = prepareLyricsForSongSave(lyricsForSave);
                 setEditorStatus(editLyricsStatus, '');
             } catch (error) {
-                btnSaveEditedSong.textContent = editingTrackIndex !== null ? "Guardar Cambios" : "Añadir Canción";
+                songSaveInProgress = false;
+                btnSaveEditedSong.textContent = editingTrackId !== null ? "Guardar Cambios" : "Añadir Canción";
                 btnSaveEditedSong.disabled = false;
-                if (loadingSpinner) loadingSpinner.style.display = 'none';
+                if (btnDeleteSong) btnDeleteSong.disabled = false;
                 setEditorStatus(editLyricsStatus, error.message, true);
                 editInputLyrics.focus();
                 return;
             }
-        } else if (editingTrackIndex !== null && playlist[editingTrackIndex]?.lyrics) {
-            lyricsForSave = playlist[editingTrackIndex].lyrics;
+        } else if (trackBeingEdited?.lyrics) {
+            lyricsForSave = trackBeingEdited.lyrics;
         }
         formData.append('lyrics', lyricsForSave);
         formData.append('duration', String(
-            editingTrackIndex !== null && playlist[editingTrackIndex]
-                ? Number(playlist[editingTrackIndex].duration) || 0
+            trackBeingEdited
+                ? Number(trackBeingEdited.duration) || 0
                 : 0
         ));
         const editingUser = getStoredUser();
@@ -5557,12 +5772,13 @@ export function initMusicPlayer() {
         if (ytLinkVal) {
             if (!isValidYoutubeLink(ytLinkVal)) {
                 showYoutubeLinkStatus("El enlace de YouTube no es válido.", true);
-                btnSaveEditedSong.textContent = editingTrackIndex !== null ? "Guardar Cambios" : "Añadir Canción";
+                songSaveInProgress = false;
+                btnSaveEditedSong.textContent = editingTrackId !== null ? "Guardar Cambios" : "Añadir Canción";
                 btnSaveEditedSong.disabled = false;
-                if (loadingSpinner) loadingSpinner.style.display = 'none';
+                if (btnDeleteSong) btnDeleteSong.disabled = false;
                 return;
             }
-            startYtDownloadProgress(editingTrackIndex !== null ? 'Actualizando canción' : 'Añadiendo canción');
+            startYtDownloadProgress(editingTrackId !== null ? 'Actualizando canción' : 'Añadiendo canción');
             if (desktopYoutubeDownloader) {
                 showYoutubeLinkStatus('Descargando el audio en este equipo antes de subirlo...', false);
             } else {
@@ -5595,7 +5811,7 @@ export function initMusicPlayer() {
                 throw new Error(message);
             }
             stopEditPreviewAudio(true);
-            const savedTrackId = String(result?._id || (editingTrackIndex !== null ? playlist[editingTrackIndex]?._id : ''));
+            const savedTrackId = String(result?._id || trackBeingEdited?._id || '');
             if (savedTrackId && lyricsWereEdited) {
                 const nextTimedLyrics = { ...timedLyricsByTrack };
                 delete nextTimedLyrics[savedTrackId];
@@ -5606,13 +5822,15 @@ export function initMusicPlayer() {
                     console.warn('No se pudo actualizar la copia local de las lyrics; se usará la versión del servidor.', error);
                 }
             }
-            await fetchMusicData();
+            if (!socket.connected) await fetchMusicData();
 
             if (ytLinkVal) {
                 stopYtDownloadProgress({ success: true, message: 'MP3 convertido, subido a Drive y guardado en MongoDB' });
             }
             
             isEditSongMode = false;
+            editingTrackIndex = null;
+            editingTrackId = null;
             isAllSongsMode = true;
             updateBackgroundAndViews();
             
@@ -5634,9 +5852,12 @@ export function initMusicPlayer() {
                 showToast(visibleMessage, true);
             }
         } finally {
-            btnSaveEditedSong.textContent = editingTrackIndex !== null ? "Guardar Cambios" : "Añadir Canción";
-            btnSaveEditedSong.disabled = false;
-            if (loadingSpinner) loadingSpinner.style.display = 'none';
+            songSaveInProgress = false;
+            const trackStillExists = !editingTrackId
+                || playlist.some(track => String(track._id) === editingTrackId);
+            btnSaveEditedSong.textContent = editingTrackId !== null ? "Guardar Cambios" : "Añadir Canción";
+            btnSaveEditedSong.disabled = !trackStillExists;
+            if (btnDeleteSong) btnDeleteSong.disabled = !trackStillExists;
         }
     });
 
@@ -5646,15 +5867,47 @@ export function initMusicPlayer() {
                 showToast('No tienes permiso para eliminar canciones.', true);
                 return;
             }
-            if (editingTrackIndex === null || !playlist[editingTrackIndex]) return;
+            const track = editingTrackId
+                ? playlist.find(item => String(item._id) === editingTrackId)
+                : null;
+            if (!track) {
+                showToast('La canción ya no está disponible para eliminar.', true);
+                return;
+            }
             if (btnDeleteSong.dataset.confirmDelete !== 'true') {
                 btnDeleteSong.dataset.confirmDelete = 'true';
                 btnDeleteSong.textContent = '¿Confirmar?';
                 return;
             }
-            btnDeleteSong.dataset.confirmDelete = 'false';
-            btnDeleteSong.textContent = 'Eliminar Canción';
-            deleteSong(editingTrackIndex);
+            deleteSongConfirmationTitle.textContent = getSongDeleteConfirmationName(track);
+            deleteSongConfirmation.hidden = false;
+            deleteSongNameStep.hidden = false;
+            btnDeleteSong.hidden = true;
+            deleteSongNameConfirmation.focus();
+        });
+    }
+
+    if (deleteSongNameConfirmation) {
+        const updateDeleteConfirmationState = () => {
+            const track = playlist.find(item => String(item._id) === editingTrackId);
+            btnConfirmDeleteSong.disabled = !track
+                || pendingSongDeletes.has(String(track._id))
+                || deleteSongNameConfirmation.value.trim() !== getSongDeleteConfirmationName(track);
+        };
+        deleteSongNameConfirmation.addEventListener('input', updateDeleteConfirmationState);
+    }
+
+    if (btnConfirmDeleteSong) {
+        btnConfirmDeleteSong.addEventListener('click', () => {
+            if (btnConfirmDeleteSong.disabled) return;
+            deleteSong(editingTrackId);
+        });
+    }
+
+    if (btnCancelDeleteSongFinal) {
+        btnCancelDeleteSongFinal.addEventListener('click', () => {
+            resetSongDeleteConfirmation();
+            btnDeleteSong?.focus();
         });
     }
 
@@ -5671,8 +5924,11 @@ export function initMusicPlayer() {
         }
         lyricsCancelPromptIndex = 0;
         btnCancelEditedSong.textContent = cancelEditedSongLabel;
+        resetSongDeleteConfirmation();
         stopEditPreviewAudio(true);
         isEditSongMode = false;
+        editingTrackIndex = null;
+        editingTrackId = null;
         isAllSongsMode = true;
         updateBackgroundAndViews();
     });
@@ -5970,27 +6226,6 @@ export function initMusicPlayer() {
         
         const coverUrl = getPlaylistCover(pl);
 
-        if (plViewPhoto.src !== coverUrl && !plViewPhoto.src.endsWith(coverUrl)) {
-            if (loadingSpinner) loadingSpinner.style.display = 'flex';
-            plViewPhoto.onload = () => {
-                if (loadingSpinner) loadingSpinner.style.display = 'none';
-                plViewPhoto.onload = null;
-            };
-            plViewPhoto.onerror = () => {
-                if (loadingSpinner) loadingSpinner.style.display = 'none';
-                plViewPhoto.removeAttribute('src');
-                plViewPhoto.classList.add('no-image');
-                plViewPhoto.onerror = null;
-            };
-            if (coverUrl) {
-                plViewPhoto.src = coverUrl;
-                plViewPhoto.classList.remove('no-image');
-            } else {
-                plViewPhoto.removeAttribute('src');
-                plViewPhoto.classList.add('no-image');
-            }
-        }
-        
         activePlaylistId = id;
         if (btnEditPlaylist) {
             btnEditPlaylist.hidden = !canEditPlaylist;
@@ -6025,7 +6260,7 @@ export function initMusicPlayer() {
         isProfileMode = false;
         
         if (coverUrl) {
-            plViewPhoto.src = coverUrl;
+            if (plViewPhoto.getAttribute('src') !== coverUrl) plViewPhoto.src = coverUrl;
             plViewPhoto.classList.remove('no-image');
         } else {
             plViewPhoto.removeAttribute('src');
@@ -6196,12 +6431,14 @@ export function initMusicPlayer() {
                 ...trackItem,
                 ...detail
             };
-            const playlistIndex = playlist.findIndex(t => t._id === track._id);
+            const playlistIndex = playlist.findIndex(t => String(t._id) === String(track._id));
 
             const li = document.createElement('li');
             li.className = 'playlist-track-row';
             const addedBy = typeof track.addedBy === 'object' ? track.addedBy : null;
             const editedBy = typeof track.editedBy === 'object' ? track.editedBy : null;
+            const addedByName = addedBy?.username || track.addedByName || 'Desconocido';
+            const editedByName = editedBy?.username || '—';
             const addedByPhoto = addedBy?.profilePhoto
                 || currentFriends.find(friend => String(friend._id) === String(addedBy?._id))?.profilePhoto
                 || '';
@@ -6211,7 +6448,7 @@ export function initMusicPlayer() {
                     <span class="all-songs-item-name">${escapeHtml(track.name)}</span>
                     <span class="all-songs-item-artist">${escapeHtml(track.artist)}</span>
                 </div>
-                <small class="playlist-track-meta"><span class="playlist-added-by">${addedByPhoto ? `<img src="${escapeHtml(addedByPhoto)}" alt="" class="playlist-meta-avatar" />` : ''} ${addedBy?._id ? `<button type="button" class="playlist-user-link" data-user-id="${escapeHtml(addedBy._id)}" style="background:transparent; border:none; cursor:pointer;">${escapeHtml(addedBy.username)}</button>` : escapeHtml(track.addedBy || 'Desconocido')}</span><span>${track.addedAt ? new Date(track.addedAt).toLocaleDateString('es-CL', { timeZone: 'America/Santiago' }) : '--'}</span>${editedBy?._id ? `<span>Editada por: <button type="button" class="playlist-user-link" data-user-id="${escapeHtml(editedBy._id)}">${escapeHtml(editedBy.username)}</button></span>` : ''}<span class="playlist-track-duration">${formatTrackTime(Number(track.duration) || 0)}</span></small>
+                <small class="playlist-track-meta"><span class="playlist-added-by">${addedByPhoto ? `<img src="${escapeHtml(addedByPhoto)}" alt="" class="playlist-meta-avatar" />` : ''} ${addedBy?._id ? `<button type="button" class="playlist-user-link" data-user-id="${escapeHtml(addedBy._id)}" style="background:transparent; border:none; cursor:pointer;">${escapeHtml(addedByName)}</button>` : escapeHtml(addedByName)}</span><span>${track.addedAt ? new Date(track.addedAt).toLocaleDateString('es-CL', { timeZone: 'America/Santiago' }) : '--'}</span><span>Editada por: ${editedBy?._id ? `<button type="button" class="playlist-user-link" data-user-id="${escapeHtml(editedBy._id)}">${escapeHtml(editedByName)}</button>` : escapeHtml(editedByName)}</span><span class="playlist-track-duration">${formatTrackTime(Number(track.duration) || 0)}</span></small>
                 ${canDeletePlaylistTracks ? `
                     <button class="remove-from-pl-btn" style="background:transparent; border:none; cursor:pointer; justify-self:end;" type="button">
                         <img src="/img/cancel.png" draggable="false" class="no-drag" alt="Remove" style="width:20px;">
@@ -6434,6 +6671,7 @@ export function initMusicPlayer() {
 
     audio.addEventListener('play', () => { 
         updateDiscordPresence();
+        rememberLocalPlaybackActivity();
         suppressStartupPlaybackUpdates = false;
         const activeUser = getStoredUser();
         if (activeUser?._id && !isRestoringInitialPlayback) {
@@ -6455,6 +6693,7 @@ export function initMusicPlayer() {
     });
     audio.addEventListener('pause', () => { 
         updateDiscordPresence();
+        rememberLocalPlaybackActivity();
         recordOfflineListeningProgress(
             playlist[currentTrackIndex],
             Number.isFinite(audio.currentTime) ? audio.currentTime : 0,
@@ -7093,6 +7332,7 @@ export function initMusicPlayer() {
 
     audio.addEventListener('seeked', () => {
         updateDiscordPresence();
+        rememberLocalPlaybackActivity();
         persistPlaybackPosition(true);
         broadcastPlaybackState(true);
         if (isEditSongMode) updateEditLyricsPreview();
@@ -7198,5 +7438,6 @@ export function initMusicPlayer() {
         window.removeEventListener('offline', handleOffline);
         window.removeEventListener('online', handleOnline);
         stopRealtime();
+        desktopUpdates?.unsubscribeUpdateState?.();
     };
 }
