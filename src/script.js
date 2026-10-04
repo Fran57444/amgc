@@ -72,11 +72,8 @@ export function initMusicPlayer() {
         loadFriends();
     });
     socket.off('songCatalogChanged').on('songCatalogChanged', async () => {
-        const activeTrackId = playlist[currentTrackIndex]?._id;
         const queueTrackIds = activeQueueTracks.map(track => String(track._id));
         await fetchMusicData();
-        const refreshedIndex = playlist.findIndex(track => String(track._id) === String(activeTrackId));
-        if (refreshedIndex >= 0) currentTrackIndex = refreshedIndex;
         if (generalQueueAnchorTrackId) {
             const anchorTrack = playlist.find(track => String(track._id) === generalQueueAnchorTrackId);
             if (!anchorTrack) generalQueueAnchorTrackId = null;
@@ -85,6 +82,8 @@ export function initMusicPlayer() {
             .map(trackId => playlist.find(track => String(track._id) === trackId))
             .filter(Boolean);
         renderQueue();
+        if (isLyricsMode) updateLyricsView();
+        if (isProfileMode) renderProfile();
         syncOfflineResources();
     });
     socket.off('userStatsChanged').on('userStatsChanged', ({ userId } = {}) => {
@@ -789,6 +788,7 @@ export function initMusicPlayer() {
     let queueName = 'GENERAL';
     let playlist = [];
     let currentTrackIndex = 0;
+    let currentTrackId = null;
     let generalQueueAnchorTrackId = null;
     let playbackActivityUserId = null;
     let isRestoringInitialPlayback = false;
@@ -817,6 +817,13 @@ export function initMusicPlayer() {
     let previousSecretPhrase = '';
     let nowPlayingLyricAnimationTimeout = null;
     let nowPlayingLyricPendingIndex = null;
+
+    function getCurrentTrack() {
+        if (currentTrackId !== null) {
+            return playlist.find(track => String(track._id) === String(currentTrackId)) || null;
+        }
+        return playlist[currentTrackIndex] || null;
+    }
 
     try {
         const storedLyrics = localStorage.getItem(timedLyricsStorageKey);
@@ -1148,7 +1155,7 @@ export function initMusicPlayer() {
     function updateEditLyricsPreview(scrollActiveLyric = true) {
         if (!editLyricsPreview) return;
         const track = getEditedTrack();
-        const isCurrentTrack = Boolean(track && getTrackStorageId(track) === getTrackStorageId(playlist[currentTrackIndex]));
+        const isCurrentTrack = Boolean(track && getTrackStorageId(track) === getTrackStorageId(getCurrentTrack()));
         const previewTime = editPreviewAudio
             ? (Number.isFinite(editPreviewAudio.currentTime) ? editPreviewAudio.currentTime : 0)
             : (isCurrentTrack && Number.isFinite(audio.currentTime) ? audio.currentTime : 0);
@@ -1806,12 +1813,11 @@ export function initMusicPlayer() {
 
         if (profileActivity) {
             const isOwnProfile = !isFriendProfile;
-            const track = isOwnProfile
-                && String(playbackActivityUserId || '') === String(currentUser?._id || '')
-                ? playlist[currentTrackIndex]
-                : null;
+            const track = isOwnProfile && currentTrackId !== null ? getCurrentTrack() : null;
             const recentTrack = hasPlaybackEvidence(user?.lastPlayed) ? user.lastPlayed : null;
             const displayTrack = isOwnProfile ? (track || recentTrack) : recentTrack;
+            const currentSourceMatchesTrack = Boolean(track && isCurrentAudioSource(track));
+            const isLoadingTrack = Boolean(isOwnProfile && track && !currentSourceMatchesTrack);
             const isListening = isOwnProfile
                 ? Boolean(track && !audio.paused)
                 : Boolean(user?.isOnline && displayTrack && displayTrack.isPlaying !== false);
@@ -1831,8 +1837,10 @@ export function initMusicPlayer() {
                 || user?.lastPlayed?.updatedAt
                 || user?.lastActive;
             const lastPlayedLabel = lastPlayedAt ? ` · ${timeAgo(lastPlayedAt)}` : '';
-            const listeningLabel = isListening
-                ? 'Escuchando'
+            const listeningLabel = isLoadingTrack
+                ? 'Cargando'
+                : isListening
+                    ? 'Escuchando'
                 : displayTrack
                     ? `Estaba escuchando${lastPlayedLabel}`
                     : 'Sin actividad reciente';
@@ -1843,10 +1851,12 @@ export function initMusicPlayer() {
                 ? Math.max(0, (Date.now() - friendUpdatedAt) / 1000)
                 : 0;
             const elapsed = isOwnProfile
-                ? (Number.isFinite(audio.currentTime) ? audio.currentTime : 0)
+                ? (currentSourceMatchesTrack && Number.isFinite(audio.currentTime) ? audio.currentTime : 0)
                 : Math.min(Number(displayTrack?.duration) || 0, (Number(displayTrack?.currentTime) || 0) + friendElapsedOffset);
             const total = isOwnProfile
-                ? (Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0)
+                ? (currentSourceMatchesTrack && Number.isFinite(audio.duration) && audio.duration > 0
+                    ? audio.duration
+                    : Number(track?.duration) || 0)
                 : (Number(displayTrack?.duration) || 0);
             const progress = total > 0 ? Math.min(100, (elapsed / total) * 100) : 0;
             const localTrackIndex = isFriendProfile && displayTrack?.songId
@@ -1950,7 +1960,7 @@ export function initMusicPlayer() {
             return;
         }
         if (String(playbackActivityUserId || '') !== String(getStoredUser()?._id || '')) return;
-        const track = playlist[currentTrackIndex];
+        const track = getCurrentTrack();
         if (!track) return;
         updateListeningTogetherStatus();
 
@@ -2000,7 +2010,7 @@ export function initMusicPlayer() {
 
     function persistPlaybackPosition(force = false) {
         const user = getStoredUser();
-        const track = playlist[currentTrackIndex];
+        const track = getCurrentTrack();
         if (
             !user?._id
             || !track
@@ -2016,7 +2026,7 @@ export function initMusicPlayer() {
     }
 
     function rememberLocalPlaybackActivity() {
-        const trackId = playlist[currentTrackIndex]?._id;
+        const trackId = getCurrentTrack()?._id;
         const userId = getStoredUser()?._id;
         if (!trackId || !userId) return;
         localPlaybackActivity = {
@@ -2055,7 +2065,7 @@ export function initMusicPlayer() {
     function broadcastPlaybackState(force = false) {
         if (isRestoringInitialPlayback || suppressStartupPlaybackUpdates) return;
         const user = getStoredUser();
-        const track = playlist[currentTrackIndex];
+        const track = getCurrentTrack();
         if (
             !user?._id
             || !track
@@ -2721,7 +2731,7 @@ export function initMusicPlayer() {
         if (isRestoringInitialPlayback || suppressStartupPlaybackUpdates) return;
         const user = getStoredUser();
         if (!user) return;
-        const track = playlist[currentTrackIndex];
+        const track = getCurrentTrack();
         const payload = { userId: user._id, isOnline };
         if (
             track
@@ -3044,7 +3054,7 @@ export function initMusicPlayer() {
     if (btnExitListeningTogether) {
         btnExitListeningTogether.addEventListener('click', () => {
             listeningTogetherUserId = null;
-            if (currentTrackSource === 'together' && playlist[currentTrackIndex]) {
+            if (currentTrackSource === 'together' && getCurrentTrack()) {
                 currentTrackSource = 'regular';
             }
             updateListeningTogetherStatus();
@@ -3384,7 +3394,7 @@ export function initMusicPlayer() {
         btnLogoutSettings.addEventListener('click', () => {
             const loggingOutUser = getStoredUser();
             recordOfflineListeningProgress(
-                playlist[currentTrackIndex],
+                getCurrentTrack(),
                 Number.isFinite(audio.currentTime) ? audio.currentTime : 0,
                 true
             );
@@ -3404,6 +3414,7 @@ export function initMusicPlayer() {
             audio.load();
             playlist = [];
             currentTrackIndex = 0;
+            currentTrackId = null;
             generalQueueAnchorTrackId = null;
             activeQueueTracks = [];
             customQueue = [];
@@ -4002,7 +4013,7 @@ export function initMusicPlayer() {
     let playlistIdPendingShare = null;
 
     function getSequentialQueueIndices() {
-        const anchorTrackId = generalQueueAnchorTrackId || playlist[currentTrackIndex]?._id;
+        const anchorTrackId = generalQueueAnchorTrackId || getCurrentTrack()?._id;
         const currentPosition = activeQueueTracks.findIndex(track => (
             String(track._id) === String(anchorTrackId)
         ));
@@ -4014,7 +4025,7 @@ export function initMusicPlayer() {
     }
 
     function buildShuffleQueue() {
-        const anchorTrackId = generalQueueAnchorTrackId || playlist[currentTrackIndex]?._id;
+        const anchorTrackId = generalQueueAnchorTrackId || getCurrentTrack()?._id;
         const indices = activeQueueTracks
             .map(track => playlist.indexOf(track))
             .filter(index => index !== -1 && String(playlist[index]?._id) !== String(anchorTrackId));
@@ -4335,7 +4346,7 @@ export function initMusicPlayer() {
             userAtRequestStart?._id
             && String(playbackActivityUserId || '') === String(userAtRequestStart._id)
         );
-        const previousTrackId = ownsCurrentPlayback ? playlist[currentTrackIndex]?._id : null;
+        const previousTrackId = ownsCurrentPlayback ? getCurrentTrack()?._id : null;
         const previousPlaybackTime = ownsCurrentPlayback && Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
         const wasPlayingBeforeRefresh = ownsCurrentPlayback && !audio.paused && !audio.ended;
         if (inlineSpinner) inlineSpinner.style.display = 'block';
@@ -4400,9 +4411,15 @@ export function initMusicPlayer() {
         }
 
         if (requestSequence !== musicDataRequestSequence) return;
-        if (previousTrackId) {
-            const refreshedTrackIndex = playlist.findIndex(track => String(track._id) === String(previousTrackId));
-            currentTrackIndex = refreshedTrackIndex >= 0 ? refreshedTrackIndex : Math.min(currentTrackIndex, Math.max(0, playlist.length - 1));
+        const selectedTrackId = currentTrackId || previousTrackId;
+        if (selectedTrackId) {
+            const refreshedTrackIndex = playlist.findIndex(track => String(track._id) === String(selectedTrackId));
+            currentTrackIndex = refreshedTrackIndex >= 0
+                ? refreshedTrackIndex
+                : Math.min(currentTrackIndex, Math.max(0, playlist.length - 1));
+            currentTrackId = playlist[currentTrackIndex]?._id ?? null;
+        } else {
+            currentTrackIndex = Math.min(currentTrackIndex, Math.max(0, playlist.length - 1));
         }
         
         activeQueueTracks = [...playlist];
@@ -4469,7 +4486,7 @@ export function initMusicPlayer() {
                         showToast(`"${cachedTrack.name}" no está descargada para reproducirse sin conexión.`, true);
                     } else if (
                         offlineOnly
-                        && String(playlist[currentTrackIndex]?._id) === String(previousTrackId)
+                        && String(getCurrentTrack()?._id) === String(previousTrackId)
                     ) {
                         const restoreCachedPosition = () => {
                             const restoredTime = Math.min(
@@ -4655,7 +4672,7 @@ export function initMusicPlayer() {
     };
     const updateDiscordPresence = () => {
         if (!desktopSetDiscordPresence) return;
-        const track = playlist[currentTrackIndex];
+        const track = getCurrentTrack();
         if (!track) return;
         const discordImageText = getStoredUser()?.settings?.discordImageText;
         const statusPromise = desktopSetDiscordPresence({
@@ -4699,7 +4716,7 @@ export function initMusicPlayer() {
                 return;
             }
             const track = getEditedTrack();
-            if (!track || getTrackStorageId(track) !== getTrackStorageId(playlist[currentTrackIndex])) {
+            if (!track || getTrackStorageId(track) !== getTrackStorageId(getCurrentTrack())) {
                 setEditorStatus(editLyricsStatus, 'Reproduce esta canción para comparar el tiempo de la letra.', true);
                 return;
             }
@@ -5324,7 +5341,7 @@ export function initMusicPlayer() {
         bottomBarActionMenu.querySelector('.action-add-queue').addEventListener('click', (e) => {
             e.stopPropagation();
             bottomBarActionMenu.classList.remove('show');
-            if (addTrackToQueue(playlist[currentTrackIndex], false)) renderQueue();
+            if (addTrackToQueue(getCurrentTrack(), false)) renderQueue();
         });
         
         bottomBarActionMenu.querySelector('.action-add-pl').addEventListener('click', (e) => {
@@ -5598,7 +5615,7 @@ export function initMusicPlayer() {
         btnInsertEditLyricTime.addEventListener('click', () => {
             const editedTrack = getEditedTrack();
             const hasLocalPreview = Boolean(editPreviewAudio);
-            if (!hasLocalPreview && (!editedTrack || getTrackStorageId(editedTrack) !== getTrackStorageId(playlist[currentTrackIndex]))) {
+            if (!hasLocalPreview && (!editedTrack || getTrackStorageId(editedTrack) !== getTrackStorageId(getCurrentTrack()))) {
                 setEditorStatus(editLyricsStatus, 'Reproduce esta canción antes de insertar el tiempo actual.', true);
                 return;
             }
@@ -6503,7 +6520,7 @@ export function initMusicPlayer() {
 
     function updateLyricsView() {
         if (!lyricsPanel) return;
-        const track = playlist[currentTrackIndex];
+        const track = getCurrentTrack();
         lyricsPanel.style.backgroundColor = '#000';
         lyricsPanel.replaceChildren();
 
@@ -6516,7 +6533,7 @@ export function initMusicPlayer() {
             const lyricText = event.target.closest('.timed-lyric-content');
             const seekButton = lyricText?.closest('[data-lyric-time]');
             const time = Number(seekButton?.dataset.lyricTime);
-            if (!lyricText || !track || getTrackStorageId(playlist[currentTrackIndex]) !== getTrackStorageId(track) || !Number.isFinite(time)) return;
+            if (!lyricText || !track || getTrackStorageId(getCurrentTrack()) !== getTrackStorageId(track) || !Number.isFinite(time)) return;
             const selection = window.getSelection();
             if (
                 selection
@@ -6626,7 +6643,7 @@ export function initMusicPlayer() {
         updateUserStatus(true);
         offlineListeningLastSample = offlineOnly || !navigator.onLine
             ? {
-                trackId: String(playlist[currentTrackIndex]?._id || ''),
+                trackId: String(getCurrentTrack()?._id || ''),
                 currentTime: Number.isFinite(audio.currentTime) ? audio.currentTime : 0,
                 sampledAt: performance.now()
             }
@@ -6640,7 +6657,7 @@ export function initMusicPlayer() {
         updateDiscordPresence();
         rememberLocalPlaybackActivity();
         recordOfflineListeningProgress(
-            playlist[currentTrackIndex],
+            getCurrentTrack(),
             Number.isFinite(audio.currentTime) ? audio.currentTime : 0,
             true
         );
@@ -6700,7 +6717,7 @@ export function initMusicPlayer() {
         const percent = Math.round(displayValue * 100);
         volumeTooltip.textContent = percent + '%';
         const sliderPercent = (displayValue / maxVolume) * 100;
-        const trackColor = playlist[currentTrackIndex]?.color || '#ffffff';
+        const trackColor = getCurrentTrack()?.color || '#ffffff';
 
         if (percent <= 100) {
             volumeSlider.style.background = `linear-gradient(to right, ${trackColor} ${sliderPercent}%, #333 ${sliderPercent}%)`;
@@ -6740,7 +6757,7 @@ export function initMusicPlayer() {
     function renderQueue() {
         queueList.innerHTML = '';
         const upcomingIndices = isShuffle ? [...unplayedIndices] : getSequentialQueueIndices();
-        const currentTrack = playlist[currentTrackIndex];
+        const currentTrack = getCurrentTrack();
 
         if (currentTrack) {
             const currentHeader = document.createElement('div');
@@ -6856,6 +6873,7 @@ export function initMusicPlayer() {
         currentTrackSource = source;
         const track = playlist[currentTrackIndex];
         if (!track) return;
+        currentTrackId = track._id;
         if (source !== 'custom') generalQueueAnchorTrackId = String(track._id);
         const currentUser = getStoredUser();
         playbackUiTrackId = track._id;
@@ -7226,11 +7244,11 @@ export function initMusicPlayer() {
     });
 
     audio.addEventListener('timeupdate', () => {
-        const currentTrack = playlist[currentTrackIndex];
+        const currentTrack = getCurrentTrack();
         if (!isCurrentAudioSource(currentTrack)) return;
         const nextTime = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
-        if (playbackUiTrackId !== playlist[currentTrackIndex]?._id) {
-            playbackUiTrackId = playlist[currentTrackIndex]?._id || null;
+        if (playbackUiTrackId !== currentTrack?._id) {
+            playbackUiTrackId = currentTrack?._id || null;
             playbackUiTime = nextTime;
         } else {
             playbackUiTime = nextTime;
@@ -7259,7 +7277,7 @@ export function initMusicPlayer() {
     });
 
     audio.addEventListener('seeked', () => {
-        if (!isCurrentAudioSource(playlist[currentTrackIndex])) return;
+        if (!isCurrentAudioSource(getCurrentTrack())) return;
         updateDiscordPresence();
         rememberLocalPlaybackActivity();
         persistPlaybackPosition(true);
@@ -7268,7 +7286,7 @@ export function initMusicPlayer() {
     });
 
     audio.addEventListener('loadedmetadata', () => {
-        const currentTrack = playlist[currentTrackIndex];
+        const currentTrack = getCurrentTrack();
         if (!isCurrentAudioSource(currentTrack)) return;
         const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
         if (currentTrack && duration > 0) {
@@ -7306,7 +7324,7 @@ export function initMusicPlayer() {
 
     const handleUnload = () => {
         recordOfflineListeningProgress(
-            playlist[currentTrackIndex],
+            getCurrentTrack(),
             Number.isFinite(audio.currentTime) ? audio.currentTime : 0,
             true
         );
@@ -7329,7 +7347,7 @@ export function initMusicPlayer() {
             spinAf = null;
             if (perroGif) perroGif.style.display = 'none';
             recordOfflineListeningProgress(
-                playlist[currentTrackIndex],
+                getCurrentTrack(),
                 Number.isFinite(audio.currentTime) ? audio.currentTime : 0,
                 true
             );
