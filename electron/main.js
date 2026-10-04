@@ -578,8 +578,14 @@ function createMainWindow() {
         }
 
         void startLocalDownloader().then(downloaderOrigin => {
+            const mediaUrl = new URL(
+                `/desktop/media/${encodeURIComponent(fileId)}`,
+                downloaderOrigin
+            );
+            mediaUrl.searchParams.set('key', desktopDownloadKey);
+            if (details.resourceType === 'image') mediaUrl.searchParams.set('thumbnail', '1');
             callback({
-                redirectURL: `${downloaderOrigin}/desktop/media/${encodeURIComponent(fileId)}?key=${encodeURIComponent(desktopDownloadKey)}`
+                redirectURL: mediaUrl.href
             });
         }).catch(error => {
             console.error('No se pudo descargar el recurso multimedia localmente; se usará Render.', error);

@@ -741,26 +741,103 @@ app.get('/desktop/media/:fileId', async (req, res) => {
     return res.status(400).json({ error: 'El archivo multimedia no es válido.' });
   }
 
+  const useThumbnail = req.query.thumbnail === '1';
+  const mediaCacheDirectory = path.join(process.cwd(), 'media-cache');
+  const cachedAudioPath = path.join(mediaCacheDirectory, `${fileId}.mp3`);
+  const maxCachedAudioBytes = 1024 * 1024 * 1024;
+  const audioCacheLifetimeMs = 30 * 24 * 60 * 60 * 1000;
+
+  if (!useThumbnail) {
+    try {
+      const cachedAudio = await fs.promises.stat(cachedAudioPath);
+      if (cachedAudio.isFile()
+        && cachedAudio.size > 0
+        && cachedAudio.size <= maxCachedAudioBytes
+        && Date.now() - cachedAudio.mtimeMs <= audioCacheLifetimeMs) {
+        const rangeMatch = req.headers.range?.match(/^bytes=(\d*)-(\d*)$/);
+        let start = 0;
+        let end = cachedAudio.size - 1;
+        if (rangeMatch) {
+          if (!rangeMatch[1] && !rangeMatch[2]) {
+            return res.status(416).set('Content-Range', `bytes */${cachedAudio.size}`).end();
+          }
+          if (!rangeMatch[1]) {
+            const suffixLength = Number(rangeMatch[2]);
+            if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) {
+              return res.status(416).set('Content-Range', `bytes */${cachedAudio.size}`).end();
+            }
+            start = Math.max(0, cachedAudio.size - suffixLength);
+          } else {
+            start = Number(rangeMatch[1]);
+            end = rangeMatch[2] ? Math.min(Number(rangeMatch[2]), end) : end;
+          }
+          if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end)
+            || start < 0 || start >= cachedAudio.size || end < start) {
+            return res.status(416).set('Content-Range', `bytes */${cachedAudio.size}`).end();
+          }
+          res.status(206);
+          res.setHeader('Content-Range', `bytes ${start}-${end}/${cachedAudio.size}`);
+        } else {
+          res.status(200);
+        }
+        res.setHeader('Content-Type', 'audio/mpeg');
+        res.setHeader('Content-Length', String(end - start + 1));
+        res.setHeader('Accept-Ranges', 'bytes');
+        res.setHeader('Cache-Control', 'public, max-age=2592000, immutable');
+        void fs.promises.utimes(cachedAudioPath, new Date(), cachedAudio.mtime).catch(error => {
+          console.warn('No se pudo actualizar el acceso de la caché de audio.', error);
+        });
+        const cachedStream = fs.createReadStream(cachedAudioPath, { start, end });
+        cachedStream.on('error', error => {
+          console.error('No se pudo leer un MP3 de la caché local.', { fileId, message: error.message });
+          if (!res.headersSent) res.status(500).end();
+          else res.destroy(error);
+        });
+        cachedStream.pipe(res);
+        return;
+      }
+      if (cachedAudio.isFile()) {
+        await fs.promises.rm(cachedAudioPath, { force: true });
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        console.warn('No se pudo consultar la caché local de audio.', { fileId, message: error.message });
+      }
+    }
+  }
+
   const headers = {};
-  if (req.headers.range) headers.Range = req.headers.range;
+  if (!useThumbnail && req.headers.range) headers.Range = req.headers.range;
   const controller = new AbortController();
   res.on('close', () => {
     if (!res.writableEnded) controller.abort();
   });
 
   try {
-    const response = await fetch(
-      `https://drive.google.com/uc?export=download&id=${encodeURIComponent(fileId)}`,
-      { headers, signal: controller.signal }
-    );
-    const contentType = response.headers.get('content-type') || 'application/octet-stream';
-    if (!response.ok || contentType.includes('text/html')) {
+    const urls = useThumbnail
+      ? [
+        `https://drive.google.com/thumbnail?id=${encodeURIComponent(fileId)}&sz=w160`,
+        `https://drive.google.com/uc?export=download&id=${encodeURIComponent(fileId)}`
+      ]
+      : [`https://drive.google.com/uc?export=download&id=${encodeURIComponent(fileId)}`];
+    let response;
+    let contentType = '';
+    for (const url of urls) {
+      response = await fetch(url, { headers, signal: controller.signal });
+      contentType = response.headers.get('content-type') || 'application/octet-stream';
+      if (response.ok
+        && !contentType.includes('text/html')
+        && (!useThumbnail || contentType.startsWith('image/'))) break;
+      await response.body?.cancel();
+    }
+
+    if (!response?.ok || contentType.includes('text/html')) {
       console.error('Google Drive no devolvió un archivo multimedia reproducible.', {
         fileId,
-        status: response.status,
+        status: response?.status,
         contentType
       });
-      return res.status(response.ok ? 502 : response.status).json({
+      return res.status(response?.ok ? 502 : response?.status || 502).json({
         error: 'No se pudo obtener el archivo público desde Google Drive.'
       });
     }
@@ -771,9 +848,84 @@ app.get('/desktop/media/:fileId', async (req, res) => {
       if (value) res.setHeader(header, value);
     }
     res.setHeader('Accept-Ranges', 'bytes');
-    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.setHeader('Cache-Control', useThumbnail ? 'public, max-age=2592000, immutable' : 'public, max-age=86400');
     res.status(response.status);
-    Readable.fromWeb(response.body).pipe(res);
+    const mediaStream = Readable.fromWeb(response.body);
+    mediaStream.on('error', error => {
+      if (error.name === 'AbortError') return;
+      console.error('Se interrumpió la transmisión multimedia desde Google Drive.', { fileId, message: error.message });
+      if (!res.headersSent) res.status(502).end();
+      else res.destroy();
+    });
+    const contentRangeMatch = response.headers.get('content-range')
+      ?.match(/^bytes 0-(\d+)\/(\d+)$/);
+    const isCompleteAudio = !useThumbnail
+      && contentType.startsWith('audio/')
+      && (response.status === 200
+        || (contentRangeMatch && Number(contentRangeMatch[1]) + 1 === Number(contentRangeMatch[2])));
+
+    if (!isCompleteAudio) {
+      mediaStream.pipe(res);
+      return;
+    }
+
+    await fs.promises.mkdir(mediaCacheDirectory, { recursive: true });
+    const temporaryAudioPath = path.join(
+      mediaCacheDirectory,
+      `${fileId}.${randomBytes(8).toString('hex')}.tmp`
+    );
+    const cacheStream = fs.createWriteStream(temporaryAudioPath, { flags: 'wx' });
+    let cacheWriteFailed = false;
+    cacheStream.on('error', error => {
+      cacheWriteFailed = true;
+      console.warn('No se pudo guardar el MP3 en la caché local.', { fileId, message: error.message });
+      void fs.promises.rm(temporaryAudioPath, { force: true }).catch(cleanupError => {
+        console.warn('No se pudo eliminar un archivo temporal de caché.', cleanupError);
+      });
+    });
+    cacheStream.on('finish', async () => {
+      if (cacheWriteFailed) return;
+      try {
+        const cachedAudio = await fs.promises.stat(temporaryAudioPath);
+        if (cachedAudio.size === 0 || cachedAudio.size > maxCachedAudioBytes) {
+          await fs.promises.rm(temporaryAudioPath, { force: true });
+          return;
+        }
+        try {
+          await fs.promises.rename(temporaryAudioPath, cachedAudioPath);
+        } catch (error) {
+          if (error.code !== 'EEXIST' && error.code !== 'EPERM') throw error;
+          await fs.promises.rm(temporaryAudioPath, { force: true });
+        }
+        const entries = await fs.promises.readdir(mediaCacheDirectory, { withFileTypes: true });
+        const audioFiles = await Promise.all(entries
+          .filter(entry => entry.isFile() && entry.name.endsWith('.mp3'))
+          .map(async entry => {
+            const filePath = path.join(mediaCacheDirectory, entry.name);
+            const stat = await fs.promises.stat(filePath);
+            return { filePath, size: stat.size, accessedAt: stat.atimeMs };
+          }));
+        let totalBytes = audioFiles.reduce((total, file) => total + file.size, 0);
+        for (const file of audioFiles.sort((left, right) => left.accessedAt - right.accessedAt)) {
+          if (totalBytes <= maxCachedAudioBytes) break;
+          await fs.promises.rm(file.filePath, { force: true });
+          totalBytes -= file.size;
+        }
+      } catch (error) {
+        console.warn('No se pudo completar la caché local del MP3.', { fileId, message: error.message });
+        await fs.promises.rm(temporaryAudioPath, { force: true }).catch(cleanupError => {
+          console.warn('No se pudo eliminar un archivo temporal de caché.', cleanupError);
+        });
+      }
+    });
+    mediaStream.on('error', () => {
+      cacheStream.destroy();
+      void fs.promises.rm(temporaryAudioPath, { force: true }).catch(cleanupError => {
+        console.warn('No se pudo eliminar un MP3 incompleto de la caché.', cleanupError);
+      });
+    });
+    mediaStream.pipe(res);
+    mediaStream.pipe(cacheStream);
   } catch (error) {
     if (error.name !== 'AbortError') {
       console.error('No se pudo descargar el archivo público desde Google Drive.', {

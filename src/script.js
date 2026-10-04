@@ -2,18 +2,17 @@ import { io } from 'socket.io-client';
 import {
     getOfflineFriends,
     getOfflineLibrary,
-    getOfflineMedia,
-    getOfflineMediaIndex,
     getOfflinePlaylistSavers,
     getOfflineProfilePlaylists,
     getOfflinePlaylists,
     saveOfflineFriends,
     saveOfflineLibrary,
-    saveOfflineMedia,
     saveOfflinePlaylistSavers,
     saveOfflineProfilePlaylists,
     saveOfflinePlaylists
 } from './offlineStore.js';
+import { createOfflineMediaManager } from './offlineMedia.js';
+import { createSongListRenderer } from './songList.js';
 
 export function initMusicPlayer() {
     const API_URL = import.meta.env.VITE_API_URL || '/api';
@@ -28,9 +27,6 @@ export function initMusicPlayer() {
     let isLoggingOut = false;
     let offlineOnly = false;
     let offlineModeEnabled = false;
-    let offlineSyncInProgress = false;
-    let offlineCacheCompleted = 0;
-    let offlineCacheTotal = 0;
     let offlineDownloadPopupTimer = null;
     let offlineRecoveryTimer = null;
     let offlineListeningBuffer = 0;
@@ -38,7 +34,6 @@ export function initMusicPlayer() {
     let offlineListeningLastPersistAt = 0;
     let offlineListeningSyncInProgress = false;
     let suppressNextListeningDelta = false;
-    const offlineObjectUrls = new Map();
     const socket = io(import.meta.env.VITE_SOCKET_URL || window.location.origin, {
         autoConnect: false,
         transports: ['websocket', 'polling'],
@@ -47,6 +42,28 @@ export function initMusicPlayer() {
     const connectRealtime = () => {
         if (realtimeEnabled) socket.connect();
     };
+    const offlineMediaManager = createOfflineMediaManager({
+        apiUrl: API_URL,
+        getState: () => ({
+            enabled: offlineModeEnabled,
+            offlineOnly,
+            accessToken,
+            online: navigator.onLine,
+            playlist,
+            userPlaylists,
+            profilePlaylists: [...profilePlaylistCache.values()],
+            playlistSavers: [...playlistSaversCache.values()],
+            currentFriends,
+            localUser: getCachedOfflineUser() || getStoredUser()
+        }),
+        updateStatus: updateOfflineCacheStatus,
+        getActiveObjectUrl: () => activeAudioObjectUrl
+    });
+    const getOfflineObjectUrl = key => offlineMediaManager.getOfflineObjectUrl(key);
+    const getOfflineImageUrl = (...args) => offlineMediaManager.getOfflineImageUrl(...args);
+    const hydrateOfflineSongCovers = songs => offlineMediaManager.hydrateOfflineSongCovers(songs);
+    const hydrateOfflinePlaylistCovers = playlists => offlineMediaManager.hydrateOfflinePlaylistCovers(playlists);
+    const syncOfflineResources = () => offlineMediaManager.syncOfflineResources();
     let realtimeConnectedBefore = false;
     let skipNextRealtimeReconciliation = false;
     const profilePlaylistCache = new Map();
@@ -296,24 +313,6 @@ export function initMusicPlayer() {
             }
         }, 30000);
     }
-    const offlineResourcePath = (resourceType, id, kind) => (
-        `/__offline/${resourceType}/${encodeURIComponent(String(id))}/${kind}`
-    );
-    const getOfflineObjectUrl = async (key) => {
-        if (offlineObjectUrls.has(key)) return offlineObjectUrls.get(key);
-        const record = await getOfflineMedia(key);
-        if (!record?.blob) return null;
-        const objectUrl = URL.createObjectURL(record.blob);
-        offlineObjectUrls.set(key, objectUrl);
-        return objectUrl;
-    };
-    const getOfflineImageUrl = async (resourceType, id, kind, key) => {
-        if (!(await getOfflineMedia(key))?.blob) return '';
-        if (navigator.serviceWorker?.controller) {
-            return offlineResourcePath(resourceType, id, kind);
-        }
-        return await getOfflineObjectUrl(key) || '';
-    };
     async function renderPlaylistSavers(users) {
         if (!playlistSaversList) return;
         playlistSaversList.replaceChildren();
@@ -2305,7 +2304,8 @@ export function initMusicPlayer() {
             friendsOwnerId = requestedOwnerId;
         }
         if (offlineOnly || !navigator.onLine) {
-            if (offlineCacheCompleted === 0 && offlineCacheTotal === 0) {
+            const offlineCacheProgress = offlineMediaManager.getProgress();
+            if (offlineCacheProgress.completed === 0 && offlineCacheProgress.total === 0) {
                 updateOfflineCacheStatus('La caché offline está vacía. Conéctate e inicia sesión para descargar el contenido.');
             }
             let cachedFriends;
@@ -3998,7 +3998,6 @@ export function initMusicPlayer() {
     const pendingPlaylistTrackChanges = new Set();
     const pendingPlaylistOrderSaves = new Map();
     const pendingSongDeletes = new Set();
-    let songsRenderToken = 0;
     let statusHeartbeatTimer = null;
     let playlistIdPendingShare = null;
 
@@ -4103,205 +4102,6 @@ export function initMusicPlayer() {
         return `amgc-offline-enabled-${userId}`;
     }
 
-    function getOfflineResourceUrl(resource) {
-        const apiOrigin = new URL(API_URL, window.location.origin).origin;
-        const resolvedUrl = new URL(resource, window.location.href);
-        if (resolvedUrl.pathname.startsWith('/mp3/')) {
-            return new URL(`${resolvedUrl.pathname}${resolvedUrl.search}${resolvedUrl.hash}`, apiOrigin).href;
-        }
-        if (['localhost', '127.0.0.1', '[::1]'].includes(resolvedUrl.hostname)) {
-            return new URL(`${resolvedUrl.pathname}${resolvedUrl.search}${resolvedUrl.hash}`, apiOrigin).href;
-        }
-        return resolvedUrl.href;
-    }
-
-    async function hydrateOfflineSongCovers(songs) {
-        await Promise.all(songs.map(async song => {
-            if (!song.cover) return;
-            song.localCover = await getOfflineImageUrl(
-                'song',
-                song._id,
-                'cover',
-                `song:${song._id}:cover`
-            );
-        }));
-    }
-
-    async function hydrateOfflinePlaylistCovers(playlists) {
-        await Promise.all(playlists.map(async playlistItem => {
-            if (!playlistItem.photo || playlistItem.photo === '/img/vinculo.png') return;
-            playlistItem.localPhoto = await getOfflineImageUrl(
-                'playlist',
-                playlistItem.id,
-                'photo',
-                `playlist:${playlistItem.id}:photo`
-            );
-        }));
-    }
-
-    async function cacheRemoteResource(key, resourceUrl) {
-        const resolvedUrl = getOfflineResourceUrl(resourceUrl);
-        const existing = await getOfflineMedia(key);
-        if (existing?.sourceUrl === resolvedUrl) return false;
-        const resourceHost = new URL(resolvedUrl).host;
-        let response;
-        let blob;
-        let lastNetworkError;
-        for (let attempt = 0; attempt < 3; attempt += 1) {
-            try {
-                response = await fetch(resolvedUrl, { credentials: 'omit' });
-                if (response.ok) {
-                    blob = await response.blob();
-                    break;
-                }
-                if (response.status !== 429 && response.status < 500) {
-                    throw new Error(`El servidor respondió ${response.status} al descargar un recurso offline.`);
-                }
-                lastNetworkError = new Error(`El servidor respondió ${response.status}.`);
-            } catch (error) {
-                if (error instanceof TypeError) {
-                    lastNetworkError = error;
-                } else {
-                    throw error;
-                }
-            }
-            if (attempt < 2) {
-                await new Promise(resolve => setTimeout(resolve, 750 * (2 ** attempt)));
-            }
-        }
-        if (!response?.ok || !blob) {
-            throw new Error(`No se pudo descargar desde ${resourceHost} después de 3 intentos: ${lastNetworkError?.message || 'respuesta vacía del servidor'}`);
-        }
-        if (!blob.size) throw new Error('El recurso descargado está vacío.');
-        await saveOfflineMedia(key, blob, blob.type, resolvedUrl);
-        const cachedObjectUrl = offlineObjectUrls.get(key);
-        if (cachedObjectUrl && activeAudioObjectUrl !== cachedObjectUrl) {
-            URL.revokeObjectURL(cachedObjectUrl);
-            offlineObjectUrls.delete(key);
-        }
-        return true;
-    }
-
-    let offlineSyncRequested = false;
-    async function syncOfflineResources() {
-        if (!offlineModeEnabled || offlineOnly || !accessToken || !navigator.onLine) return;
-        if (offlineSyncInProgress) {
-            offlineSyncRequested = true;
-            return;
-        }
-        offlineSyncInProgress = true;
-        let failureCount = 0;
-        let downloadedResourceCount = 0;
-        let firstFailure = '';
-        let storageFull = false;
-        try {
-            do {
-                offlineSyncRequested = false;
-                const resources = new Map();
-                const addResource = (key, url) => {
-                    if (url && typeof url === 'string' && !url.startsWith('data:')) resources.set(key, url);
-                };
-                playlist.forEach(song => {
-                    addResource(`song:${song._id}:audio`, song.path);
-                    addResource(`song:${song._id}:cover`, song.cover);
-                });
-                userPlaylists.forEach(playlistItem => {
-                    addResource(`playlist:${playlistItem.id}:photo`, playlistItem.photo);
-                });
-                profilePlaylistCache.forEach(profilePlaylists => {
-                    profilePlaylists.forEach(playlistItem => {
-                        addResource(`playlist:${playlistItem.id}:photo`, playlistItem.photo);
-                    });
-                });
-                playlistSaversCache.forEach(users => {
-                    users.forEach(user => {
-                        addResource(`friend:${user._id}:photo`, user.profilePhoto);
-                    });
-                });
-                const friendsWithAvatars = [...currentFriends];
-                currentFriends.forEach(friend => friendsWithAvatars.push(...(friend.friends || [])));
-                friendsWithAvatars.forEach(friend => {
-                    addResource(`friend:${friend._id}:photo`, friend.profilePhoto);
-                });
-                const localUser = getCachedOfflineUser() || getStoredUser();
-                if (localUser?._id) addResource(`friend:${localUser._id}:photo`, localUser.profilePhoto);
-
-                const cachedResources = await getOfflineMediaIndex();
-                const missingResources = [...resources].filter(([key, url]) => (
-                    cachedResources.get(key) !== getOfflineResourceUrl(url)
-                ));
-                offlineCacheTotal = missingResources.length;
-                offlineCacheCompleted = 0;
-                if (!offlineCacheTotal) {
-                    updateOfflineCacheStatus('La música, las carátulas y los datos disponibles ya están guardados.');
-                    continue;
-                }
-                updateOfflineCacheStatus(`Descargando ${offlineCacheTotal} recursos para uso offline…`, {
-                    completed: 0,
-                    total: offlineCacheTotal
-                });
-                let nextResourceIndex = 0;
-                const workerCount = Math.min(4, missingResources.length);
-                const downloadWorker = async () => {
-                    while (
-                        offlineModeEnabled
-                        && navigator.onLine
-                        && !storageFull
-                        && nextResourceIndex < missingResources.length
-                    ) {
-                        const [key, url] = missingResources[nextResourceIndex];
-                        nextResourceIndex += 1;
-                        try {
-                            if (await cacheRemoteResource(key, url)) downloadedResourceCount += 1;
-                        } catch (error) {
-                            failureCount += 1;
-                            if (!firstFailure) firstFailure = error.message;
-                            console.warn(`No se pudo guardar ${key} para uso offline.`, error);
-                            if (error.name === 'QuotaExceededError') storageFull = true;
-                        } finally {
-                            offlineCacheCompleted += 1;
-                            updateOfflineCacheStatus(
-                                `Descargas offline: ${offlineCacheCompleted}/${offlineCacheTotal}${failureCount ? ` · ${failureCount} con error` : ''}.`,
-                                { completed: offlineCacheCompleted, total: offlineCacheTotal }
-                            );
-                            if (storageFull) {
-                                updateOfflineCacheStatus(`Almacenamiento local lleno. Se guardaron ${offlineCacheCompleted}/${offlineCacheTotal} recursos; libera espacio para continuar.`, {
-                                    completed: offlineCacheCompleted,
-                                    total: offlineCacheTotal
-                                });
-                            }
-                        }
-                    }
-                };
-                await Promise.all(Array.from({ length: workerCount }, () => downloadWorker()));
-                if (!navigator.onLine) {
-                    updateOfflineCacheStatus(`Descarga pausada sin conexión (${offlineCacheCompleted}/${offlineCacheTotal}). Se reanudará al reconectar.`, {
-                        completed: offlineCacheCompleted,
-                        total: offlineCacheTotal
-                    });
-                    break;
-                }
-                if (!offlineModeEnabled) break;
-            } while (offlineSyncRequested && !storageFull);
-
-            if (storageFull) {
-                updateOfflineCacheStatus(`Almacenamiento local lleno. Se guardaron ${offlineCacheCompleted}/${offlineCacheTotal} recursos; libera espacio para continuar.`, {
-                    completed: offlineCacheCompleted,
-                    total: offlineCacheTotal
-                });
-            } else if (failureCount && navigator.onLine && offlineModeEnabled) {
-                updateOfflineCacheStatus(`${failureCount} recursos no se pudieron guardar. ${firstFailure}`);
-            } else if (!failureCount && downloadedResourceCount > 0 && navigator.onLine && offlineModeEnabled) {
-                updateOfflineCacheStatus('Descarga offline completada.');
-            }
-        } catch (error) {
-            console.error('No se pudo sincronizar la caché offline.', error);
-            updateOfflineCacheStatus(`No se pudo completar la caché offline: ${error.message}`);
-        } finally {
-            offlineSyncInProgress = false;
-        }
-    }
-
     function createImageMarkup(src, className = '', alt = '') {
         if (src) {
             return `<img src="${escapeHtml(src)}" loading="lazy" decoding="async" draggable="false" class="no-drag ${escapeHtml(className)}" alt="${escapeHtml(alt)}" data-fallback-placeholder="true">`;
@@ -4312,6 +4112,24 @@ export function initMusicPlayer() {
     const handleImageFallback = (event) => {
         const image = event.target;
         if (!(image instanceof HTMLImageElement) || image.dataset.fallbackPlaceholder !== 'true') return;
+        const retryCount = Number(image.dataset.fallbackRetryCount || 0);
+        const source = image.getAttribute('src');
+        if (retryCount < 2 && source) {
+            try {
+                const retryUrl = new URL(source, window.location.href);
+                if (retryUrl.protocol === 'http:' || retryUrl.protocol === 'https:') {
+                    const nextRetryCount = retryCount + 1;
+                    image.dataset.fallbackRetryCount = String(nextRetryCount);
+                    setTimeout(() => {
+                        if (!image.isConnected || image.getAttribute('src') !== source) return;
+                        retryUrl.searchParams.set('amgcRetry', String(nextRetryCount));
+                        image.src = retryUrl.href;
+                    }, nextRetryCount * 350);
+                    return;
+                }
+            } catch {
+            }
+        }
         const placeholder = document.createElement('div');
         placeholder.className = `no-image-placeholder ${[...image.classList]
             .filter(className => className !== 'no-drag' && className !== 'no-image')
@@ -4809,6 +4627,18 @@ export function initMusicPlayer() {
     const audio = new Audio();
     audio.crossOrigin = "anonymous";
     audio.volume = currentVolume;
+    function isCurrentAudioSource(track) {
+        if (!track || !audio.src || !track.path) return false;
+        if (audio.src.startsWith('blob:')) {
+            return activeAudioObjectUrlKey === `song:${track._id}:audio`;
+        }
+        try {
+            return new URL(audio.src, window.location.href).href
+                === new URL(track.path, window.location.href).href;
+        } catch {
+            return false;
+        }
+    }
     const resolveDiscordArtworkUrl = track => {
         if (offlineOnly || !navigator.onLine || !accessToken || !track?.cover
             || track.cover === '/img/vinculo.png') return null;
@@ -5504,75 +5334,17 @@ export function initMusicPlayer() {
         });
     }
 
-    function renderAllSongs() {
-        if (!allSongsList) return;
-        songsRenderToken += 1;
-        const renderToken = songsRenderToken;
-        allSongsList.innerHTML = '';
-        const searchTerm = allSongsSearch?.value.trim().toLocaleLowerCase() || '';
-        const matchingSongs = playlist
-            .map((track, index) => ({ track, index }))
-            .filter(({ track }) => !searchTerm
-                || `${track.name || ''} ${track.artist || ''}`.toLocaleLowerCase().includes(searchTerm));
-        let songIndex = 0;
-
-        const renderSongBatch = () => {
-            if (renderToken !== songsRenderToken) return;
-            const songsFragment = document.createDocumentFragment();
-            const batchEnd = Math.min(songIndex + 50, matchingSongs.length);
-
-            for (; songIndex < batchEnd; songIndex += 1) {
-                const { track, index: i } = matchingSongs[songIndex];
-            const li = document.createElement('li');
-            li.className = 'all-songs-item';
-            li.dataset.trackIndex = String(i);
-            li.innerHTML = `
-                ${createImageMarkup(getSongCover(track), 'item-cover')}
-                <div class="all-songs-item-info">
-                    <span class="all-songs-item-name">${track.name}</span>
-                    <span class="all-songs-item-artist">${track.artist}</span>
-                </div>
-                ${createSongContextMenuHtml(i, true)}
-            `;
-            setupSongMenuListeners(li, i);
-            setupQueueAddSwipe(li, track);
-            songsFragment.appendChild(li);
-            }
-            allSongsList.appendChild(songsFragment);
-
-            if (songIndex < matchingSongs.length) {
-                requestAnimationFrame(renderSongBatch);
-                return;
-            }
-
-            if (!matchingSongs.length) {
-                const emptySongLi = document.createElement('li');
-                emptySongLi.className = 'all-songs-empty';
-                emptySongLi.textContent = 'canción inexistente';
-                allSongsList.appendChild(emptySongLi);
-                return;
-            }
-
-            if (searchTerm) return;
-
-            const addSongLi = document.createElement('li');
-            addSongLi.className = 'all-songs-item add-song-card';
-            addSongLi.style.border = '1px dashed rgba(255,255,255,0.3)';
-            addSongLi.innerHTML = `
-                <div style="width: 40px; height: 40px; border-radius: 4px; background: rgba(255,255,255,0.15); display: flex; align-items: center; justify-content: center; font-size: 1.5rem; font-weight: bold; color: #fff;">+</div>
-                <div class="all-songs-item-info">
-                    <span class="all-songs-item-name">Añadir Canción</span>
-                    <span class="all-songs-item-artist">Haz clic para agregar un nuevo tema</span>
-                </div>
-            `;
-            addSongLi.addEventListener('click', () => {
-                openEditSongPanel(null);
-            });
-            allSongsList.appendChild(addSongLi);
-        };
-
-        renderSongBatch();
-    }
+    const renderAllSongs = createSongListRenderer({
+        listElement: allSongsList,
+        searchInput: allSongsSearch,
+        getSongs: () => playlist,
+        getSongCover,
+        createImageMarkup,
+        createSongContextMenuHtml,
+        setupSongMenuListeners,
+        setupQueueAddSwipe,
+        openEditSongPanel
+    });
 
     if (allSongsSearch) {
         allSongsSearch.addEventListener('input', renderAllSongs);
@@ -7107,7 +6879,7 @@ export function initMusicPlayer() {
             if (sourceLoadToken !== audioSourceLoadToken) {
                 if (localUrl && localUrl !== activeAudioObjectUrl) {
                     URL.revokeObjectURL(localUrl);
-                    offlineObjectUrls.delete(mediaKey);
+                    offlineMediaManager.forgetObjectUrl(mediaKey);
                 }
                 return;
             }
@@ -7117,7 +6889,7 @@ export function initMusicPlayer() {
             const source = localUrl || track.path;
             if (activeAudioObjectUrl && activeAudioObjectUrl !== source) {
                 URL.revokeObjectURL(activeAudioObjectUrl);
-                if (activeAudioObjectUrlKey) offlineObjectUrls.delete(activeAudioObjectUrlKey);
+                if (activeAudioObjectUrlKey) offlineMediaManager.forgetObjectUrl(activeAudioObjectUrlKey);
                 activeAudioObjectUrl = null;
                 activeAudioObjectUrlKey = null;
             }
@@ -7454,6 +7226,8 @@ export function initMusicPlayer() {
     });
 
     audio.addEventListener('timeupdate', () => {
+        const currentTrack = playlist[currentTrackIndex];
+        if (!isCurrentAudioSource(currentTrack)) return;
         const nextTime = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
         if (playbackUiTrackId !== playlist[currentTrackIndex]?._id) {
             playbackUiTrackId = playlist[currentTrackIndex]?._id || null;
@@ -7464,7 +7238,6 @@ export function initMusicPlayer() {
         sharedPlaybackTime = playbackUiTime;
         sharedPlaybackDuration = Number.isFinite(audio.duration) ? audio.duration : 0;
         const currentUser = getStoredUser();
-        const currentTrack = playlist[currentTrackIndex];
         recordOfflineListeningProgress(currentTrack, nextTime);
         if (currentTrack) {
             updateCurrentLyric(currentTrack, playbackUiTime);
@@ -7486,6 +7259,7 @@ export function initMusicPlayer() {
     });
 
     audio.addEventListener('seeked', () => {
+        if (!isCurrentAudioSource(playlist[currentTrackIndex])) return;
         updateDiscordPresence();
         rememberLocalPlaybackActivity();
         persistPlaybackPosition(true);
@@ -7494,8 +7268,9 @@ export function initMusicPlayer() {
     });
 
     audio.addEventListener('loadedmetadata', () => {
-        const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
         const currentTrack = playlist[currentTrackIndex];
+        if (!isCurrentAudioSource(currentTrack)) return;
+        const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
         if (currentTrack && duration > 0) {
             currentTrack.duration = duration;
             apiFetch(`${API_URL}/songs/${currentTrack._id}/duration`, {
@@ -7576,8 +7351,7 @@ export function initMusicPlayer() {
         if (offlineRecoveryTimer) clearInterval(offlineRecoveryTimer);
         if (offlineDownloadPopupTimer) clearTimeout(offlineDownloadPopupTimer);
         if (friendCacheSaveTimer) clearTimeout(friendCacheSaveTimer);
-        offlineObjectUrls.forEach(objectUrl => URL.revokeObjectURL(objectUrl));
-        offlineObjectUrls.clear();
+        offlineMediaManager.dispose();
         cancelAnimationFrame(spinAf);
         clearTimeout(autoSpinTimer);
         if (nowPlayingLyricAnimationTimeout) clearTimeout(nowPlayingLyricAnimationTimeout);
