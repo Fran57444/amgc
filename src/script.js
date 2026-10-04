@@ -1825,10 +1825,10 @@ export function initMusicPlayer() {
             const isOfflineProfile = isOwnProfile && offlineOnly;
             const currentCover = track ? getSongCover(track) : (displayTrack?.cover || '/img/vinculo.png');
             const activityColor = displayTrack?.color || '#ff8a00';
-            const currentTrackId = track?._id ? String(track._id) : null;
-            const localPlaybackUpdatedAt = isOwnProfile && currentTrackId
+            const currentProfileTrackId = track?._id ? String(track._id) : null;
+            const localPlaybackUpdatedAt = isOwnProfile && currentProfileTrackId
                 && localPlaybackActivity?.userId === String(user?._id || '')
-                && localPlaybackActivity?.trackId === currentTrackId
+                && localPlaybackActivity?.trackId === currentProfileTrackId
                 ? localPlaybackActivity.updatedAt
                 : null;
             const lastPlayedAt = displayTrack?.updatedAt
