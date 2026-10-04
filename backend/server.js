@@ -46,7 +46,8 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 if (desktopDownloaderOnly) {
   app.use((req, res, next) => {
-    if (req.method === 'POST' && req.path === '/desktop/yt-download') {
+    if ((req.method === 'POST' && req.path === '/desktop/yt-download')
+      || (req.method === 'GET' && /^\/desktop\/media\/[\w-]{25,}$/.test(req.path))) {
       return next();
     }
     return res.sendStatus(404);
@@ -690,20 +691,24 @@ async function downloadYoutubeAudio(ytLink) {
   }
 }
 
-app.post('/desktop/yt-download', async (req, res) => {
+function isAuthorizedDesktopRequest(req) {
   const remoteAddress = req.socket.remoteAddress || '';
   const isLoopback = remoteAddress === '127.0.0.1'
     || remoteAddress === '::1'
     || remoteAddress === '::ffff:127.0.0.1';
   const expectedKey = process.env.amgc_DESKTOP_DOWNLOAD_KEY || '';
-  const receivedKey = req.get('x-desktop-download-key') || '';
+  const receivedKey = req.get('x-desktop-download-key') || req.query.key || '';
   const expectedKeyBuffer = Buffer.from(expectedKey);
-  const receivedKeyBuffer = Buffer.from(receivedKey);
+  const receivedKeyBuffer = Buffer.from(String(receivedKey));
   const hasValidKey = expectedKeyBuffer.length > 0
     && expectedKeyBuffer.length === receivedKeyBuffer.length
     && timingSafeEqual(expectedKeyBuffer, receivedKeyBuffer);
 
-  if (!desktopDownloaderOnly || !isLoopback || !hasValidKey) {
+  return desktopDownloaderOnly && isLoopback && hasValidKey;
+}
+
+app.post('/desktop/yt-download', async (req, res) => {
+  if (!isAuthorizedDesktopRequest(req)) {
     return res.sendStatus(404);
   }
 
@@ -725,6 +730,60 @@ app.post('/desktop/yt-download', async (req, res) => {
     res.json({ title, fileName: localFile.fileName, path: localFile.filePath });
   } catch (error) {
     res.status(error.statusCode || 500).json({ error: error.message });
+  }
+});
+
+app.get('/desktop/media/:fileId', async (req, res) => {
+  if (!isAuthorizedDesktopRequest(req)) return res.sendStatus(404);
+
+  const { fileId } = req.params;
+  if (!/^[\w-]{25,}$/.test(fileId)) {
+    return res.status(400).json({ error: 'El archivo multimedia no es válido.' });
+  }
+
+  const headers = {};
+  if (req.headers.range) headers.Range = req.headers.range;
+  const controller = new AbortController();
+  res.on('close', () => {
+    if (!res.writableEnded) controller.abort();
+  });
+
+  try {
+    const response = await fetch(
+      `https://drive.google.com/uc?export=download&id=${encodeURIComponent(fileId)}`,
+      { headers, signal: controller.signal }
+    );
+    const contentType = response.headers.get('content-type') || 'application/octet-stream';
+    if (!response.ok || contentType.includes('text/html')) {
+      console.error('Google Drive no devolvió un archivo multimedia reproducible.', {
+        fileId,
+        status: response.status,
+        contentType
+      });
+      return res.status(response.ok ? 502 : response.status).json({
+        error: 'No se pudo obtener el archivo público desde Google Drive.'
+      });
+    }
+
+    res.setHeader('Content-Type', contentType);
+    for (const header of ['content-length', 'content-range']) {
+      const value = response.headers.get(header);
+      if (value) res.setHeader(header, value);
+    }
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.status(response.status);
+    Readable.fromWeb(response.body).pipe(res);
+  } catch (error) {
+    if (error.name !== 'AbortError') {
+      console.error('No se pudo descargar el archivo público desde Google Drive.', {
+        fileId,
+        message: error.message
+      });
+      if (!res.headersSent) {
+        res.status(502).json({ error: 'No se pudo obtener el archivo público desde Google Drive.' });
+      }
+    }
   }
 });
 

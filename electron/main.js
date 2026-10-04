@@ -563,6 +563,30 @@ function createMainWindow() {
         }
     });
 
+    window.webContents.session.webRequest.onBeforeRequest({
+        urls: [`${new URL(productionUrl).origin}/api/media/*`]
+    }, (details, callback) => {
+        if (details.method !== 'GET') {
+            callback({});
+            return;
+        }
+
+        const fileId = new URL(details.url).pathname.split('/').pop();
+        if (!/^[\w-]{25,}$/.test(fileId || '')) {
+            callback({});
+            return;
+        }
+
+        void startLocalDownloader().then(downloaderOrigin => {
+            callback({
+                redirectURL: `${downloaderOrigin}/desktop/media/${encodeURIComponent(fileId)}?key=${encodeURIComponent(desktopDownloadKey)}`
+            });
+        }).catch(error => {
+            console.error('No se pudo descargar el recurso multimedia localmente; se usará Render.', error);
+            callback({});
+        });
+    });
+
     window.webContents.setWindowOpenHandler(({ url }) => {
         void openExternalUrl(url);
         return { action: 'deny' };
