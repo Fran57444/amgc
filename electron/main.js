@@ -23,6 +23,8 @@ let discordRpcClientId = '';
 let discordRpcReconnectTimer = null;
 let discordRpcReady = false;
 let pendingDiscordPresence = null;
+let discordPresencePublishPromise = null;
+let discordPresencePublishRequested = false;
 let isQuitting = false;
 let discordRpcLastError = null;
 let discordRpcLastActivityAt = null;
@@ -288,9 +290,8 @@ function scheduleDiscordRpcReconnect() {
     discordRpcReconnectTimer.unref();
 }
 
-async function publishDiscordPresence() {
+async function publishDiscordPresenceSnapshot(presence) {
     if (!discordRpcReady || !discordRpcClient) return false;
-    const presence = pendingDiscordPresence;
     try {
         if (!presence) {
             await discordRpcClient.clearActivity();
@@ -323,7 +324,6 @@ async function publishDiscordPresence() {
         } else {
             logDiscordArtworkStatus('no-cover', 'No se recibió una URL de portada para esta canción.');
         }
-        if (pendingDiscordPresence !== presence) return false;
         if (duration > currentTime) {
             const startTimestamp = Date.now() - currentTime * 1000;
             activity.timestamps = {
@@ -344,6 +344,32 @@ async function publishDiscordPresence() {
         logDiscordRpc(`Error al actualizar la presencia: ${discordRpcLastError}`);
         return false;
     }
+}
+
+function publishDiscordPresence() {
+    if (!discordRpcReady || !discordRpcClient) return Promise.resolve(false);
+    if (discordPresencePublishPromise) {
+        discordPresencePublishRequested = true;
+        return discordPresencePublishPromise;
+    }
+
+    discordPresencePublishPromise = (async () => {
+        let published = false;
+        let presence;
+        do {
+            discordPresencePublishRequested = false;
+            presence = pendingDiscordPresence;
+            published = await publishDiscordPresenceSnapshot(presence);
+        } while (
+            discordRpcReady
+            && discordRpcClient
+            && (discordPresencePublishRequested || pendingDiscordPresence !== presence)
+        );
+        return published && pendingDiscordPresence === presence;
+    })().finally(() => {
+        discordPresencePublishPromise = null;
+    });
+    return discordPresencePublishPromise;
 }
 
 function connectDiscordRpc() {

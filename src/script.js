@@ -68,8 +68,9 @@ export function initMusicPlayer() {
     let skipNextRealtimeReconciliation = false;
     const profilePlaylistCache = new Map();
     const playlistSaversCache = new Map();
-    socket.off('friendsChanged').on('friendsChanged', () => {
-        loadFriends();
+    socket.off('friendsChanged').on('friendsChanged', async () => {
+        await loadFriends();
+        if (isPlaylistViewMode && activePlaylistId) openPlaylistView(activePlaylistId);
     });
     socket.off('songCatalogChanged').on('songCatalogChanged', async () => {
         const queueTrackIds = activeQueueTracks.map(track => String(track._id));
@@ -2329,6 +2330,16 @@ export function initMusicPlayer() {
             if (String(getStoredUser()?._id || '') !== requestedOwnerId) return;
             friendPresenceUpdatedAt.clear();
             currentFriends = await hydrateOfflineFriends(cachedFriends?.friends || []);
+            if (selectedProfileUser) {
+                const refreshedFriend = currentFriends.find(friend => String(friend._id) === String(selectedProfileUser._id));
+                if (refreshedFriend) {
+                    selectedProfileUser = {
+                        ...selectedProfileUser,
+                        ...refreshedFriend,
+                        profilePhoto: refreshedFriend.profilePhoto || selectedProfileUser.profilePhoto || ''
+                    };
+                }
+            }
             renderFriendsSidebar();
             renderFriendsPanelList();
             if (isProfileMode) renderProfile();
@@ -4644,6 +4655,11 @@ export function initMusicPlayer() {
     const audio = new Audio();
     audio.crossOrigin = "anonymous";
     audio.volume = currentVolume;
+    function isExpectedAudioPlayInterruption(error) {
+        return error?.name === 'AbortError'
+            || /play\(\) request was interrupted by a call to (?:pause|load)/i.test(error?.message || '');
+    }
+
     function isCurrentAudioSource(track) {
         if (!track || !audio.src || !track.path) return false;
         if (audio.src.startsWith('blob:')) {
@@ -4673,14 +4689,19 @@ export function initMusicPlayer() {
     const updateDiscordPresence = () => {
         if (!desktopSetDiscordPresence) return;
         const track = getCurrentTrack();
-        if (!track) return;
+        if (!track || !isCurrentAudioSource(track)) return;
+        const hasCurrentMetadata = audio.readyState >= HTMLMediaElement.HAVE_METADATA;
+        const currentTime = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+        const duration = hasCurrentMetadata && Number.isFinite(audio.duration) && audio.duration > 0
+            ? audio.duration
+            : Number(track.duration) || 0;
         const discordImageText = getStoredUser()?.settings?.discordImageText;
         const statusPromise = desktopSetDiscordPresence({
             songName: track.name || 'Canción desconocida',
             artist: track.artist || 'Artista desconocido',
-            currentTime: Number.isFinite(audio.currentTime) ? audio.currentTime : 0,
-            duration: Number.isFinite(audio.duration) ? audio.duration : Number(track.duration) || 0,
-            isPlaying: !audio.paused && !audio.ended,
+            currentTime: hasCurrentMetadata ? currentTime : 0,
+            duration,
+            isPlaying: !audio.paused && !audio.ended && hasCurrentMetadata,
             largeImageUrl: resolveDiscordArtworkUrl(track),
             discordImageText: typeof discordImageText === 'string'
                 ? discordImageText
@@ -6221,9 +6242,8 @@ export function initMusicPlayer() {
             const currentUser = getStoredUser();
             const localCreators = [currentUser, ...currentFriends].filter(Boolean);
             const getCreatorPhoto = (creator) => {
-                if (creator.profilePhoto) return creator.profilePhoto;
                 const localCreator = localCreators.find(item => String(item._id) === String(creator._id));
-                return localCreator?.profilePhoto || '';
+                return localCreator?.profilePhoto || creator.profilePhoto || '';
             };
             const creators = [
                 {
@@ -6384,8 +6404,9 @@ export function initMusicPlayer() {
             li.dataset.playlistTrackId = playlistTrackId;
             const addedBy = typeof track.addedBy === 'object' ? track.addedBy : null;
             const addedByName = addedBy?.username || track.addedByName || 'Desconocido';
-            const addedByPhoto = addedBy?.profilePhoto
-                || currentFriends.find(friend => String(friend._id) === String(addedBy?._id))?.profilePhoto
+            const addedByPhoto = [getStoredUser(), ...currentFriends]
+                .find(user => String(user?._id) === String(addedBy?._id))?.profilePhoto
+                || addedBy?.profilePhoto
                 || '';
             const addedAtLabel = track.addedAt
                 ? new Date(track.addedAt).toLocaleDateString('es-CL', { timeZone: 'America/Santiago' })
@@ -6925,13 +6946,17 @@ export function initMusicPlayer() {
         };
         if (offlineModeEnabled || offlineOnly) {
             setAudioSource().catch(error => {
+                if (sourceLoadToken !== audioSourceLoadToken || isExpectedAudioPlayInterruption(error)) return;
                 showToast(error.message || 'No se pudo abrir la canción guardada.', true);
             });
         } else {
             audio.src = track.path;
             audio.currentTime = 0;
             if (shouldPlay) {
-                audio.play().catch((err) => console.log('Esperando interacción para reproducción:', err));
+                audio.play().catch(error => {
+                    if (sourceLoadToken !== audioSourceLoadToken || isExpectedAudioPlayInterruption(error)) return;
+                    console.warn('No se pudo iniciar la reproducción.', error);
+                });
             }
         }
         if (currentUser?._id && shouldPlay) {
@@ -7232,7 +7257,13 @@ export function initMusicPlayer() {
     });
 
     btnPlayPause.addEventListener('click', () => {
-        if (audio.paused) { audio.play(); } 
+        if (audio.paused) {
+            audio.play().catch(error => {
+                if (!isExpectedAudioPlayInterruption(error)) {
+                    console.warn('No se pudo reanudar la reproducción.', error);
+                }
+            });
+        }
         else { audio.pause(); }
     });
 
