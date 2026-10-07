@@ -34,6 +34,7 @@ export function initMusicPlayer() {
     let offlineListeningLastPersistAt = 0;
     let offlineListeningSyncInProgress = false;
     let suppressNextListeningDelta = false;
+    let playbackStatusSyncTimer = null;
     const socket = io(import.meta.env.VITE_SOCKET_URL || window.location.origin, {
         autoConnect: false,
         transports: ['websocket', 'polling'],
@@ -2736,6 +2737,33 @@ export function initMusicPlayer() {
         chatSendQueues.set(String(receiverId), queuedSend);
         await queuedSend;
         if (chatSendQueues.get(String(receiverId)) === queuedSend) chatSendQueues.delete(String(receiverId));
+    }
+
+    function stopPlaybackStatusSync() {
+        if (playbackStatusSyncTimer) {
+            clearInterval(playbackStatusSyncTimer);
+            playbackStatusSyncTimer = null;
+        }
+    }
+
+    function startPlaybackStatusSync() {
+        stopPlaybackStatusSync();
+        const user = getStoredUser();
+        if (!user?._id || !getCurrentTrack() || audio.paused) return;
+        playbackStatusSyncTimer = setInterval(() => {
+            const activeUser = getStoredUser();
+            const currentTrack = getCurrentTrack();
+            if (
+                !activeUser?._id
+                || !currentTrack
+                || audio.paused
+                || String(playbackActivityUserId || '') !== String(activeUser._id)
+            ) {
+                stopPlaybackStatusSync();
+                return;
+            }
+            updateUserStatus(true);
+        }, 15000);
     }
 
     async function updateUserStatus(isOnline) {
@@ -6661,6 +6689,7 @@ export function initMusicPlayer() {
             playbackActivityUserId = String(activeUser._id);
         }
         sharedPlaybackPlaying = true;
+        startPlaybackStatusSync();
         updateUserStatus(true);
         offlineListeningLastSample = offlineOnly || !navigator.onLine
             ? {
@@ -6685,6 +6714,7 @@ export function initMusicPlayer() {
         offlineListeningLastSample = null;
         persistOfflineListeningBuffer(true);
         sharedPlaybackPlaying = false;
+        stopPlaybackStatusSync();
         persistPlaybackPosition(true);
         broadcastPlaybackState(true);
         if (playbackUiFrame) {
