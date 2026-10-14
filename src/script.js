@@ -88,6 +88,9 @@ export function initMusicPlayer() {
         if (isProfileMode) renderProfile();
         syncOfflineResources();
     });
+    socket.off('songSuggestionsChanged').on('songSuggestionsChanged', () => {
+        void loadSongSuggestions();
+    });
     socket.off('userStatsChanged').on('userStatsChanged', ({ userId } = {}) => {
         const profileUser = selectedProfileUser || getStoredUser();
         if (isProfileMode && profileUser?._id && String(profileUser._id) === String(userId)) {
@@ -106,6 +109,7 @@ export function initMusicPlayer() {
             setStoredUser(updatedUser);
             saveCachedOfflineUser(updatedUser);
             syncSecretPhrasesFromUser(updatedUser);
+            await loadSecretPhrases(updatedUser);
             if (Number.isFinite(Number(updatedUser.settings?.seekSeconds))) {
                 seekSeconds = Number(updatedUser.settings.seekSeconds);
                 if (inputSeekSeconds) inputSeekSeconds.value = String(seekSeconds);
@@ -131,6 +135,7 @@ export function initMusicPlayer() {
                 socket.disconnect();
                 connectRealtime();
             }
+            if (isAllSongsMode) renderAllSongs();
             if (isProfileMode) renderProfile();
         } catch (error) {
             console.warn('No se pudo sincronizar el perfil en tiempo real.', error);
@@ -212,6 +217,7 @@ export function initMusicPlayer() {
     socket.off('connect').on('connect', async () => {
         const isReconnect = realtimeConnectedBefore;
         realtimeConnectedBefore = true;
+        void loadSongSuggestions(false);
         const shouldReconcile = isReconnect && !skipNextRealtimeReconciliation;
         skipNextRealtimeReconciliation = false;
         if (shouldReconcile && accessToken && !offlineOnly && navigator.onLine) {
@@ -222,6 +228,7 @@ export function initMusicPlayer() {
                 setStoredUser(updatedUser);
                 saveCachedOfflineUser(updatedUser);
                 syncSecretPhrasesFromUser(updatedUser);
+                await loadSecretPhrases(updatedUser);
                 syncAccessControls();
                 await syncOfflineListening();
                 await Promise.all([fetchMusicData(), loadPlaylists(), loadFriends()]);
@@ -541,6 +548,7 @@ export function initMusicPlayer() {
     const nowPlayingLyricTrack = nowPlayingLyric?.querySelector('.now-playing-lyric-track');
     const secretText = document.getElementById("secret-text");
     const secretPhrasesInput = document.getElementById("secret-phrases-input");
+    const secretPhrasesPersonalToggle = document.getElementById("secret-phrases-personal");
     const btnSaveSecretPhrases = document.getElementById("btn-save-secret-phrases");
     const secretPhrasesStatus = document.getElementById("secret-phrases-status");
     const allSongsPanel = document.getElementById("all-songs-panel");
@@ -548,6 +556,8 @@ export function initMusicPlayer() {
     const adminPanel = document.getElementById("admin-panel");
     const allSongsList = document.getElementById("all-songs-list");
     const allSongsSearch = document.getElementById("all-songs-search");
+    const songSuggestionForm = document.getElementById("song-suggestion-form");
+    const songSuggestionInput = document.getElementById("song-suggestion-input");
     const inputSeekSeconds = document.getElementById("input-seek-seconds");
     const inputMaxVolume = document.getElementById("input-max-volume");
     const discordPresenceImageTextInput = document.getElementById("discord-presence-image-text");
@@ -718,6 +728,7 @@ export function initMusicPlayer() {
     const editInputMp3 = document.getElementById("edit-input-mp3");
     const editInputFileName = document.getElementById("edit-input-file-name");
     const editInputLyrics = document.getElementById("edit-input-lyrics");
+    const editInputLyricsReady = document.getElementById("edit-input-lyrics-ready");
     const btnPlayEditedSong = document.getElementById("btn-play-edited-song");
     const btnInsertEditLyricTime = document.getElementById("btn-insert-edit-lyric-time");
     const editLyricsStatus = document.getElementById("edit-lyrics-status");
@@ -771,6 +782,8 @@ export function initMusicPlayer() {
     const friendRealtimeUpdates = new Map();
     let selectedProfileUser = null;
     let listeningTogetherUserId = null;
+    let listeningTogetherMetadataWaitTrackId = null;
+    let listeningTogetherMetadataWaitToken = 0;
     let sharedPlaybackTime = 0;
     let sharedPlaybackDuration = 0;
     let sharedPlaybackPlaying = false;
@@ -807,15 +820,18 @@ export function initMusicPlayer() {
     let lastPlaybackPersistenceAt = 0;
     let publicProfilePlaylists = null;
     let profilePlaylistsRequestToken = 0;
-    let profileStatsRequestToken = 0;
+    let profileStatsRequestSequence = 0;
     const profileStatsCache = new Map();
+    const profileStatsRequests = new Map();
     let adminUsersCache = null;
     let adminUsersCacheOwnerId = null;
     let adminUsersRequestToken = 0;
     const timedLyricsStorageKey = 'amgc-timed-lyrics-v1';
     const defaultSecretPhrases = [];
     let timedLyricsByTrack = {};
+    let globalSecretPhrases = defaultSecretPhrases;
     let secretPhrases = defaultSecretPhrases;
+    let secretPhrasesRequestSequence = 0;
     let previousSecretPhrase = '';
     let nowPlayingLyricAnimationTimeout = null;
     let nowPlayingLyricPendingIndex = null;
@@ -976,6 +992,20 @@ export function initMusicPlayer() {
         appendWords(target, text.slice(lastIndex));
     }
 
+    function getContrastingTextColor(backgroundColor) {
+        const match = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(String(backgroundColor || '').trim());
+        if (!match) return '#fff';
+        const hex = match[1].length === 3
+            ? [...match[1]].map(channel => channel + channel).join('')
+            : match[1];
+        const channels = [0, 2, 4].map(offset => {
+            const value = parseInt(hex.slice(offset, offset + 2), 16) / 255;
+            return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+        });
+        const luminance = channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+        return luminance > 0.179 ? '#000' : '#fff';
+    }
+
     function setLyricHighlightAppearance(target, color, glow = false) {
         target.querySelectorAll('.lyric-highlight').forEach(highlight => {
             highlight.style.color = color;
@@ -1000,8 +1030,13 @@ export function initMusicPlayer() {
             list.replaceChildren();
             if (!lyrics.length) {
                 const empty = document.createElement('li');
-                empty.className = 'lyrics-empty-state';
-                empty.textContent = 'Aún no hay letra sincronizada para esta canción.';
+                empty.className = list.closest('#lyrics-panel')
+                    ? 'timed-lyric-line active lyrics-empty-state'
+                    : 'lyrics-empty-state';
+                const content = document.createElement('span');
+                content.className = 'timed-lyric-content';
+                content.textContent = 'Aún no hay letra sincronizada para esta canción.';
+                empty.appendChild(content);
                 list.appendChild(empty);
             } else {
                 lyrics.forEach(({ time: lineTime, text }, index) => {
@@ -1024,7 +1059,9 @@ export function initMusicPlayer() {
                     appendLyricText(
                         content,
                         text,
-                        isFullLyricsPanel ? '#fff' : (track?.color || '#ff8a00'),
+                        isFullLyricsPanel
+                            ? getContrastingTextColor(track?.color || '#151515')
+                            : (track?.color || '#ff8a00'),
                         list === editLyricsPreview,
                         isFullLyricsPanel
                     );
@@ -1298,7 +1335,8 @@ export function initMusicPlayer() {
     })[character]);
 
     const syncSecretPhrasesFromUser = (user) => {
-        const storedPhrases = user?.settings?.secretPhrases;
+        const isPersonal = user?.settings?.secretPhrasesPersonal === true;
+        const storedPhrases = isPersonal ? user?.settings?.secretPhrases : globalSecretPhrases;
         if (storedPhrases !== undefined && (
             !Array.isArray(storedPhrases) || !storedPhrases.every(phrase => typeof phrase === 'string')
         )) {
@@ -1307,8 +1345,41 @@ export function initMusicPlayer() {
         } else {
             secretPhrases = storedPhrases ?? defaultSecretPhrases;
         }
+        if (secretPhrasesPersonalToggle) secretPhrasesPersonalToggle.checked = isPersonal;
         if (secretPhrasesInput) secretPhrasesInput.value = secretPhrases.join('\n');
-        if (secretText && !previousSecretPhrase && secretPhrases.length > 0) showRandomSecretPhrase();
+        if (secretPhrases.length > 0) {
+            if (!secretPhrases.includes(previousSecretPhrase)) previousSecretPhrase = '';
+            if (!previousSecretPhrase) showRandomSecretPhrase();
+        } else if (secretText) {
+            secretText.hidden = true;
+            previousSecretPhrase = '';
+        }
+    };
+
+    const loadSecretPhrases = async (user = getStoredUser()) => {
+        if (!user?._id || offlineOnly || !navigator.onLine) return;
+        const requestSequence = ++secretPhrasesRequestSequence;
+        const response = await apiFetch(`${API_URL}/secret-phrases`);
+        const result = await response.json().catch(() => null);
+        if (!response.ok) throw new Error(result?.error || 'No se pudieron cargar las frases secretas.');
+        if (!Array.isArray(result?.globalPhrases) || !result.globalPhrases.every(phrase => typeof phrase === 'string')
+            || !Array.isArray(result?.personalPhrases) || !result.personalPhrases.every(phrase => typeof phrase === 'string')
+            || typeof result.personal !== 'boolean') {
+            throw new Error('El servidor devolvió las frases secretas con un formato no válido.');
+        }
+        if (requestSequence !== secretPhrasesRequestSequence
+            || String(getStoredUser()?._id || '') !== String(user._id)) return;
+        globalSecretPhrases = result.globalPhrases;
+        const updatedUser = {
+            ...user,
+            settings: {
+                ...user.settings,
+                secretPhrases: result.personalPhrases,
+                secretPhrasesPersonal: result.personal
+            }
+        };
+        setStoredUser(updatedUser);
+        syncSecretPhrasesFromUser(updatedUser);
     };
 
     const syncDiscordImageTextFromUser = (user) => {
@@ -1522,6 +1593,8 @@ export function initMusicPlayer() {
     const setStoredUser = (user) => {
         if (!user) {
             localStorage.removeItem('amgc-user');
+            secretPhrasesRequestSequence += 1;
+            syncSecretPhrasesFromUser(null);
             syncDiscordImageTextFromUser(null);
             return;
         }
@@ -1717,18 +1790,19 @@ export function initMusicPlayer() {
 
         async function loadProfileStats(user, forceRefresh = false) {
             if (!profileStats || !user?._id) return;
-            const requestToken = ++profileStatsRequestToken;
             const profileId = String(user._id);
             const cacheKey = `amgc-profile-stats-${profileId}`;
+            let requestToken = null;
             const currentProfileId = () => String((selectedProfileUser || getStoredUser())?._id || '');
             const isCurrentProfileRequest = () => (
                 isProfileMode
-                && requestToken === profileStatsRequestToken
                 && currentProfileId() === profileId
+                && (requestToken === null || profileStatsRequests.get(profileId) === requestToken)
             );
             const statElements = [
                 'profile-stat-role',
                 'profile-stat-hours',
+                'profile-stat-played',
                 'profile-stat-added',
                 'profile-stat-edited',
                 'profile-stat-friends',
@@ -1764,6 +1838,7 @@ export function initMusicPlayer() {
                 const values = {
                     'profile-stat-role': stats.role || (user.isAdmin ? 'Administrador' : 'Usuario'),
                     'profile-stat-hours': `${hours} h ${minutes} min`,
+                    'profile-stat-played': stats.songsPlayed || 0,
                     'profile-stat-added': stats.songsAdded || 0,
                     'profile-stat-edited': stats.songsEdited || 0,
                     'profile-stat-friends': stats.friendsAdded ?? (user.friends || []).length,
@@ -1789,7 +1864,10 @@ export function initMusicPlayer() {
             }
 
             if (!forceRefresh && memoryCachedStats && Date.now() - memoryCachedStats.cachedAt < 30000) return;
+            if (!forceRefresh && profileStatsRequests.has(profileId)) return;
 
+            requestToken = ++profileStatsRequestSequence;
+            profileStatsRequests.set(profileId, requestToken);
             try {
                 const stats = await fetchJsonWithRetry(`${API_URL}/users/${user._id}/stats`, {}, 2);
                 if (!isCurrentProfileRequest()) return;
@@ -1809,6 +1887,11 @@ export function initMusicPlayer() {
                         const element = document.getElementById(id);
                         if (element) element.textContent = '—';
                     });
+                }
+            }
+            finally {
+                if (profileStatsRequests.get(profileId) === requestToken) {
+                    profileStatsRequests.delete(profileId);
                 }
             }
         }
@@ -1915,7 +1998,7 @@ export function initMusicPlayer() {
         if (profileHistoryCard && profileHistory) {
             const history = Array.isArray(user?.lastPlayedHistory) ? user.lastPlayedHistory : [];
             profileHistoryCard.style.display = isFriendProfile && history.length ? 'block' : 'none';
-            profileHistory.innerHTML = history.slice(0, 10).map(item => `
+            profileHistory.innerHTML = history.slice().reverse().slice(0, 10).map(item => `
                 <li class="profile-history-item">
                     <span>${escapeHtml(item.songName || 'Canción desconocida')}${item.artist ? ` · ${escapeHtml(item.artist)}` : ''}</span>
                     <small>${item.playedAt ? timeAgo(item.playedAt) : ''}</small>
@@ -2810,6 +2893,8 @@ export function initMusicPlayer() {
             rememberFriendRealtimeUpdate(userId, { isOnline: true, lastPlayed: playback });
             const friend = currentFriends.find(item => String(item._id) === String(userId));
             if (!friend || !playback) return;
+            const previousPlayback = friend.lastPlayed;
+            const wasOnline = friend.isOnline;
             friend.lastPlayed = getNewestPlayback(playback, friend.lastPlayed);
             friend.isOnline = true;
             friendPresenceUpdatedAt.set(String(userId), Date.now());
@@ -2819,22 +2904,33 @@ export function initMusicPlayer() {
             updateFriendsSidebarPlayback();
             if (selectedProfileUser && String(selectedProfileUser._id) === String(userId)) {
                 selectedProfileUser = { ...selectedProfileUser, lastPlayed: friend.lastPlayed, isOnline: true };
-                renderProfile();
+                const playbackIdentityChanged = String(previousPlayback?.songId || '') !== String(friend.lastPlayed?.songId || '')
+                    || previousPlayback?.isPlaying !== friend.lastPlayed?.isPlaying
+                    || !wasOnline;
+                if (playbackIdentityChanged) renderProfile();
+                else updateProfileActivityProgress();
             }
         });
         socket.off('playbackStatusChanged').on('playbackStatusChanged', ({ userId, playback } = {}) => {
             rememberFriendRealtimeUpdate(userId, { isOnline: true, lastPlayed: playback });
             const friend = currentFriends.find(item => String(item._id) === String(userId));
             if (!friend || !playback) return;
+            const previousPlayback = friend.lastPlayed;
+            const wasOnline = friend.isOnline;
             friend.lastPlayed = getNewestPlayback(playback, friend.lastPlayed);
             friend.isOnline = true;
             friendPresenceUpdatedAt.set(String(userId), Date.now());
             scheduleFriendsOfflineSave();
             renderFriendsSidebar();
             renderFriendsPanelList();
+            updateFriendsSidebarPlayback();
             if (selectedProfileUser && String(selectedProfileUser._id) === String(userId)) {
                 selectedProfileUser = { ...selectedProfileUser, lastPlayed: friend.lastPlayed };
-                renderProfile();
+                const playbackIdentityChanged = String(previousPlayback?.songId || '') !== String(friend.lastPlayed?.songId || '')
+                    || previousPlayback?.isPlaying !== friend.lastPlayed?.isPlaying
+                    || !wasOnline;
+                if (playbackIdentityChanged) renderProfile();
+                else updateProfileActivityProgress();
             }
         });
         socket.off('playlistChanged').on('playlistChanged', ({ playlistId, deleted, changedBy } = {}) => {
@@ -2905,6 +3001,8 @@ export function initMusicPlayer() {
             rememberFriendRealtimeUpdate(userId, { isOnline, lastPlayed, updatedAt });
             const friend = currentFriends.find(item => String(item._id) === String(userId));
             if (!friend) return;
+            const wasOnline = friend.isOnline;
+            const previousPlayback = friend.lastPlayed;
             friendPresenceUpdatedAt.set(String(userId), Date.now());
             friend.isOnline = Boolean(isOnline);
             if (updatedAt) friend.lastActive = updatedAt;
@@ -2922,7 +3020,11 @@ export function initMusicPlayer() {
                     lastActive: friend.lastActive,
                     lastPlayed: friend.lastPlayed
                 };
-                renderProfile();
+                const playbackIdentityChanged = wasOnline !== friend.isOnline
+                    || String(previousPlayback?.songId || '') !== String(friend.lastPlayed?.songId || '')
+                    || previousPlayback?.isPlaying !== friend.lastPlayed?.isPlaying;
+                if (playbackIdentityChanged) renderProfile();
+                else updateProfileActivityProgress();
             }
         });
         updateUserStatus(true);
@@ -3034,20 +3136,23 @@ export function initMusicPlayer() {
 
         const remoteTime = Math.max(0, Number(playback.currentTime) || 0);
         const remoteUpdatedAt = Date.parse(playback.updatedAt);
-        const playbackAge = Number.isFinite(remoteUpdatedAt) ? Math.max(0, (Date.now() - remoteUpdatedAt) / 1000) : Infinity;
-        if (!friend.isOnline || (playback.isPlaying !== false && playbackAge > 3)) {
+        const playbackAge = Number.isFinite(remoteUpdatedAt)
+            ? Math.max(0, (Date.now() - remoteUpdatedAt) / 1000)
+            : 0;
+        if (!friend.isOnline) {
             if (currentTrackSource === 'together' && !audio.paused) audio.pause();
             return;
         }
         const extraTime = playback.isPlaying !== false && Number.isFinite(remoteUpdatedAt)
             ? playbackAge
             : 0;
-        const remoteDuration = Number(playback.duration) || 0;
-        const durationLimit = remoteDuration > 0
-            ? remoteDuration
-            : currentTrackIndex === remoteIndex && Number.isFinite(audio.duration) && audio.duration > 0
-                ? audio.duration
-                : Number.MAX_SAFE_INTEGER;
+        const durationLimits = [
+            Number(playback.duration),
+            currentTrackIndex === remoteIndex ? audio.duration : 0
+        ].filter(duration => Number.isFinite(duration) && duration > 0);
+        const durationLimit = durationLimits.length
+            ? Math.min(...durationLimits)
+            : Number.MAX_SAFE_INTEGER;
         const targetTime = Math.min(
             durationLimit,
             remoteTime + extraTime
@@ -3055,27 +3160,53 @@ export function initMusicPlayer() {
         const currentTrackChanged = currentTrackIndex !== remoteIndex || currentTrackSource !== 'together';
 
         if (currentTrackChanged) {
-            const seekToRemoteTime = () => {
-                if (currentTrackIndex === remoteIndex && Number.isFinite(targetTime) && audio.readyState >= 1) {
-                    audio.currentTime = targetTime;
+            const syncAfterMetadata = () => {
+                if (
+                    String(getCurrentTrack()?._id || '') === String(playback.songId)
+                    && currentTrackSource === 'together'
+                ) {
+                    syncListeningTogether();
                 }
             };
-            audio.addEventListener('loadedmetadata', seekToRemoteTime, { once: true });
+            audio.addEventListener('loadedmetadata', syncAfterMetadata, { once: true });
             loadAndPlayTrack(remoteIndex, 'together', playback.isPlaying !== false);
-            if (audio.readyState >= 1) {
-                audio.removeEventListener('loadedmetadata', seekToRemoteTime);
-                seekToRemoteTime();
-            }
             return;
         }
 
         const expectedSrc = playlist[remoteIndex]?.path;
         if (audio.src !== expectedSrc && !audio.src.endsWith(expectedSrc || '\0')) return;
+        if (audio.readyState < HTMLMediaElement.HAVE_METADATA) {
+            const trackId = String(playback.songId);
+            if (listeningTogetherMetadataWaitTrackId !== trackId) {
+                listeningTogetherMetadataWaitTrackId = trackId;
+                const waitToken = ++listeningTogetherMetadataWaitToken;
+                audio.addEventListener('loadedmetadata', () => {
+                    if (
+                        listeningTogetherMetadataWaitToken !== waitToken
+                        || listeningTogetherMetadataWaitTrackId !== trackId
+                    ) return;
+                    listeningTogetherMetadataWaitTrackId = null;
+                    if (
+                        String(getCurrentTrack()?._id || '') === trackId
+                        && currentTrackSource === 'together'
+                    ) {
+                        syncListeningTogether();
+                    }
+                }, { once: true });
+            }
+            return;
+        }
         if (Math.abs(audio.currentTime - targetTime) > 0.75) {
             audio.currentTime = targetTime;
         }
         if (playback.isPlaying === false && !audio.paused) audio.pause();
-        if (playback.isPlaying !== false && audio.paused) audio.play().catch(() => {});
+        if (playback.isPlaying !== false && audio.paused && !audio.ended) {
+            audio.play().catch(error => {
+                if (!isExpectedAudioPlayInterruption(error)) {
+                    console.warn('No se pudo reanudar la reproducción sincronizada.', error);
+                }
+            });
+        }
     }
 
     function updateListeningTogetherStatus() {
@@ -3402,6 +3533,7 @@ export function initMusicPlayer() {
                 if (offlineModeToggle) offlineModeToggle.checked = offlineModeEnabled;
                 await syncOfflineListening();
                 syncSecretPhrasesFromUser(restoredUser);
+                await loadSecretPhrases(restoredUser);
                 renderProfile();
                 syncAccessControls();
                 if (canCurrentUser('manage_users')) void loadAdminUsers();
@@ -3538,6 +3670,7 @@ export function initMusicPlayer() {
                 if (offlineModeToggle) offlineModeToggle.checked = offlineModeEnabled;
                 await syncOfflineListening();
                 syncSecretPhrasesFromUser(userPayload);
+                await loadSecretPhrases(userPayload);
                 renderProfile();
                 syncAccessControls();
                 if (canCurrentUser('manage_users')) void loadAdminUsers();
@@ -4027,7 +4160,9 @@ export function initMusicPlayer() {
     let trackToAddIndex = null;
     let editingTrackIndex = null;
     let editingTrackId = null;
+    let editingSuggestionId = null;
     let songSaveInProgress = false;
+    let songSuggestions = [];
     let playlistEditorPreviousView = null;
     let originalEditLyrics = '';
     let lyricsCancelPromptIndex = 0;
@@ -4063,18 +4198,21 @@ export function initMusicPlayer() {
             .filter(index => index !== -1);
     }
 
+    function shuffleIndices(indices) {
+        for (let index = indices.length - 1; index > 0; index -= 1) {
+            const randomIndex = Math.floor(Math.random() * (index + 1));
+            [indices[index], indices[randomIndex]] = [indices[randomIndex], indices[index]];
+        }
+        return indices;
+    }
+
     function buildShuffleQueue() {
         const anchorTrackId = generalQueueAnchorTrackId || getCurrentTrack()?._id;
         const indices = activeQueueTracks
             .map(track => playlist.indexOf(track))
             .filter(index => index !== -1 && String(playlist[index]?._id) !== String(anchorTrackId));
 
-        for (let index = indices.length - 1; index > 0; index -= 1) {
-            const randomIndex = Math.floor(Math.random() * (index + 1));
-            [indices[index], indices[randomIndex]] = [indices[randomIndex], indices[index]];
-        }
-
-        return indices;
+        return shuffleIndices(indices);
     }
 
     function resetPlaybackHistory() {
@@ -4381,6 +4519,16 @@ export function initMusicPlayer() {
     async function fetchMusicData() {
         const requestSequence = ++musicDataRequestSequence;
         const userAtRequestStart = getStoredUser();
+        const previousCatalogTrackIds = new Set(playlist.map(getTrackStorageId));
+        const previousShuffleTrackIds = isShuffle
+            ? unplayedIndices.map(index => getTrackStorageId(playlist[index])).filter(Boolean)
+            : null;
+        const previousShuffleHistory = isShuffle
+            ? playbackHistory.map(({ index, source }) => ({
+                trackId: getTrackStorageId(playlist[index]),
+                source
+            })).filter(entry => entry.trackId)
+            : null;
         const ownsCurrentPlayback = Boolean(
             userAtRequestStart?._id
             && String(playbackActivityUserId || '') === String(userAtRequestStart._id)
@@ -4460,9 +4608,33 @@ export function initMusicPlayer() {
         } else {
             currentTrackIndex = Math.min(currentTrackIndex, Math.max(0, playlist.length - 1));
         }
-        
+
         activeQueueTracks = [...playlist];
-        resetPlaybackHistory();
+        if (previousShuffleTrackIds) {
+            const indexByTrackId = new Map(playlist.map((track, index) => [getTrackStorageId(track), index]));
+            const queuedIndices = new Set();
+            unplayedIndices = [];
+            previousShuffleTrackIds.forEach(trackId => {
+                const index = indexByTrackId.get(trackId);
+                if (!Number.isInteger(index) || index === currentTrackIndex || queuedIndices.has(index)) return;
+                queuedIndices.add(index);
+                unplayedIndices.push(index);
+            });
+            const newTrackIndices = playlist
+                .map((track, index) => ({ trackId: getTrackStorageId(track), index }))
+                .filter(({ trackId, index }) => (
+                    !previousCatalogTrackIds.has(trackId)
+                    && index !== currentTrackIndex
+                    && !queuedIndices.has(index)
+                ))
+                .map(({ index }) => index);
+            unplayedIndices.push(...shuffleIndices(newTrackIndices));
+            playbackHistory = previousShuffleHistory
+                .map(({ trackId, source }) => ({ index: indexByTrackId.get(trackId), source }))
+                .filter(entry => Number.isInteger(entry.index));
+        } else {
+            resetPlaybackHistory();
+        }
         if (editingTrackId) {
             editingTrackIndex = playlist.findIndex(track => String(track._id) === editingTrackId);
             const trackStillExists = editingTrackIndex !== -1;
@@ -4714,6 +4886,8 @@ export function initMusicPlayer() {
             return null;
         }
     };
+    let lastDiscordPresenceSignature = null;
+    let discordPresenceRequestSequence = 0;
     const updateDiscordPresence = () => {
         if (!desktopSetDiscordPresence) return;
         const track = getCurrentTrack();
@@ -4724,22 +4898,37 @@ export function initMusicPlayer() {
             ? audio.duration
             : Number(track.duration) || 0;
         const discordImageText = getStoredUser()?.settings?.discordImageText;
+        const largeImageUrl = resolveDiscordArtworkUrl(track);
+        const isPlaying = !audio.paused && !audio.ended;
+        const signature = JSON.stringify([
+            getTrackStorageId(track),
+            isPlaying,
+            Math.floor(currentTime),
+            duration,
+            largeImageUrl,
+            typeof discordImageText === 'string' ? discordImageText : 'amgc'
+        ]);
+        if (signature === lastDiscordPresenceSignature) return;
+        lastDiscordPresenceSignature = signature;
+        const requestSequence = ++discordPresenceRequestSequence;
         const statusPromise = desktopSetDiscordPresence({
             songName: track.name || 'Canción desconocida',
             artist: track.artist || 'Artista desconocido',
-            currentTime: hasCurrentMetadata ? currentTime : 0,
+            currentTime,
             duration,
-            isPlaying: !audio.paused && !audio.ended && hasCurrentMetadata,
-            largeImageUrl: resolveDiscordArtworkUrl(track),
+            isPlaying,
+            largeImageUrl,
             discordImageText: typeof discordImageText === 'string'
                 ? discordImageText
                 : 'amgc'
         });
         void statusPromise.then(status => {
+            if (requestSequence !== discordPresenceRequestSequence) return;
             if (status && (!status.configured || !status.connected || !status.published)) {
                 console.warn('Discord Rich Presence no está activa:', status);
             }
         }).catch(error => {
+            if (requestSequence !== discordPresenceRequestSequence) return;
             console.warn('No se pudo actualizar Discord Rich Presence.', error);
         });
     };
@@ -4777,6 +4966,25 @@ export function initMusicPlayer() {
     }
     syncSecretPhrasesFromUser(getStoredUser());
     syncDiscordImageTextFromUser(getStoredUser());
+    void loadSecretPhrases().catch(error => {
+        console.warn('No se pudieron cargar las frases globales.', error);
+    });
+
+    if (secretPhrasesPersonalToggle) {
+        secretPhrasesPersonalToggle.addEventListener('change', () => {
+            const user = getStoredUser();
+            const nextPhrases = secretPhrasesPersonalToggle.checked
+                ? user?.settings?.secretPhrases || []
+                : globalSecretPhrases;
+            if (secretPhrasesInput) secretPhrasesInput.value = nextPhrases.join('\n');
+        });
+    }
+
+    socket.off('secretPhrasesChanged').on('secretPhrasesChanged', () => {
+        void loadSecretPhrases().catch(error => {
+            console.warn('No se pudieron actualizar las frases globales.', error);
+        });
+    });
 
     if (btnSaveSecretPhrases) {
         btnSaveSecretPhrases.addEventListener('click', async () => {
@@ -4790,20 +4998,39 @@ export function initMusicPlayer() {
             btnSaveSecretPhrases.disabled = true;
             setEditorStatus(secretPhrasesStatus, 'Guardando frases...');
             try {
-                const response = await apiFetch(`${API_URL}/users/settings`, {
+                const response = await apiFetch(`${API_URL}/secret-phrases`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        userId: user._id,
-                        settings: { ...user.settings, secretPhrases: phrases }
+                        phrases,
+                        personal: secretPhrasesPersonalToggle?.checked === true
                     })
                 });
                 const result = await response.json().catch(() => null);
                 if (!response.ok) throw new Error(result?.error || 'No se pudieron guardar las frases secretas.');
-                setStoredUser({ ...user, settings: result });
-                secretPhrases = phrases;
-                if (!phrases.length && secretText) secretText.hidden = true;
-                setEditorStatus(secretPhrasesStatus, phrases.length ? `${phrases.length} frases guardadas.` : 'Lista guardada vacía.');
+                if (!Array.isArray(result?.globalPhrases)
+                    || !result.globalPhrases.every(phrase => typeof phrase === 'string')
+                    || !Array.isArray(result?.personalPhrases)
+                    || !result.personalPhrases.every(phrase => typeof phrase === 'string')
+                    || typeof result.personal !== 'boolean') {
+                    throw new Error('El servidor devolvió una respuesta no válida al guardar las frases.');
+                }
+                globalSecretPhrases = result.globalPhrases;
+                const updatedUser = {
+                    ...user,
+                    settings: {
+                        ...user.settings,
+                        secretPhrases: result.personalPhrases,
+                        secretPhrasesPersonal: result.personal
+                    }
+                };
+                setStoredUser(updatedUser);
+                syncSecretPhrasesFromUser(updatedUser);
+                const scopeLabel = result.personal ? 'personales' : 'globales';
+                setEditorStatus(
+                    secretPhrasesStatus,
+                    phrases.length ? `${phrases.length} frases ${scopeLabel} guardadas.` : `Lista de frases ${scopeLabel} vacía.`
+                );
             } catch (error) {
                 console.error('No se pudieron guardar las frases secretas.', error);
                 setEditorStatus(secretPhrasesStatus, error.message || 'No se pudieron guardar las frases secretas.', true);
@@ -5404,13 +5631,103 @@ export function initMusicPlayer() {
         listElement: allSongsList,
         searchInput: allSongsSearch,
         getSongs: () => playlist,
+        getSongSuggestions: () => songSuggestions,
         getSongCover,
         createImageMarkup,
         createSongContextMenuHtml,
         setupSongMenuListeners,
         setupQueueAddSwipe,
-        openEditSongPanel
+        openEditSongPanel,
+        openSongSuggestion: suggestion => openEditSongPanel(null, suggestion),
+        deleteSongSuggestion: suggestion => deleteSongSuggestion(suggestion),
+        canEditSuggestions: () => canCurrentUser('edit_songs'),
+        canDeleteSuggestions: () => canCurrentUser('delete_songs')
     });
+
+    async function loadSongSuggestions(reportError = true) {
+        if (!getStoredUser()?._id || !accessToken || offlineOnly || !navigator.onLine) return;
+        try {
+            const response = await apiFetch(`${API_URL}/song-suggestions`);
+            const result = await response.json().catch(() => null);
+            if (!response.ok) throw new Error(result?.error || 'No se pudieron cargar las sugerencias.');
+            songSuggestions = Array.isArray(result) ? result : [];
+            renderAllSongs();
+        } catch (error) {
+            console.warn('No se pudieron actualizar las sugerencias de canciones.', error);
+            if (reportError) showToast(error.message || 'No se pudieron cargar las sugerencias.', true);
+        }
+    }
+
+    async function deleteSongSuggestion(suggestion) {
+        if (!canCurrentUser('delete_songs')) {
+            showToast('No tienes permiso para eliminar sugerencias.', true);
+            return;
+        }
+        try {
+            const response = await apiFetch(`${API_URL}/song-suggestions/${encodeURIComponent(suggestion._id)}`, {
+                method: 'DELETE'
+            });
+            const result = await response.json().catch(() => null);
+            if (!response.ok) throw new Error(result?.error || 'No se pudo eliminar la sugerencia.');
+            songSuggestions = songSuggestions.filter(item => String(item._id) !== String(suggestion._id));
+            renderAllSongs();
+        } catch (error) {
+            console.error('No se pudo eliminar la sugerencia de canción.', error);
+            showToast(error.message || 'No se pudo eliminar la sugerencia.', true);
+        }
+    }
+
+    songSuggestionForm?.addEventListener('submit', async event => {
+        event.preventDefault();
+        const suggestionText = songSuggestionInput?.value.trim() || '';
+        const match = suggestionText.match(/^(.+)\s+de\s+(.+)$/i);
+        const name = match?.[1]?.trim() || '';
+        const artist = match?.[2]?.trim() || '';
+        const normalizeSongMetadata = value => value
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLocaleLowerCase('es');
+        if (name && artist
+            && normalizeSongMetadata(name) === 'cancion'
+            && normalizeSongMetadata(artist) === 'artista') {
+            showToast('Reemplaza “Cancion” y “Artista” por el nombre real de la canción y su artista.', true);
+            songSuggestionInput?.focus();
+            return;
+        }
+        if (!name || !artist) {
+            showToast('Escribe la sugerencia con el formato “Canción de Artista”.', true);
+            songSuggestionInput?.focus();
+            return;
+        }
+        if (!getStoredUser()?._id) {
+            showToast('Inicia sesión para sugerir una canción.', true);
+            return;
+        }
+        if (songSuggestionInput) songSuggestionInput.disabled = true;
+        try {
+            const response = await apiFetch(`${API_URL}/song-suggestions`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, artist })
+            });
+            const result = await response.json().catch(() => null);
+            if (!response.ok) throw new Error(result?.error || 'No se pudo enviar la sugerencia.');
+            if (songSuggestionInput) songSuggestionInput.value = '';
+            songSuggestions = [
+                result,
+                ...songSuggestions.filter(item => String(item._id) !== String(result?._id))
+            ];
+            renderAllSongs();
+            showToast('Sugerencia enviada.');
+        } catch (error) {
+            console.error('No se pudo enviar la sugerencia de canción.', error);
+            showToast(error.message || 'No se pudo enviar la sugerencia.', true);
+        } finally {
+            if (songSuggestionInput) songSuggestionInput.disabled = false;
+        }
+    });
+
+    if (getStoredUser()?._id) void loadSongSuggestions(false);
 
     if (allSongsSearch) {
         allSongsSearch.addEventListener('input', renderAllSongs);
@@ -5530,7 +5847,7 @@ export function initMusicPlayer() {
         }
     }
 
-    function openEditSongPanel(index = null) {
+    function openEditSongPanel(index = null, suggestion = null) {
         if (!canCurrentUser('edit_songs')) {
             showToast('No tienes permiso para editar canciones.', true);
             return;
@@ -5538,6 +5855,7 @@ export function initMusicPlayer() {
         lyricsCancelPromptIndex = 0;
         btnCancelEditedSong.textContent = cancelEditedSongLabel;
         stopEditPreviewAudio();
+        editingSuggestionId = suggestion?._id ? String(suggestion._id) : null;
         editingTrackIndex = index;
         editingTrackId = index !== null && playlist[index]?._id ? String(playlist[index]._id) : null;
         resetSongDeleteConfirmation();
@@ -5556,6 +5874,7 @@ export function initMusicPlayer() {
             editInputArtist.value = track.artist || '';
             editInputColor.value = track.color || "#ffffff";
             editInputLyrics.value = formatTrackLyricsForEditor(track);
+            if (editInputLyricsReady) editInputLyricsReady.checked = track.lyricsReady === true;
             if (editSongMetadata) editSongMetadata.hidden = false;
             if (editSongAddedBy) editSongAddedBy.textContent = `Añadida por: ${track.addedBy?.username || 'Desconocido'}`;
             if (editSongEditedBy) editSongEditedBy.textContent = `Editada por: ${track.editedBy?.username || '—'}`;
@@ -5566,10 +5885,11 @@ export function initMusicPlayer() {
             editingTrackIndex = null;
             editSongDisplayCover.removeAttribute('src');
             editSongDisplayCover.style.display = 'none';
-            editInputName.value = '';
-            editInputArtist.value = '';
+            editInputName.value = suggestion?.name || '';
+            editInputArtist.value = suggestion?.artist || '';
             editInputColor.value = "#ffffff";
             editInputLyrics.value = '';
+            if (editInputLyricsReady) editInputLyricsReady.checked = false;
             if (editSongMetadata) editSongMetadata.hidden = true;
             btnSaveEditedSong.textContent = "Añadir Canción";
             if (btnDeleteSong) btnDeleteSong.style.display = 'none';
@@ -5733,6 +6053,7 @@ export function initMusicPlayer() {
         formData.append('name', editInputName.value.trim() || 'Canción Sin Título');
         formData.append('artist', editInputArtist.value.trim() || 'Artista Desconocido');
         formData.append('color', editInputColor.value);
+        formData.append('lyricsReady', String(editInputLyricsReady?.checked === true));
         let lyricsForSave = editInputLyrics.value;
         if (lyricsForSave !== originalEditLyrics) {
             try {
@@ -5823,6 +6144,27 @@ export function initMusicPlayer() {
             }
             if (!socket.connected) await fetchMusicData();
 
+            if (editingSuggestionId) {
+                const completedSuggestionId = editingSuggestionId;
+                try {
+                    const completionResponse = await apiFetch(
+                        `${API_URL}/song-suggestions/${encodeURIComponent(completedSuggestionId)}/complete`,
+                        { method: 'POST' }
+                    );
+                    const completionResult = await completionResponse.json().catch(() => null);
+                    if (!completionResponse.ok) {
+                        throw new Error(completionResult?.error || 'No se pudo cerrar la sugerencia.');
+                    }
+                    songSuggestions = songSuggestions.filter(
+                        suggestion => String(suggestion._id) !== completedSuggestionId
+                    );
+                    renderAllSongs();
+                } catch (error) {
+                    console.error('La canción se guardó, pero la sugerencia no se pudo cerrar.', error);
+                    showToast('La canción se guardó, pero no se pudo cerrar la sugerencia.', true);
+                }
+            }
+
             if (ytLinkVal) {
                 stopYtDownloadProgress({ success: true, message: 'MP3 convertido, subido a Drive y guardado en MongoDB' });
             }
@@ -5830,6 +6172,7 @@ export function initMusicPlayer() {
             isEditSongMode = false;
             editingTrackIndex = null;
             editingTrackId = null;
+            editingSuggestionId = null;
             isAllSongsMode = true;
             updateBackgroundAndViews();
             
@@ -5922,6 +6265,7 @@ export function initMusicPlayer() {
         isEditSongMode = false;
         editingTrackIndex = null;
         editingTrackId = null;
+        editingSuggestionId = null;
         isAllSongsMode = true;
         updateBackgroundAndViews();
     });
@@ -5933,6 +6277,7 @@ export function initMusicPlayer() {
             isPlaylistViewMode,
             isEditSongMode,
             isSettingsMode,
+            isProfileMode,
             activePlaylistId
         };
         editingPlaylistId = id;
@@ -5982,6 +6327,7 @@ export function initMusicPlayer() {
         isPlaylistViewMode = false;
         isSettingsMode = false;
         isAdminMode = false;
+        isProfileMode = false;
         updateBackgroundAndViews();
     }
 
@@ -6108,6 +6454,7 @@ export function initMusicPlayer() {
         isEditSongMode = previousView.isEditSongMode;
         isSettingsMode = previousView.isSettingsMode;
         isAdminMode = false;
+        isProfileMode = previousView.isProfileMode;
 
         if (isPlaylistViewMode && activePlaylistId) {
             openPlaylistView(activePlaylistId);
@@ -6575,7 +6922,10 @@ export function initMusicPlayer() {
 
         const container = document.createElement('div');
         container.className = 'lyrics-container';
-        container.style.setProperty('--lyrics-color', track?.color || '#151515');
+        const lyricsBackgroundColor = track?.color || '#151515';
+        container.style.setProperty('--lyrics-color', lyricsBackgroundColor);
+        const lyricsTextColor = getContrastingTextColor(lyricsBackgroundColor);
+        container.style.setProperty('--lyrics-text-color', lyricsTextColor);
         const list = document.createElement('ol');
         list.className = 'timed-lyrics-list full-lyrics-list';
         list.addEventListener('click', event => {
@@ -6919,6 +7269,8 @@ export function initMusicPlayer() {
         if (index >= playlist.length) index = 0;
         if (index < 0) index = playlist.length - 1;
 
+        listeningTogetherMetadataWaitToken += 1;
+        listeningTogetherMetadataWaitTrackId = null;
         playbackActivityUserId = null;
         currentTrackIndex = index;
         currentTrackSource = source;
@@ -7116,6 +7468,7 @@ export function initMusicPlayer() {
     btnNext.addEventListener('click', playNextTrack);
     audio.addEventListener('ended', () => {
         updateDiscordPresence();
+        if (currentTrackSource === 'together' && listeningTogetherUserId) return;
         playNextTrack();
     });
     btnPrev.addEventListener('click', () => {

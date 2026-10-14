@@ -162,6 +162,7 @@ const userSchema = new mongoose.Schema({
     seekSeconds: { type: Number, default: 5 },
     maxVolume: { type: Number, default: 200 },
     secretPhrases: { type: [String], default: [] },
+    secretPhrasesPersonal: { type: Boolean, default: false },
     discordImageText: { type: String, default: 'amgc' }
   },
   stats: {
@@ -180,6 +181,12 @@ const userSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 const User = mongoose.model('User', userSchema);
+
+const globalSettingsSchema = new mongoose.Schema({
+  _id: { type: String, required: true },
+  secretPhrases: { type: [String], default: [] }
+});
+const GlobalSettings = mongoose.model('GlobalSettings', globalSettingsSchema);
 
 const offlineListeningBatchSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
@@ -239,6 +246,7 @@ const songSchema = new mongoose.Schema({
   path: String,
   color: String,
   lyrics: String,
+  lyricsReady: { type: Boolean, default: false },
   duration: { type: Number, default: 0 },
   addedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   editedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
@@ -246,6 +254,27 @@ const songSchema = new mongoose.Schema({
   editedAt: Date
 });
 const Song = mongoose.model('Song', songSchema);
+
+const songSuggestionSchema = new mongoose.Schema({
+  name: { type: String, required: true, trim: true, maxlength: 200 },
+  artist: { type: String, required: true, trim: true, maxlength: 200 },
+  suggestedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  suggestedByName: { type: String, required: true }
+}, { timestamps: true });
+const SongSuggestion = mongoose.model('SongSuggestion', songSuggestionSchema);
+
+function normalizeSongMetadata(value) {
+  return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLocaleLowerCase('es');
+}
+
+function isSongSuggestionPlaceholder(name, artist) {
+  return normalizeSongMetadata(name) === 'cancion'
+    && normalizeSongMetadata(artist) === 'artista';
+}
+
+function songMetadataCollation() {
+  return { locale: 'es', strength: 1 };
+}
 
 const playlistSchema = new mongoose.Schema({
   id: String,
@@ -1206,7 +1235,9 @@ app.post('/api/users/status', async (req, res) => {
         ...lastPlayed,
         updatedAt: new Date()
       };
-      if (isNewSong || !previousUser?.lastPlayedHistory?.length) {
+      const latestHistorySongId = previousUser?.lastPlayedHistory?.at(-1)?.songId;
+      const shouldRecordHistory = String(latestHistorySongId || '') !== String(lastPlayed.songId || '');
+      if (shouldRecordHistory || !previousUser?.lastPlayedHistory?.length) {
         updateData.$push = {
           lastPlayedHistory: {
             $each: [{
@@ -1318,6 +1349,9 @@ app.post('/api/users/settings', async (req, res) => {
     )) {
       return res.status(400).json({ error: 'secretPhrases debe ser una lista de frases de texto.' });
     }
+    if (settings.secretPhrasesPersonal !== undefined && typeof settings.secretPhrasesPersonal !== 'boolean') {
+      return res.status(400).json({ error: 'secretPhrasesPersonal debe ser verdadero o falso.' });
+    }
     if (settings.discordImageText !== undefined && (
       typeof settings.discordImageText !== 'string'
       || settings.discordImageText.length > 128
@@ -1339,6 +1373,9 @@ app.post('/api/users/settings', async (req, res) => {
       ...(settings.secretPhrases !== undefined
         ? { secretPhrases: settings.secretPhrases.map(phrase => phrase.trim()).filter(Boolean) }
         : {}),
+      ...(settings.secretPhrasesPersonal !== undefined
+        ? { secretPhrasesPersonal: settings.secretPhrasesPersonal }
+        : {}),
       ...(settings.discordImageText !== undefined
         ? { discordImageText: settings.discordImageText.trim() }
         : {})
@@ -1348,6 +1385,76 @@ app.post('/api/users/settings', async (req, res) => {
     res.json(user.settings);
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/secret-phrases', async (req, res) => {
+  try {
+    const [user, globalSettings] = await Promise.all([
+      User.findById(req.user._id).select('settings.secretPhrases settings.secretPhrasesPersonal').lean(),
+      GlobalSettings.findById('secret-phrases').select('secretPhrases').lean()
+    ]);
+    if (!user) return res.status(404).json({ error: 'Usuario no encontrado.' });
+    const personal = user.settings?.secretPhrasesPersonal === true;
+    res.json({
+      personal,
+      phrases: personal ? (user.settings?.secretPhrases || []) : (globalSettings?.secretPhrases || []),
+      globalPhrases: globalSettings?.secretPhrases || [],
+      personalPhrases: user.settings?.secretPhrases || []
+    });
+  } catch (error) {
+    console.error('No se pudieron cargar las frases secretas.', error);
+    res.status(500).json({ error: 'No se pudieron cargar las frases secretas.' });
+  }
+});
+
+app.post('/api/secret-phrases', async (req, res) => {
+  try {
+    const { phrases, personal } = req.body || {};
+    if (typeof personal !== 'boolean'
+      || !Array.isArray(phrases)
+      || !phrases.every(phrase => typeof phrase === 'string')) {
+      return res.status(400).json({ error: 'Se requiere una lista de frases y el modo personal.' });
+    }
+    const normalizedPhrases = phrases.map(phrase => phrase.trim()).filter(Boolean);
+    let user;
+    let globalPhrases;
+    if (personal) {
+      user = await User.findByIdAndUpdate(
+        req.user._id,
+        { $set: { 'settings.secretPhrases': normalizedPhrases, 'settings.secretPhrasesPersonal': true } },
+        { returnDocument: 'after', runValidators: true }
+      ).select('settings');
+      globalPhrases = (await GlobalSettings.findById('secret-phrases').select('secretPhrases').lean())
+        ?.secretPhrases || [];
+    } else {
+      const [updatedGlobalSettings, updatedUser] = await Promise.all([
+        GlobalSettings.findByIdAndUpdate(
+          'secret-phrases',
+          { $set: { secretPhrases: normalizedPhrases } },
+          { upsert: true, returnDocument: 'after', runValidators: true, setDefaultsOnInsert: true }
+        ).select('secretPhrases'),
+        User.findByIdAndUpdate(
+          req.user._id,
+          { $set: { 'settings.secretPhrasesPersonal': false } },
+          { returnDocument: 'after', runValidators: true }
+        ).select('settings')
+      ]);
+      user = updatedUser;
+      globalPhrases = updatedGlobalSettings?.secretPhrases || [];
+      realtimeIo?.emit('secretPhrasesChanged');
+    }
+    if (!user) return res.status(404).json({ error: 'Usuario no encontrado.' });
+    emitUserChanged(user._id);
+    res.json({
+      personal,
+      phrases: personal ? normalizedPhrases : globalPhrases,
+      globalPhrases,
+      personalPhrases: user.settings?.secretPhrases || []
+    });
+  } catch (error) {
+    console.error('No se pudieron guardar las frases secretas.', error);
+    res.status(500).json({ error: 'No se pudieron guardar las frases secretas.' });
   }
 });
 
@@ -1591,9 +1698,117 @@ app.post('/api/discord/artwork-url', async (req, res) => {
   }
 });
 
+app.get('/api/song-suggestions', async (_req, res) => {
+  try {
+    const suggestions = await SongSuggestion.find()
+      .sort({ createdAt: -1 })
+      .select('name artist suggestedByName createdAt')
+      .lean();
+    res.json(suggestions);
+  } catch (error) {
+    console.error('No se pudieron cargar las sugerencias de canciones.', error);
+    res.status(500).json({ error: 'No se pudieron cargar las sugerencias de canciones.' });
+  }
+});
+
+app.post('/api/song-suggestions', async (req, res) => {
+  try {
+    const { name, artist } = req.body || {};
+    if (typeof name !== 'string' || typeof artist !== 'string'
+      || !name.trim() || !artist.trim()
+      || name.trim().length > 200 || artist.trim().length > 200) {
+      return res.status(400).json({ error: 'Indica una canción y un artista válidos (máximo 200 caracteres cada uno).' });
+    }
+    if (isSongSuggestionPlaceholder(name, artist)) {
+      return res.status(400).json({ error: 'Reemplaza “Cancion” y “Artista” por el nombre real de la canción y su artista.' });
+    }
+    const normalizedName = name.trim();
+    const normalizedArtist = artist.trim();
+    const [existingSong, existingSuggestion] = await Promise.all([
+      Song.findOne({ name: normalizedName, artist: normalizedArtist })
+        .collation(songMetadataCollation())
+        .select('_id')
+        .lean(),
+      SongSuggestion.findOne({ name: normalizedName, artist: normalizedArtist })
+        .collation(songMetadataCollation())
+        .select('_id')
+        .lean()
+    ]);
+    if (existingSong || existingSuggestion) {
+      return res.status(409).json({ error: 'Ya existe una sugerencia o canción con este mismo nombre y artista.' });
+    }
+    const suggestion = await SongSuggestion.create({
+      name: normalizedName,
+      artist: normalizedArtist,
+      suggestedBy: req.user._id,
+      suggestedByName: req.user.username
+    });
+    realtimeIo?.emit('songSuggestionsChanged');
+    res.status(201).json(suggestion);
+  } catch (error) {
+    console.error('No se pudo guardar la sugerencia de canción.', error);
+    res.status(500).json({ error: 'No se pudo guardar la sugerencia de canción.' });
+  }
+});
+
+app.delete('/api/song-suggestions/:id', async (req, res) => {
+  try {
+    if (!await authorizePermission(res, req.user, 'delete_songs')) return;
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ error: 'La sugerencia no es válida.' });
+    }
+    const suggestion = await SongSuggestion.findByIdAndDelete(req.params.id);
+    if (!suggestion) return res.status(404).json({ error: 'La sugerencia ya no existe.' });
+    realtimeIo?.emit('songSuggestionsChanged');
+    res.json({ success: true });
+  } catch (error) {
+    console.error('No se pudo eliminar la sugerencia de canción.', error);
+    res.status(500).json({ error: 'No se pudo eliminar la sugerencia de canción.' });
+  }
+});
+
+app.post('/api/song-suggestions/:id/complete', async (req, res) => {
+  try {
+    if (!await authorizePermission(res, req.user, 'edit_songs')) return;
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ error: 'La sugerencia no es válida.' });
+    }
+    const suggestion = await SongSuggestion.findByIdAndDelete(req.params.id);
+    if (!suggestion) return res.status(404).json({ error: 'La sugerencia ya no existe.' });
+    realtimeIo?.emit('songSuggestionsChanged');
+    res.json({ success: true });
+  } catch (error) {
+    console.error('No se pudo cerrar la sugerencia de canción.', error);
+    res.status(500).json({ error: 'No se pudo cerrar la sugerencia de canción.' });
+  }
+});
+
 app.post('/api/songs', upload.fields([{ name: 'mp3' }, { name: 'cover' }]), async (req, res) => {
   try {
     if (!await authorizePermission(res, req.user, 'edit_songs')) return;
+    const songName = typeof req.body.name === 'string' ? req.body.name.trim() : '';
+    const songArtist = typeof req.body.artist === 'string' ? req.body.artist.trim() : '';
+    if (!songName || !songArtist) {
+      return res.status(400).json({ error: 'Indica el nombre de la canción y su artista.' });
+    }
+    if (isSongSuggestionPlaceholder(songName, songArtist)) {
+      return res.status(400).json({ error: 'Reemplaza “Cancion” y “Artista” por el nombre real de la canción y su artista.' });
+    }
+    const songId = req.body.id && req.body.id !== 'undefined' ? req.body.id : null;
+    if (songId && !isValidObjectId(songId)) {
+      return res.status(400).json({ error: 'La canción que intentas editar no es válida.' });
+    }
+    const duplicateSong = await Song.findOne({
+      name: songName,
+      artist: songArtist,
+      ...(songId ? { _id: { $ne: songId } } : {})
+    })
+      .collation(songMetadataCollation())
+      .select('_id')
+      .lean();
+    if (duplicateSong) {
+      return res.status(409).json({ error: 'Ya existe una canción con este mismo nombre y artista.' });
+    }
     let pathUrl = req.body.existingPath || '';
     let coverUrl = req.body.existingCover || '';
 
@@ -1620,10 +1835,11 @@ app.post('/api/songs', upload.fields([{ name: 'mp3' }, { name: 'cover' }]), asyn
     if (req.files['cover']) coverUrl = await uploadToDrive(req.files['cover'][0]);
 
     const songData = {
-      name: req.body.name,
-      artist: req.body.artist,
+      name: songName,
+      artist: songArtist,
       color: req.body.color || '#ffffff',
       lyrics: req.body.lyrics,
+      lyricsReady: req.body.lyricsReady === 'true',
       duration: Math.max(0, Number(req.body.duration) || 0),
       path: pathUrl,
       cover: coverUrl

@@ -18,7 +18,8 @@ const songSchema = new mongoose.Schema({
   cover: String,
   path: String,
   color: String,
-  lyrics: String
+  lyrics: String,
+  lyricsReady: { type: Boolean, default: false }
 });
 const Song = mongoose.model('Song', songSchema);
 async function getOAuthClient() {
@@ -136,7 +137,8 @@ async function iniciarMigracion() {
         cover: newCover,
         path: newPath,
         color: song.color,
-        lyrics: song.lyrics || ""
+        lyrics: song.lyrics || "",
+        lyricsReady: false
       });
     }
 

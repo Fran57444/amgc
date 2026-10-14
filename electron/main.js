@@ -23,8 +23,7 @@ let discordRpcClientId = '';
 let discordRpcReconnectTimer = null;
 let discordRpcReady = false;
 let pendingDiscordPresence = null;
-let discordPresencePublishPromise = null;
-let discordPresencePublishRequested = false;
+let discordPresenceRevision = 0;
 let isQuitting = false;
 let discordRpcLastError = null;
 let discordRpcLastActivityAt = null;
@@ -290,11 +289,13 @@ function scheduleDiscordRpcReconnect() {
     discordRpcReconnectTimer.unref();
 }
 
-async function publishDiscordPresenceSnapshot(presence) {
+async function publishDiscordPresenceSnapshot(presence, revision) {
     if (!discordRpcReady || !discordRpcClient) return false;
+    const client = discordRpcClient;
     try {
         if (!presence) {
-            await discordRpcClient.clearActivity();
+            await client.clearActivity();
+            if (revision !== discordPresenceRevision || client !== discordRpcClient) return false;
             discordRpcLastActivityAt = null;
             logDiscordRpc('Presencia borrada.');
             return true;
@@ -302,7 +303,8 @@ async function publishDiscordPresenceSnapshot(presence) {
 
         const { songName, artist, currentTime, duration, isPlaying, largeImageUrl, discordImageText } = presence;
         if (!isPlaying) {
-            await discordRpcClient.clearActivity();
+            await client.clearActivity();
+            if (revision !== discordPresenceRevision || client !== discordRpcClient) return false;
             discordRpcLastActivityAt = null;
             logDiscordRpc('Presencia borrada porque la reproduccion esta pausada.');
             return true;
@@ -331,15 +333,18 @@ async function publishDiscordPresenceSnapshot(presence) {
                 end: startTimestamp + duration * 1000
             };
         }
-        await discordRpcClient.request('SET_ACTIVITY', {
+        if (revision !== discordPresenceRevision || client !== discordRpcClient) return false;
+        await client.request('SET_ACTIVITY', {
             pid: process.pid,
             activity
         });
+        if (revision !== discordPresenceRevision || client !== discordRpcClient) return false;
         discordRpcLastError = null;
         discordRpcLastActivityAt = new Date().toISOString();
         logDiscordRpc('Presencia actualizada (reproduciendo).');
         return true;
     } catch (error) {
+        if (revision !== discordPresenceRevision || client !== discordRpcClient) return false;
         discordRpcLastError = error.message || String(error);
         logDiscordRpc(`Error al actualizar la presencia: ${discordRpcLastError}`);
         return false;
@@ -348,28 +353,7 @@ async function publishDiscordPresenceSnapshot(presence) {
 
 function publishDiscordPresence() {
     if (!discordRpcReady || !discordRpcClient) return Promise.resolve(false);
-    if (discordPresencePublishPromise) {
-        discordPresencePublishRequested = true;
-        return discordPresencePublishPromise;
-    }
-
-    discordPresencePublishPromise = (async () => {
-        let published = false;
-        let presence;
-        do {
-            discordPresencePublishRequested = false;
-            presence = pendingDiscordPresence;
-            published = await publishDiscordPresenceSnapshot(presence);
-        } while (
-            discordRpcReady
-            && discordRpcClient
-            && (discordPresencePublishRequested || pendingDiscordPresence !== presence)
-        );
-        return published && pendingDiscordPresence === presence;
-    })().finally(() => {
-        discordPresencePublishPromise = null;
-    });
-    return discordPresencePublishPromise;
+    return publishDiscordPresenceSnapshot(pendingDiscordPresence, discordPresenceRevision);
 }
 
 function connectDiscordRpc() {
@@ -531,6 +515,7 @@ ipcMain.handle('amgc:discord-presence', async (event, presence) => {
         largeImageUrl,
         discordImageText
     };
+    discordPresenceRevision += 1;
     const published = await publishDiscordPresence();
     if (!discordRpcReady) logDiscordRpc('La interfaz envió el estado, pero Discord aún no está conectado.');
     return {

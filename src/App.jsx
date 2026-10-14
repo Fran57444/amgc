@@ -137,6 +137,9 @@ function App() {
               <h2>lista completa de canciones</h2>
             </div>
             <input id="all-songs-search" className="all-songs-search" type="search" placeholder="Buscar canción o artista..." aria-label="Buscar canción o artista" />
+            <form id="song-suggestion-form" className="song-suggestion-form">
+              <input id="song-suggestion-input" className="all-songs-search" type="text" placeholder="SUGERENCIA: 'Canción' de 'Artista'..." aria-label="Sugerir canción con formato 'Canción de Artista'" autoComplete="off" />
+            </form>
             <button id="btn-play-all-songs" className="main-play-btn">
               <img src="/img/play.png" draggable="false" className="no-drag" alt="Reproducir todas" width="20" />
             </button>
@@ -177,8 +180,9 @@ function App() {
               <div id="profile-stats" className="profile-stats-grid">
                 <div><span>Rol</span><strong id="profile-stat-role">Usuario</strong></div>
                 <div><span>Horas escuchadas</span><strong id="profile-stat-hours">0 h 0 min</strong></div>
+                <div><span>Canciones escuchadas</span><strong id="profile-stat-played">0</strong></div>
                 <div><span>Canciones añadidas</span><strong id="profile-stat-added">0</strong></div>
-                <div><span>Canciones editadas</span><strong id="profile-stat-edited">0</strong></div>
+                <div><span>Ediciones totales</span><strong id="profile-stat-edited">0</strong></div>
                 <div><span>Amigos</span><strong id="profile-stat-friends">0</strong></div>
                 <div><span>Mensajes enviados</span><strong id="profile-stat-messages">0</strong></div>
                 <div><span>Cuenta creada</span><strong id="profile-stat-created-at">-</strong></div>
@@ -291,8 +295,12 @@ function App() {
 
             <div className="settings-section">
               <h3>Frases</h3>
-              <p>Escribe una frase por línea. Se mostrará una de estas frases aleatoriamente en la pantalla principal.</p>
+              <p>Escribe una frase por línea. Las frases son globales y compartidas por defecto; se mostrará una al azar en la pantalla principal.</p>
               <textarea id="secret-phrases-input" className="settings-input-dark secret-phrases-input" rows="5" spellCheck="false"></textarea>
+              <label className="secret-phrases-personal-toggle" htmlFor="secret-phrases-personal">
+                <input type="checkbox" id="secret-phrases-personal" />
+                <span>Hacer mis frases personales (solo visibles para mí)</span>
+              </label>
               <div className="lyrics-editor-actions">
                 <button id="btn-save-secret-phrases" className="main-play-btn lyrics-editor-btn" type="button">Guardar frases</button>
                 <span id="secret-phrases-status" className="lyrics-editor-status" aria-live="polite"></span>
@@ -457,6 +465,10 @@ function App() {
                 <button id="btn-insert-edit-lyric-time" className="main-play-btn lyrics-editor-btn secondary" type="button">Insertar tiempo actual</button>
               </div>
               <textarea id="edit-input-lyrics" className="lyrics-editor-input" rows="9" placeholder="00:00.000 | Primera línea&#10;00:04.250 | Segunda *línea*"></textarea>
+              <label className="lyrics-ready-option">
+                <input type="checkbox" id="edit-input-lyrics-ready" />
+                <span>La letra está lista</span>
+              </label>
               <span id="edit-lyrics-status" className="lyrics-editor-status" aria-live="polite"></span>
               <div className="lyrics-editor-preview-heading">Vista previa sincronizada · <span id="edit-lyrics-time">00:00.000</span> · pulsa una palabra para resaltarla</div>
               <ol id="edit-lyrics-preview" className="timed-lyrics-list editor-preview-list"></ol>
