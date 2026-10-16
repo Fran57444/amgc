@@ -1273,7 +1273,7 @@ export function initMusicPlayer() {
             line.classList.toggle('next', index === activeIndex + 1);
             setLyricAssignedColorsAppearance(
                 line,
-                index === activeIndex,
+                list === editLyricsPreview || index === activeIndex,
                 getContrastingTextColor(track?.color || '#151515')
             );
         });
