@@ -16,6 +16,13 @@ const isDevelopment = process.argv.includes('--dev');
 const appUrl = isDevelopment ? developmentUrl : productionUrl;
 const trustedOrigins = new Set([new URL(productionUrl).origin, new URL(developmentUrl).origin]);
 const desktopDownloadKey = randomBytes(32).toString('hex');
+const electronProfile = process.env.AMGC_ELECTRON_PROFILE;
+if (electronProfile) {
+    if (!/^[a-zA-Z0-9_-]{1,32}$/.test(electronProfile)) {
+        throw new Error('AMGC_ELECTRON_PROFILE solo puede contener letras, números, guiones y guiones bajos.');
+    }
+    app.setPath('userData', path.join(app.getPath('appData'), 'AMGC-Test', electronProfile));
+}
 let downloaderProcess = null;
 let downloaderReadyPromise = null;
 let discordRpcClient = null;
@@ -112,7 +119,6 @@ function initializeDesktopUpdates() {
 
 function logDiscordRpc(message) {
     const line = `${new Date().toISOString()} ${message}\n`;
-    console.info(line.trimEnd());
     appendFile(path.join(app.getPath('userData'), 'discord-rpc.log'), line, error => {
         if (error) console.error('[Discord RPC] No se pudo escribir el registro local.', error);
     });

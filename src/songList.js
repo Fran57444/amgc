@@ -4,6 +4,7 @@ export function createSongListRenderer({
     getSongs,
     getSongCover,
     createImageMarkup,
+    escapeHtml,
     createSongContextMenuHtml,
     setupSongMenuListeners,
     setupQueueAddSwipe,
@@ -44,10 +45,10 @@ export function createSongListRenderer({
                     ${createImageMarkup(getSongCover(track), 'item-cover')}
                     <div class="all-songs-item-info">
                         <span class="all-songs-item-title">
-                            <span class="all-songs-item-name">${track.name}</span>
+                            <span class="all-songs-item-name">${escapeHtml(track.name)}</span>
                             ${track.lyricsReady ? '<img class="all-songs-lyrics-icon" src="/img/lyrics.png" alt="Letra lista" title="Letra lista" />' : ''}
                         </span>
-                        <span class="all-songs-item-artist">${track.artist}</span>
+                        <span class="all-songs-item-artist">${escapeHtml(track.artist)}</span>
                     </div>
                     ${createSongContextMenuHtml(index, true)}
                 `;

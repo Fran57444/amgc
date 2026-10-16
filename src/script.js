@@ -70,12 +70,14 @@ export function initMusicPlayer() {
     const profilePlaylistCache = new Map();
     const playlistSaversCache = new Map();
     socket.off('friendsChanged').on('friendsChanged', async () => {
+        socket.emit('friendsChanged');
         await loadFriends();
         if (isPlaylistViewMode && activePlaylistId) openPlaylistView(activePlaylistId);
     });
     socket.off('songCatalogChanged').on('songCatalogChanged', async () => {
         const queueTrackIds = activeQueueTracks.map(track => String(track._id));
         await fetchMusicData();
+        if (isPlaylistViewMode && activePlaylistId) openPlaylistView(activePlaylistId);
         if (generalQueueAnchorTrackId) {
             const anchorTrack = playlist.find(track => String(track._id) === generalQueueAnchorTrackId);
             if (!anchorTrack) generalQueueAnchorTrackId = null;
@@ -96,6 +98,24 @@ export function initMusicPlayer() {
         if (isProfileMode && profileUser?._id && String(profileUser._id) === String(userId)) {
             renderProfile(true);
         }
+    });
+    socket.off('userHistoryChanged').on('userHistoryChanged', ({ userId, lastPlayedHistory } = {}) => {
+        if (!userId || !Array.isArray(lastPlayedHistory)) return;
+        const normalizedUserId = String(userId);
+        const friend = currentFriends.find(item => String(item._id) === normalizedUserId);
+        if (friend) friend.lastPlayedHistory = lastPlayedHistory;
+        if (String(getStoredUser()?._id || '') === normalizedUserId) {
+            const currentUser = getStoredUser();
+            if (currentUser) setStoredUser({ ...currentUser, lastPlayedHistory });
+        }
+        const displayedProfile = selectedProfileUser || getStoredUser();
+        if (String(displayedProfile?._id || '') === normalizedUserId) {
+            if (selectedProfileUser) {
+                selectedProfileUser = { ...selectedProfileUser, lastPlayedHistory };
+            }
+            if (isProfileMode) renderProfile();
+        }
+        if (friend) scheduleFriendsOfflineSave();
     });
     socket.off('userChanged').on('userChanged', async ({ userId } = {}) => {
         if (String(getStoredUser()?._id || '') !== String(userId || '') || !accessToken || offlineOnly) return;
@@ -238,8 +258,21 @@ export function initMusicPlayer() {
                 console.warn('No se pudo reconciliar el estado tras reconectar.', error);
             }
         }
+        if (listeningTogetherUserId) joinListenTogetherQueue(listeningTogetherUserId, true);
+        broadcastPlaybackState(true);
         if (activeChatFriendId) loadChatMessages(false);
         refreshChatNotifications();
+    });
+    socket.off('disconnect').on('disconnect', () => {
+        leaveListenTogetherQueue();
+        if (!listeningTogetherUserId) return;
+        listeningTogetherAwaitingFreshPlayback = true;
+        friendRealtimeUpdates.delete(String(listeningTogetherUserId));
+        if (currentTrackSource === 'together') {
+            resetSynchronizedPlaybackRate();
+            if (!audio.paused) audio.pause();
+        }
+        updateListeningTogetherStatus();
     });
     const refreshFriendsAfterForeground = () => {
         if (!accessToken || offlineOnly || !navigator.onLine) return;
@@ -471,9 +504,9 @@ export function initMusicPlayer() {
             annoyed: annoyedFriendIds.has(String(friend._id))
         }));
         chatFriendsList.innerHTML = states.map(({ friend, unread, annoyed }) => `
-            <li class="chat-friend-item" data-chat-friend-id="${friend._id}">
-                <img src="${friend.profilePhoto || '/img/perrocorasongif.gif'}" alt="" />
-                <span class="chat-friend-name">${friend.username}</span>
+            <li class="chat-friend-item" data-chat-friend-id="${escapeHtml(friend._id)}">
+                <img src="${escapeHtml(friend.profilePhoto || '/img/perrocorasongif.gif')}" alt="" />
+                <span class="chat-friend-name">${escapeHtml(friend.username)}</span>
                 <i class="chat-friend-status-dot ${friend.isOnline ? 'online' : ''}" aria-label="${friend.isOnline ? 'En línea' : 'Desconectado'}"></i>
                 ${annoyed ? '<span class="chat-annoy-indicator" aria-label="Te ha molestado">!</span>' : ''}
                 ${unread ? '<i class="chat-unread-dot" aria-label="Mensajes nuevos"></i>' : ''}
@@ -731,6 +764,13 @@ export function initMusicPlayer() {
     const editInputLyricsReady = document.getElementById("edit-input-lyrics-ready");
     const btnPlayEditedSong = document.getElementById("btn-play-edited-song");
     const btnInsertEditLyricTime = document.getElementById("btn-insert-edit-lyric-time");
+    const btnAddLyricColor = document.getElementById("btn-add-lyric-color");
+    const inputNewLyricColor = document.getElementById("input-new-lyric-color");
+    const lyricColorPicker = document.getElementById("lyric-color-picker");
+    const lyricColorSelectionValue = document.getElementById("lyric-color-selection-value");
+    const btnConfirmLyricColor = document.getElementById("btn-confirm-lyric-color");
+    const btnCancelLyricColor = document.getElementById("btn-cancel-lyric-color");
+    const lyricColorPalette = document.getElementById("lyric-color-palette");
     const editLyricsStatus = document.getElementById("edit-lyrics-status");
     const editLyricsTime = document.getElementById("edit-lyrics-time");
     const editLyricsPreview = document.getElementById("edit-lyrics-preview");
@@ -777,11 +817,20 @@ export function initMusicPlayer() {
     const authError = document.getElementById("auth-error");
     let currentFriends = [];
     let friendsOwnerId = null;
+    let friendsRequestSequence = 0;
     const annoyedFriendIds = new Set();
-    const friendPresenceUpdatedAt = new Map();
     const friendRealtimeUpdates = new Map();
     let selectedProfileUser = null;
     let listeningTogetherUserId = null;
+    let sharedQueueSessionId = null;
+    let sharedQueueRole = null;
+    let sharedQueueSavedLocalQueue = null;
+    let sharedQueueJoinPending = false;
+    let sharedQueueSnapshotRevision = 0;
+    const pendingSharedQueueAdds = new Set();
+    let lastSharedQueueSnapshot = null;
+    let listeningTogetherAwaitingFreshPlayback = false;
+    let listeningTogetherNeedsUserGesture = false;
     let listeningTogetherMetadataWaitTrackId = null;
     let listeningTogetherMetadataWaitToken = 0;
     let sharedPlaybackTime = 0;
@@ -879,6 +928,90 @@ export function initMusicPlayer() {
         return Number(match[1]) * 60 + Number(match[2]) + (match[3] ? Number(`0.${match[3]}`) : 0);
     }
 
+    function getLyricColorLineKey(lineIndex, time) {
+        return `${lineIndex}:${Number(time).toFixed(3)}`;
+    }
+
+    function renderLyricColorPalette() {
+        if (!lyricColorPalette) return;
+        lyricColorPalette.replaceChildren();
+        const defaultColor = document.createElement('span');
+        defaultColor.className = 'lyric-color-swatch';
+        defaultColor.title = `Color predeterminado de la canción: ${editInputColor?.value || '#ffffff'}`;
+        const defaultSample = document.createElement('span');
+        defaultSample.className = 'lyric-color-sample';
+        defaultSample.style.backgroundColor = editInputColor?.value || '#ffffff';
+        const defaultLabel = document.createElement('span');
+        defaultLabel.textContent = 'Predeterminado';
+        defaultColor.append(defaultSample, defaultLabel);
+        lyricColorPalette.appendChild(defaultColor);
+        editingLyricColors.forEach((color, index) => {
+            const item = document.createElement('span');
+            item.className = 'lyric-color-swatch';
+            item.title = `Color ${index + 1}: ${color}`;
+            const sample = document.createElement('span');
+            sample.className = 'lyric-color-sample';
+            sample.style.backgroundColor = color;
+            const label = document.createElement('span');
+            label.textContent = `Color ${index + 1}`;
+            const removeButton = document.createElement('button');
+            removeButton.type = 'button';
+            removeButton.className = 'lyric-color-remove';
+            removeButton.textContent = '×';
+            removeButton.setAttribute('aria-label', `Eliminar Color ${index + 1}`);
+            removeButton.title = `Eliminar Color ${index + 1}`;
+            removeButton.addEventListener('click', () => {
+                const removedColor = editingLyricColors[index];
+                editingLyricColors.splice(index, 1);
+                Object.entries(editingLyricColorAssignments).forEach(([lineKey, assignments]) => {
+                    const retainedAssignments = Object.fromEntries(
+                        Object.entries(assignments).filter(([, assignedColor]) => (
+                            typeof assignedColor !== 'string'
+                            || assignedColor.toLowerCase() !== removedColor.toLowerCase()
+                        ))
+                    );
+                    if (Object.keys(retainedAssignments).length) {
+                        editingLyricColorAssignments[lineKey] = retainedAssignments;
+                    } else {
+                        delete editingLyricColorAssignments[lineKey];
+                    }
+                });
+                renderLyricColorPalette();
+                updateEditLyricsPreview(false);
+            });
+            item.append(sample, label, removeButton);
+            lyricColorPalette.appendChild(item);
+        });
+    }
+
+    function updateLyricColorSelectionPreview() {
+        if (!inputNewLyricColor || !lyricColorSelectionValue) return;
+        selectedLyricColor = inputNewLyricColor.value.toLowerCase();
+        lyricColorSelectionValue.textContent = selectedLyricColor;
+        lyricColorSelectionValue.style.color = selectedLyricColor;
+    }
+
+    function cycleEditedLyricWordColor(lineKey, wordIndex) {
+        if (!canCurrentUser('edit_songs') || editingLyricColors.length === 0) return;
+        const lineAssignments = editingLyricColorAssignments[lineKey] || {};
+        const currentColor = lineAssignments[String(wordIndex)];
+        const currentColorIndex = editingLyricColors.findIndex(
+            color => color.toLowerCase() === String(currentColor || '').toLowerCase()
+        );
+        const nextColor = currentColor === 'default' || currentColorIndex < 0
+            ? editingLyricColors[0]
+            : editingLyricColors[currentColorIndex + 1] || 'default';
+        editingLyricColorAssignments[lineKey] = {
+            ...lineAssignments,
+            [wordIndex]: nextColor
+        };
+        setEditorStatus(
+            editLyricsStatus,
+            `${nextColor === 'default' ? 'Color predeterminado de la canción' : `Color ${editingLyricColors.indexOf(nextColor) + 1}`} aplicado. Guarda los cambios para compartirlos.`
+        );
+        updateEditLyricsPreview(false);
+    }
+
     function getTrackLyrics(track) {
         if (!track) return [];
         const savedLyrics = timedLyricsByTrack[getTrackStorageId(track)];
@@ -887,7 +1020,8 @@ export function initMusicPlayer() {
         if (Array.isArray(track.lyrics)) {
             return track.lyrics.filter(line =>
                 line && Number.isFinite(Number(line.time)) && Number(line.time) >= 0 && typeof line.text === 'string'
-            ).map(line => ({ time: Number(line.time), text: line.text }));
+            ).map(line => ({ time: Number(line.time), text: line.text }))
+                .sort((left, right) => left.time - right.time);
         }
 
         if (typeof track.lyrics !== 'string' || !track.lyrics.trim()) return [];
@@ -899,7 +1033,9 @@ export function initMusicPlayer() {
             const time = parseLyricTimestamp(match[1]);
             return time === null ? null : { time, text: match[2] };
         });
-        if (timedLines.length && timedLines.every(Boolean)) return timedLines;
+        if (timedLines.length && timedLines.every(Boolean)) {
+            return timedLines.sort((left, right) => left.time - right.time);
+        }
         return lines.map(text => ({ time: 0, text }));
     }
 
@@ -951,10 +1087,20 @@ export function initMusicPlayer() {
         seek();
     }
 
-    function appendLyricText(target, text, color, interactiveWords = false, flatHighlight = false) {
+    function appendLyricText(
+        target,
+        text,
+        color,
+        interactiveWords = false,
+        flatHighlight = false,
+        track = null,
+        lineKey = '',
+        useDraftColors = false,
+        ignoreAssignedColors = false
+    ) {
         let wordIndex = 0;
-        const appendWords = (container, segment) => {
-            if (!interactiveWords) {
+        const appendWords = (container, segment, isMarkedSegment = false) => {
+            if (!interactiveWords && !track && !useDraftColors) {
                 container.appendChild(document.createTextNode(segment));
                 return;
             }
@@ -967,6 +1113,18 @@ export function initMusicPlayer() {
                 wordElement.textContent = word[0];
                 wordElement.className = 'lyric-word';
                 wordElement.dataset.lyricWordIndex = String(wordIndex);
+                const assignedColor = !ignoreAssignedColors && isMarkedSegment && (useDraftColors
+                    ? editingLyricColorAssignments[lineKey]?.[String(wordIndex)]
+                    : track?.lyricColorAssignments?.[lineKey]?.[String(wordIndex)]);
+                if (assignedColor) {
+                    wordElement.dataset.lyricAssignedColor = assignedColor;
+                }
+                wordElement.style.color = assignedColor === 'default'
+                    ? (useDraftColors ? editInputColor?.value : track?.color) || ''
+                    : assignedColor || '';
+                if (isMarkedSegment && assignedColor && assignedColor !== 'default') {
+                    wordElement.style.textShadow = `0 0 8px ${assignedColor}`;
+                }
                 container.appendChild(wordElement);
                 wordIndex += 1;
                 lastWordEnd = words.lastIndex;
@@ -984,7 +1142,7 @@ export function initMusicPlayer() {
                 highlighted.style.fontWeight = '700';
                 highlighted.style.color = color;
                 if (!flatHighlight) highlighted.style.textShadow = `0 0 8px ${color}`;
-                appendWords(highlighted, match[1]);
+                appendWords(highlighted, match[1], true);
                 target.appendChild(highlighted);
             }
             lastIndex = markedText.lastIndex;
@@ -1018,10 +1176,27 @@ export function initMusicPlayer() {
         setLyricHighlightAppearance(target, highlightColor, glow);
     }
 
+    function setLyricAssignedColorsAppearance(target, enabled, mutedColor = '#929292') {
+        target.querySelectorAll('[data-lyric-assigned-color]').forEach(word => {
+            const assignedColor = word.dataset.lyricAssignedColor;
+            const visibleColor = assignedColor === 'default'
+                ? word.closest('.lyric-highlight')?.style.color || mutedColor
+                : assignedColor;
+            word.style.color = enabled ? visibleColor : mutedColor;
+            word.style.textShadow = enabled && assignedColor !== 'default'
+                ? `0 0 8px ${assignedColor}`
+                : 'none';
+        });
+    }
+
     function renderSyncedLyrics(track, time, list, lyricsOverride, scrollActiveLyric = true) {
         if (!list) return;
         const lyrics = lyricsOverride || getTrackLyrics(track);
-        const renderKey = `${getTrackStorageId(track)}:${JSON.stringify(lyrics)}`;
+        const renderKey = `${getTrackStorageId(track)}:${JSON.stringify(lyrics)}:${JSON.stringify(
+            list === editLyricsPreview
+                ? { colors: editingLyricColors, assignments: editingLyricColorAssignments }
+                : track?.lyricColorAssignments || {}
+        )}`;
         if (list.dataset.renderKey !== renderKey) {
             const preservedScrollTop = list === editLyricsPreview && !scrollActiveLyric
                 ? list.scrollTop
@@ -1043,6 +1218,8 @@ export function initMusicPlayer() {
                     const line = document.createElement('li');
                     line.className = 'timed-lyric-line';
                     line.dataset.lyricIndex = String(index);
+                    const lineKey = getLyricColorLineKey(index, lineTime);
+                    line.dataset.lyricColorKey = lineKey;
                     if (Number.isInteger(lyrics[index].sourceLineIndex)) {
                         line.dataset.sourceLineIndex = String(lyrics[index].sourceLineIndex);
                     }
@@ -1062,6 +1239,10 @@ export function initMusicPlayer() {
                         isFullLyricsPanel
                             ? getContrastingTextColor(track?.color || '#151515')
                             : (track?.color || '#ff8a00'),
+                        list === editLyricsPreview,
+                        isFullLyricsPanel,
+                        track,
+                        lineKey,
                         list === editLyricsPreview,
                         isFullLyricsPanel
                     );
@@ -1090,6 +1271,11 @@ export function initMusicPlayer() {
             line.classList.toggle('active', index === activeIndex);
             line.classList.toggle('previous', index === activeIndex - 1);
             line.classList.toggle('next', index === activeIndex + 1);
+            setLyricAssignedColorsAppearance(
+                line,
+                index === activeIndex,
+                getContrastingTextColor(track?.color || '#151515')
+            );
         });
         if (list.dataset.activeIndex !== String(activeIndex)) {
             list.dataset.activeIndex = String(activeIndex);
@@ -1119,7 +1305,9 @@ export function initMusicPlayer() {
         nowPlayingLyricNext.replaceChildren(...nowPlayingLyricIncoming.childNodes);
         nowPlayingLyricIncoming.replaceChildren();
         setLyricTextAppearance(nowPlayingLyricText, '#fff', nowPlayingLyric.dataset.trackColor || '#ff8a00', true);
+        setLyricAssignedColorsAppearance(nowPlayingLyricText, true);
         setLyricTextAppearance(nowPlayingLyricNext, '#929292');
+        setLyricAssignedColorsAppearance(nowPlayingLyricNext, false, '#929292');
         nowPlayingLyric.classList.remove('is-advancing');
         nowPlayingLyric.classList.add('is-repositioning');
         void nowPlayingLyricTrack.offsetHeight;
@@ -1146,7 +1334,7 @@ export function initMusicPlayer() {
         const activeIndex = getActiveLyricIndex(lyrics, time);
         const activeLyric = activeIndex >= 0 ? lyrics[activeIndex] : null;
         nowPlayingLyric.hidden = !activeLyric || !activeLyric.text.trim();
-        const activeKey = `${getTrackStorageId(track)}:${activeIndex}:${activeLyric?.text || ''}`;
+        const activeKey = `${getTrackStorageId(track)}:${activeIndex}:${activeLyric?.text || ''}:${JSON.stringify(track?.lyricColorAssignments || {})}`;
         if (nowPlayingLyric.dataset.activeKey !== activeKey) {
             finishNowPlayingLyricTransition();
             const previousTrackId = nowPlayingLyric.dataset.trackId;
@@ -1164,9 +1352,19 @@ export function initMusicPlayer() {
             if (shouldAdvance) {
                 const nextLyric = lyrics[activeIndex + 1];
                 nowPlayingLyricIncoming.replaceChildren();
-                if (nextLyric) appendLyricText(nowPlayingLyricIncoming, nextLyric.text, '#929292', false, true);
+                if (nextLyric) appendLyricText(
+                    nowPlayingLyricIncoming,
+                    nextLyric.text,
+                    '#929292',
+                    false,
+                    true,
+                    track,
+                    getLyricColorLineKey(activeIndex + 1, nextLyric.time)
+                );
                 setLyricTextAppearance(nowPlayingLyricText, '#929292');
                 setLyricTextAppearance(nowPlayingLyricNext, '#fff', track?.color || '#ff8a00', true);
+                setLyricAssignedColorsAppearance(nowPlayingLyricNext, true);
+                setLyricAssignedColorsAppearance(nowPlayingLyricIncoming, false, '#929292');
                 nowPlayingLyricPendingIndex = activeIndex;
                 nowPlayingLyric.classList.add('is-advancing');
                 const transitionDuration = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 20 : 900;
@@ -1178,9 +1376,27 @@ export function initMusicPlayer() {
             nowPlayingLyricNext.replaceChildren();
             nowPlayingLyricIncoming.replaceChildren();
             const nextLyric = activeIndex >= 0 ? lyrics[activeIndex + 1] : null;
-            if (activeLyric) appendLyricText(nowPlayingLyricText, activeLyric.text, track?.color || '#ff8a00');
-            if (nextLyric) appendLyricText(nowPlayingLyricNext, nextLyric.text, '#929292', false, true);
+            if (activeLyric) appendLyricText(
+                nowPlayingLyricText,
+                activeLyric.text,
+                track?.color || '#ff8a00',
+                false,
+                false,
+                track,
+                getLyricColorLineKey(activeIndex, activeLyric.time)
+            );
+            if (nextLyric) appendLyricText(
+                nowPlayingLyricNext,
+                nextLyric.text,
+                '#929292',
+                false,
+                true,
+                track,
+                getLyricColorLineKey(activeIndex + 1, nextLyric.time)
+            );
+            setLyricAssignedColorsAppearance(nowPlayingLyricText, true);
             setLyricTextAppearance(nowPlayingLyricNext, '#929292');
+            setLyricAssignedColorsAppearance(nowPlayingLyricNext, false, '#929292');
             nowPlayingLyric.dataset.activeIndex = String(activeIndex);
         }
     }
@@ -1333,6 +1549,9 @@ export function initMusicPlayer() {
         '"': '&quot;',
         "'": '&#39;'
     })[character]);
+    const safeColor = (value, fallback = '#ff8a00') => (
+        typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value) ? value : fallback
+    );
 
     const syncSecretPhrasesFromUser = (user) => {
         const isPersonal = user?.settings?.secretPhrasesPersonal === true;
@@ -1931,9 +2150,8 @@ export function initMusicPlayer() {
                     : 'Sin actividad reciente';
             const statusLabel = isOfflineProfile ? 'Modo offline' : isOnline ? 'En línea' : 'Desconectado';
             const statusMeta = !isOfflineProfile && !isOnline && user?.lastActive ? ` · ${timeAgo(user.lastActive)}` : '';
-            const friendUpdatedAt = displayTrack?.updatedAt ? Date.parse(displayTrack.updatedAt) : NaN;
-            const friendElapsedOffset = !isOwnProfile && isListening && Number.isFinite(friendUpdatedAt)
-                ? Math.max(0, (Date.now() - friendUpdatedAt) / 1000)
+            const friendElapsedOffset = !isOwnProfile && isListening
+                ? getFriendPlaybackElapsed(user?._id)
                 : 0;
             const elapsed = isOwnProfile
                 ? (currentSourceMatchesTrack && Number.isFinite(audio.currentTime) ? audio.currentTime : 0)
@@ -1947,7 +2165,15 @@ export function initMusicPlayer() {
             const localTrackIndex = isFriendProfile && displayTrack?.songId
                 ? playlist.findIndex(item => String(item._id) === String(displayTrack.songId))
                 : currentTrackIndex;
-            const canJoin = Boolean(isFriendProfile && displayTrack && localTrackIndex >= 0);
+            const canJoin = Boolean(
+                isFriendProfile
+                && realtimeEnabled
+                && !offlineOnly
+                && navigator.onLine
+                && user?.isOnline
+                && displayTrack
+                && localTrackIndex >= 0
+            );
 
             if (profileStatus) {
                 profileStatus.innerHTML = `
@@ -1961,15 +2187,15 @@ export function initMusicPlayer() {
                     <button
                         type="button"
                         class="profile-activity-song ${canJoin ? '' : 'disabled'}"
-                        style="--profile-track-color: ${activityColor}"
+                        style="--profile-track-color: ${safeColor(activityColor)}"
                         ${canJoin ? `data-track-index="${localTrackIndex}"` : 'disabled'}
                         aria-label="Escuchar la misma canción"
                     >
-                        <img src="${currentCover}" alt="Portada de la canción" class="profile-activity-cover" draggable="false" />
+                        <img src="${escapeHtml(currentCover)}" alt="Portada de la canción" class="profile-activity-cover" draggable="false" />
                         <div class="profile-activity-details">
-                            <span class="profile-activity-label">${listeningLabel}</span>
-                            <strong>${displayTrack?.name || displayTrack?.songName || 'Sin actividad reciente'}</strong>
-                            <small>${displayTrack?.artist || 'Sin artista'}</small>
+                            <span class="profile-activity-label">${escapeHtml(listeningLabel)}</span>
+                            <strong>${escapeHtml(displayTrack?.name || displayTrack?.songName || 'Sin actividad reciente')}</strong>
+                            <small>${escapeHtml(displayTrack?.artist || 'Sin artista')}</small>
                             <div class="profile-activity-progress${displayTrack ? '' : ' is-hidden'}">
                                 <span style="width: ${progress}%"></span>
                             </div>
@@ -1985,12 +2211,29 @@ export function initMusicPlayer() {
                 : null;
             if (joinSongButton) {
                 joinSongButton.addEventListener('click', () => {
+                    if (!socket.connected) {
+                        showToast('Espera a que se restablezca la conexión en tiempo real para escuchar junto a tu amigo.', true);
+                        return;
+                    }
                     const trackIndex = Number(joinSongButton.dataset.trackIndex);
                     if (!Number.isInteger(trackIndex) || !playlist[trackIndex]) return;
-                    listeningTogetherUserId = isFriendProfile ? String(user._id) : null;
+                    const targetUserId = isFriendProfile ? String(user._id) : null;
+                    if (
+                        sharedQueueRole === 'host'
+                        || (sharedQueueRole === 'follower'
+                            && (!isFriendProfile || String(listeningTogetherUserId || '') !== targetUserId))
+                    ) {
+                        leaveListenTogetherQueue();
+                    }
+                    listeningTogetherUserId = targetUserId;
+                    listeningTogetherAwaitingFreshPlayback = isFriendProfile;
+                    listeningTogetherNeedsUserGesture = false;
                     updateListeningTogetherStatus();
-                    loadAndPlayTrack(trackIndex, isFriendProfile ? 'together' : 'regular');
-                    if (isFriendProfile) syncListeningTogether();
+                    loadAndPlayTrack(trackIndex, isFriendProfile ? 'together' : 'regular', !isFriendProfile);
+                    if (isFriendProfile) {
+                        joinListenTogetherQueue(listeningTogetherUserId);
+                        syncListeningTogether();
+                    }
                 });
             }
         }
@@ -2026,6 +2269,21 @@ export function initMusicPlayer() {
         return `hace ${Math.floor(diffH / 24)} d`;
     }
 
+    function getFriendPlaybackElapsed(friendId) {
+        const realtimeUpdate = friendRealtimeUpdates.get(String(friendId || ''));
+        const serverUpdatedAt = Date.parse(
+            realtimeUpdate?.lastPlayed?.updatedAt || realtimeUpdate?.updatedAt || ''
+        );
+        const serverAge = Date.now() - serverUpdatedAt;
+        if (Number.isFinite(serverUpdatedAt) && serverAge >= 0 && serverAge <= 10000) {
+            return serverAge / 1000;
+        }
+        const playbackReceivedAt = realtimeUpdate?.playbackReceivedAt;
+        return Number.isFinite(playbackReceivedAt)
+            ? Math.max(0, (performance.now() - playbackReceivedAt) / 1000)
+            : 0;
+    }
+
     function updateProfileActivityProgress() {
         if (!profileActivity || !isProfileMode) return;
         if (selectedProfileUser) {
@@ -2033,9 +2291,8 @@ export function initMusicPlayer() {
             const duration = Number(playback?.duration) || 0;
             if (!playback || !playback.songName || duration <= 0) return;
             const isPlaying = Boolean(selectedProfileUser.isOnline && playback.isPlaying !== false);
-            const updatedAt = Date.parse(playback.updatedAt);
-            const extraElapsed = isPlaying && Number.isFinite(updatedAt)
-                ? Math.max(0, (Date.now() - updatedAt) / 1000)
+            const extraElapsed = isPlaying
+                ? getFriendPlaybackElapsed(selectedProfileUser._id)
                 : 0;
             const elapsed = Math.min(duration, (Number(playback.currentTime) || 0) + extraElapsed);
             const progressFill = profileActivity.querySelector('.profile-activity-progress span');
@@ -2044,7 +2301,10 @@ export function initMusicPlayer() {
             if (timeLabel) timeLabel.textContent = `${formatTrackTime(elapsed)} / ${formatTrackTime(duration)}`;
             return;
         }
-        if (String(playbackActivityUserId || '') !== String(getStoredUser()?._id || '')) return;
+        if (
+            String(playbackActivityUserId || '') !== String(getStoredUser()?._id || '')
+            && !isFollowingPlayback()
+        ) return;
         const track = getCurrentTrack();
         if (!track) return;
         updateListeningTogetherStatus();
@@ -2155,7 +2415,10 @@ export function initMusicPlayer() {
             !user?._id
             || !track
             || !socket.connected
-            || String(playbackActivityUserId || '') !== String(user._id)
+            || (
+                String(playbackActivityUserId || '') !== String(user._id)
+                && !isFollowingPlayback()
+            )
         ) return;
         const now = Date.now();
         if (!force && now - lastPlaybackBroadcastAt < 1000) return;
@@ -2207,20 +2470,20 @@ export function initMusicPlayer() {
                 const lastPlayedAt = playback?.updatedAt || friend.lastActive;
                 const lastPlayedLabel = lastPlayedAt ? ` · ${timeAgo(lastPlayedAt)}` : '';
                 return `
-                    <li class="friend-sidebar-item" data-friend-id="${friend._id}" data-friend-name="${friend.username}">
-                        <img class="friend-sidebar-avatar" src="${friend.profilePhoto || '/img/perrocorasongif.gif'}" alt="" loading="lazy" />
+                    <li class="friend-sidebar-item" data-friend-id="${escapeHtml(friend._id)}" data-friend-name="${escapeHtml(friend.username)}">
+                        <img class="friend-sidebar-avatar" src="${escapeHtml(friend.profilePhoto || '/img/perrocorasongif.gif')}" alt="" loading="lazy" />
                         <div class="friend-sidebar-meta">
-                            <span class="friend-sidebar-name">${friend.username}</span>
+                            <span class="friend-sidebar-name">${escapeHtml(friend.username)}</span>
                             <span class="friend-sidebar-status">
                                 <span class="friend-status-dot ${friend.isOnline ? 'online' : ''}"></span>
-                                ${statusText}
+                                ${escapeHtml(statusText)}
                             </span>
                         </div>
                         ${hasActivity ? `
-                            <div class="friend-sidebar-song" style="--profile-track-color: ${playback.color || '#ff8a00'}">
-                                <small>${isPlaying ? 'Escuchando' : `Escuchó por última vez${lastPlayedLabel}`}</small>
-                                <strong>${playback.songName}</strong>
-                                <small>${playback.artist || ''}</small>
+                            <div class="friend-sidebar-song" style="--profile-track-color: ${safeColor(playback.color)}">
+                                <small>${escapeHtml(isPlaying ? 'Escuchando' : `Escuchó por última vez${lastPlayedLabel}`)}</small>
+                                <strong>${escapeHtml(playback.songName)}</strong>
+                                <small>${escapeHtml(playback.artist || '')}</small>
                                 <div class="friend-sidebar-progress${duration > 0 ? '' : ' is-hidden'}">
                                     <span data-friend-progress style="width: ${progress}%"></span>
                                 </div>
@@ -2240,8 +2503,8 @@ export function initMusicPlayer() {
         if (!friendsList) return;
         friendsList.innerHTML = currentFriends.length
             ? currentFriends.map(friend => `
-                <li class="friend-item" data-friend-id="${friend._id}" data-friend-name="${friend.username}">
-                    <button type="button" class="friend-name-button">${friend.username}</button>
+                <li class="friend-item" data-friend-id="${escapeHtml(friend._id)}" data-friend-name="${escapeHtml(friend.username)}">
+                    <button type="button" class="friend-name-button">${escapeHtml(friend.username)}</button>
                     <span class="friend-status-label">
                         <span class="friend-status-dot ${friend.isOnline ? 'online' : ''}"></span>
                         ${friendStatusLabel(friend)}
@@ -2294,10 +2557,10 @@ export function initMusicPlayer() {
         if (profileFriends) {
             profileFriends.innerHTML = friends.length
                 ? friends.map(friend => `
-                    <li data-friend-id="${friend._id}" data-friend-name="${friend.username}" class="profile-friend-mini-item">
-                        <img class="profile-friend-mini-avatar" src="${friend.profilePhoto || '/img/perrocorasongif.gif'}" alt="" loading="lazy" />
+                    <li data-friend-id="${escapeHtml(friend._id)}" data-friend-name="${escapeHtml(friend.username)}" class="profile-friend-mini-item">
+                        <img class="profile-friend-mini-avatar" src="${escapeHtml(friend.profilePhoto || '/img/perrocorasongif.gif')}" alt="" loading="lazy" />
                         <span class="friend-status-dot ${friend.isOnline ? 'online' : ''}"></span>
-                        <span>${friend.username}</span>
+                        <span>${escapeHtml(friend.username)}</span>
                     </li>
                 `).join('')
                 : '<li>Todavía no hay amigos.</li>';
@@ -2311,12 +2574,12 @@ export function initMusicPlayer() {
             return;
         }
         profileFriendsGrid.innerHTML = friends.map(friend => `
-            <div class="profile-friend-card" data-friend-id="${friend._id}" data-friend-name="${friend.username}">
+            <div class="profile-friend-card" data-friend-id="${escapeHtml(friend._id)}" data-friend-name="${escapeHtml(friend.username)}">
                 <div class="profile-friend-avatar">
-                    <img src="${friend.profilePhoto || '/img/perrocorasongif.gif'}" alt="" loading="lazy" />
+                    <img src="${escapeHtml(friend.profilePhoto || '/img/perrocorasongif.gif')}" alt="" loading="lazy" />
                     <span class="friend-status-dot ${friend.isOnline ? 'online' : ''}"></span>
                 </div>
-                <span class="profile-friend-name">${friend.username}</span>
+                <span class="profile-friend-name">${escapeHtml(friend.username)}</span>
                 <span class="profile-friend-status">${friendStatusLabel(friend)}</span>
                 <button type="button" class="profile-friend-chat-btn">Chatear</button>
             </div>
@@ -2334,29 +2597,21 @@ export function initMusicPlayer() {
         });
     }
 
-    function getNewestPlayback(incoming, current) {
-        if (!incoming) return current;
-        if (!current) return incoming;
-        const incomingTime = Date.parse(incoming.updatedAt);
-        const currentTime = Date.parse(current.updatedAt);
-        if (Number.isFinite(currentTime) && (!Number.isFinite(incomingTime) || currentTime > incomingTime)) {
-            return current;
-        }
-        return incoming;
-    }
-
     function rememberFriendRealtimeUpdate(userId, update = {}) {
         const normalizedId = String(userId || '');
         if (!normalizedId) return;
         const previous = friendRealtimeUpdates.get(normalizedId);
         friendRealtimeUpdates.set(normalizedId, {
-            receivedAt: Date.now(),
+            receivedAt: performance.now(),
             updatedAt: update.updatedAt || update.lastPlayed?.updatedAt || previous?.updatedAt || null,
+            playbackReceivedAt: update.lastPlayed
+                ? performance.now()
+                : previous?.playbackReceivedAt,
             ...(typeof update.isOnline === 'boolean'
                 ? { isOnline: update.isOnline }
                 : previous && { isOnline: previous.isOnline }),
             ...(update.lastPlayed
-                ? { lastPlayed: getNewestPlayback(update.lastPlayed, previous?.lastPlayed) }
+                ? { lastPlayed: update.lastPlayed }
                 : previous?.lastPlayed && { lastPlayed: previous.lastPlayed })
         });
     }
@@ -2364,7 +2619,7 @@ export function initMusicPlayer() {
     function scheduleFriendsOfflineSave() {
         const user = getStoredUser();
         if (!offlineModeEnabled || !user?._id) return;
-        if (friendCacheSaveTimer) clearTimeout(friendCacheSaveTimer);
+        if (friendCacheSaveTimer) return;
         friendCacheSaveTimer = setTimeout(() => {
             friendCacheSaveTimer = null;
             saveOfflineFriends(user._id, currentFriends).catch(error => {
@@ -2392,9 +2647,9 @@ export function initMusicPlayer() {
         const user = getStoredUser();
         if (!user) return;
         const requestedOwnerId = String(user._id);
+        const requestSequence = ++friendsRequestSequence;
         if (friendsOwnerId !== requestedOwnerId) {
             currentFriends = [];
-            friendPresenceUpdatedAt.clear();
             friendRealtimeUpdates.clear();
             friendsOwnerId = requestedOwnerId;
         }
@@ -2411,9 +2666,12 @@ export function initMusicPlayer() {
                 updateOfflineCacheStatus(`No se pudo leer la actividad guardada: ${error.message}`);
                 return;
             }
-            if (String(getStoredUser()?._id || '') !== requestedOwnerId) return;
-            friendPresenceUpdatedAt.clear();
+            if (
+                String(getStoredUser()?._id || '') !== requestedOwnerId
+                || requestSequence !== friendsRequestSequence
+            ) return;
             currentFriends = await hydrateOfflineFriends(cachedFriends?.friends || []);
+            if (requestSequence !== friendsRequestSequence) return;
             if (selectedProfileUser) {
                 const refreshedFriend = currentFriends.find(friend => String(friend._id) === String(selectedProfileUser._id));
                 if (refreshedFriend) {
@@ -2429,42 +2687,54 @@ export function initMusicPlayer() {
             if (isProfileMode) renderProfile();
             return;
         }
-        const requestStartedAt = Date.now();
+        const requestStartedAt = performance.now();
         try {
             const refreshedFriends = await fetchJsonWithRetry(`${API_URL}/users/friends/${user._id}`);
-            if (String(getStoredUser()?._id || '') !== requestedOwnerId) return;
+            if (
+                String(getStoredUser()?._id || '') !== requestedOwnerId
+                || requestSequence !== friendsRequestSequence
+            ) return;
             currentFriends = refreshedFriends.map(friend => {
                 const previousFriend = currentFriends.find(item => String(item._id) === String(friend._id));
                 const friendId = String(friend._id);
-                const hasRealtimePlayback = friendPresenceUpdatedAt.has(friendId);
-                const presenceChangedAfterRequest = (friendPresenceUpdatedAt.get(friendId) || 0) > requestStartedAt;
                 const realtimeUpdate = friendRealtimeUpdates.get(friendId);
-                const realtimePlaybackIsNewer = realtimeUpdate?.lastPlayed
-                    && Date.parse(realtimeUpdate.lastPlayed.updatedAt) > Date.parse(friend.lastPlayed?.updatedAt);
-                const realtimePresenceIsNewer = realtimeUpdate?.updatedAt
-                    && Date.parse(realtimeUpdate.updatedAt) > Date.parse(friend.lastActive);
-                const hasFreshRealtimeUpdate = (realtimeUpdate?.receivedAt || 0) > requestStartedAt
-                    || realtimePlaybackIsNewer
-                    || realtimePresenceIsNewer;
+                const hasFreshRealtimeUpdate = (realtimeUpdate?.receivedAt || 0) > requestStartedAt;
+                const useRealtimePresence = typeof realtimeUpdate?.isOnline === 'boolean'
+                    && (socket.connected || hasFreshRealtimeUpdate);
+                const useRealtimePlayback = Boolean(
+                    realtimeUpdate?.lastPlayed
+                    && (socket.connected || hasFreshRealtimeUpdate)
+                );
                 return {
                     ...friend,
-                    ...(hasFreshRealtimeUpdate && {
-                        ...(typeof realtimeUpdate.isOnline === 'boolean' && { isOnline: realtimeUpdate.isOnline }),
-                        ...(realtimeUpdate.updatedAt && { lastActive: realtimeUpdate.updatedAt }),
-                        ...(realtimeUpdate.lastPlayed && {
-                            lastPlayed: getNewestPlayback(friend.lastPlayed, realtimeUpdate.lastPlayed)
-                        })
+                    ...(useRealtimePresence && {
+                        isOnline: realtimeUpdate.isOnline,
+                        ...(realtimeUpdate.updatedAt && { lastActive: realtimeUpdate.updatedAt })
+                    }),
+                    ...((useRealtimePlayback || friend.lastPlayed || previousFriend?.lastPlayed) && {
+                        lastPlayed: useRealtimePlayback
+                            ? realtimeUpdate.lastPlayed
+                            : friend.lastPlayed || previousFriend?.lastPlayed
                     }),
                     ...(previousFriend && {
-                        ...(hasRealtimePlayback && {
-                            lastPlayed: getNewestPlayback(friend.lastPlayed, previousFriend.lastPlayed)
-                        }),
-                        ...(presenceChangedAfterRequest && {
-                            isOnline: previousFriend.isOnline,
-                            ...(previousFriend.lastActive && { lastActive: previousFriend.lastActive })
-                        })
+                        ...(useRealtimePresence && !realtimeUpdate.updatedAt && previousFriend.lastActive
+                            ? { lastActive: previousFriend.lastActive }
+                            : {})
                     })
                 };
+            });
+            currentFriends.forEach(friend => {
+                const friendId = String(friend._id);
+                if (
+                    friend.lastPlayed
+                    && (!friendRealtimeUpdates.get(friendId)?.lastPlayed || !socket.connected)
+                ) {
+                    rememberFriendRealtimeUpdate(friendId, {
+                        isOnline: friend.isOnline,
+                        lastPlayed: friend.lastPlayed,
+                        updatedAt: friend.lastActive
+                    });
+                }
             });
             const refreshedFriendIds = new Set(currentFriends.map(friend => String(friend._id)));
             friendRealtimeUpdates.forEach((_update, friendId) => {
@@ -2480,7 +2750,10 @@ export function initMusicPlayer() {
             }
         } catch (e) {
             console.warn(e);
-            if (String(getStoredUser()?._id || '') !== requestedOwnerId) return;
+            if (
+                String(getStoredUser()?._id || '') !== requestedOwnerId
+                || requestSequence !== friendsRequestSequence
+            ) return;
             if (!offlineModeEnabled) return;
             let cachedFriends;
             try {
@@ -2490,7 +2763,10 @@ export function initMusicPlayer() {
                 updateOfflineCacheStatus(`No se pudo leer la actividad guardada: ${cacheError.message}`);
                 return;
             }
-            if (String(getStoredUser()?._id || '') !== requestedOwnerId) return;
+            if (
+                String(getStoredUser()?._id || '') !== requestedOwnerId
+                || requestSequence !== friendsRequestSequence
+            ) return;
             if (!cachedFriends) return;
             offlineOnly = true;
             syncOfflineStatusIndicators();
@@ -2499,6 +2775,7 @@ export function initMusicPlayer() {
             const cachedUser = getCachedOfflineUser();
             if (cachedUser) setStoredUser(cachedUser);
             currentFriends = await hydrateOfflineFriends(cachedFriends.friends || []);
+            if (requestSequence !== friendsRequestSequence) return;
         }
         if (String(getStoredUser()?._id || '') !== requestedOwnerId) return;
         if (selectedProfileUser) {
@@ -2513,6 +2790,7 @@ export function initMusicPlayer() {
         }
         renderFriendsSidebar();
         renderFriendsPanelList();
+        updateFriendsSidebarPlayback();
         refreshChatNotifications();
         if (isProfileMode) {
             if (selectedProfileUser) renderProfile();
@@ -2629,7 +2907,7 @@ export function initMusicPlayer() {
                 const friend = currentFriends.find(item => String(item._id) === String(message.sender));
                 const senderId = String(message.sender);
                 const avatar = senderId !== previousSenderId
-                    ? `<img class="chat-message-avatar" src="${isSelf ? (user.profilePhoto || '/img/perrocorasongif.gif') : (friend?.profilePhoto || '/img/perrocorasongif.gif')}" alt="" />`
+                    ? `<img class="chat-message-avatar" src="${escapeHtml(isSelf ? (user.profilePhoto || '/img/perrocorasongif.gif') : (friend?.profilePhoto || '/img/perrocorasongif.gif'))}" alt="" />`
                     : '';
                 previousSenderId = senderId;
                 const status = isSelf && message.status && messageIndex === lastOwnMessageIndex
@@ -2840,7 +3118,10 @@ export function initMusicPlayer() {
                 !activeUser?._id
                 || !currentTrack
                 || audio.paused
-                || String(playbackActivityUserId || '') !== String(activeUser._id)
+                || (
+                    String(playbackActivityUserId || '') !== String(activeUser._id)
+                    && !isFollowingPlayback()
+                )
             ) {
                 stopPlaybackStatusSync();
                 return;
@@ -2858,7 +3139,10 @@ export function initMusicPlayer() {
         if (
             track
             && isOnline
-            && String(playbackActivityUserId || '') === String(user._id)
+            && (
+                String(playbackActivityUserId || '') === String(user._id)
+                || isFollowingPlayback()
+            )
         ) {
             payload.lastPlayed = {
                 songId: track._id,
@@ -2869,7 +3153,7 @@ export function initMusicPlayer() {
                 currentTime: sharedPlaybackTime,
                 duration: sharedPlaybackDuration || Number(track.duration) || 0,
                 isPlaying: sharedPlaybackPlaying,
-                countListeningDelta: !suppressNextListeningDelta
+                countListeningDelta: isFollowingPlayback() || !suppressNextListeningDelta
             };
         }
         try {
@@ -2889,18 +3173,34 @@ export function initMusicPlayer() {
         stopRealtime();
         const user = getStoredUser();
         if (user?._id) connectRealtime();
-        socket.off('songChanged').on('songChanged', ({ userId, playback }) => {
+        const handleFriendPlayback = ({ userId, playback } = {}) => {
+            if (!userId || !playback) return;
+            if (String(userId) === String(listeningTogetherUserId || '')) {
+                listeningTogetherAwaitingFreshPlayback = false;
+                if (!sharedQueueSessionId && !sharedQueueJoinPending && socket.connected) {
+                    joinListenTogetherQueue(userId, true);
+                }
+            }
             rememberFriendRealtimeUpdate(userId, { isOnline: true, lastPlayed: playback });
             const friend = currentFriends.find(item => String(item._id) === String(userId));
-            if (!friend || !playback) return;
+            if (!friend) return;
             const previousPlayback = friend.lastPlayed;
             const wasOnline = friend.isOnline;
-            friend.lastPlayed = getNewestPlayback(playback, friend.lastPlayed);
+            const playbackDetailsChanged = String(previousPlayback?.songId || '') !== String(playback.songId || '')
+                || previousPlayback?.songName !== playback.songName
+                || previousPlayback?.artist !== playback.artist
+                || previousPlayback?.cover !== playback.cover
+                || previousPlayback?.color !== playback.color
+                || Number(previousPlayback?.duration) !== Number(playback.duration)
+                || previousPlayback?.isPlaying !== playback.isPlaying
+                || !wasOnline;
+            friend.lastPlayed = playback;
             friend.isOnline = true;
-            friendPresenceUpdatedAt.set(String(userId), Date.now());
             scheduleFriendsOfflineSave();
-            renderFriendsSidebar();
-            renderFriendsPanelList();
+            if (playbackDetailsChanged) {
+                renderFriendsSidebar();
+                renderFriendsPanelList();
+            }
             updateFriendsSidebarPlayback();
             if (selectedProfileUser && String(selectedProfileUser._id) === String(userId)) {
                 selectedProfileUser = { ...selectedProfileUser, lastPlayed: friend.lastPlayed, isOnline: true };
@@ -2910,29 +3210,9 @@ export function initMusicPlayer() {
                 if (playbackIdentityChanged) renderProfile();
                 else updateProfileActivityProgress();
             }
-        });
-        socket.off('playbackStatusChanged').on('playbackStatusChanged', ({ userId, playback } = {}) => {
-            rememberFriendRealtimeUpdate(userId, { isOnline: true, lastPlayed: playback });
-            const friend = currentFriends.find(item => String(item._id) === String(userId));
-            if (!friend || !playback) return;
-            const previousPlayback = friend.lastPlayed;
-            const wasOnline = friend.isOnline;
-            friend.lastPlayed = getNewestPlayback(playback, friend.lastPlayed);
-            friend.isOnline = true;
-            friendPresenceUpdatedAt.set(String(userId), Date.now());
-            scheduleFriendsOfflineSave();
-            renderFriendsSidebar();
-            renderFriendsPanelList();
-            updateFriendsSidebarPlayback();
-            if (selectedProfileUser && String(selectedProfileUser._id) === String(userId)) {
-                selectedProfileUser = { ...selectedProfileUser, lastPlayed: friend.lastPlayed };
-                const playbackIdentityChanged = String(previousPlayback?.songId || '') !== String(friend.lastPlayed?.songId || '')
-                    || previousPlayback?.isPlaying !== friend.lastPlayed?.isPlaying
-                    || !wasOnline;
-                if (playbackIdentityChanged) renderProfile();
-                else updateProfileActivityProgress();
-            }
-        });
+        };
+        socket.off('songChanged').on('songChanged', handleFriendPlayback);
+        socket.off('playbackStatusChanged').on('playbackStatusChanged', handleFriendPlayback);
         socket.off('playlistChanged').on('playlistChanged', ({ playlistId, deleted, changedBy } = {}) => {
             if (String(changedBy || '') === String(getStoredUser()?._id || '')) return;
             playlistRealtimeRefresh = playlistRealtimeRefresh.then(async () => {
@@ -2983,6 +3263,73 @@ export function initMusicPlayer() {
                 loadChatMessages(false);
             }
         });
+        socket.off('listenTogetherQueueSessionStarted').on('listenTogetherQueueSessionStarted', ({ sessionId, peerId } = {}) => {
+            if (!sessionId || !peerId) return;
+            sharedQueueSessionId = String(sessionId);
+            sharedQueueRole = 'host';
+            lastSharedQueueSnapshot = null;
+            sharedQueueSnapshotRevision = 0;
+            renderQueue();
+        });
+        socket.off('listenTogetherQueueSnapshotRequest').on('listenTogetherQueueSnapshotRequest', ({ sessionId } = {}) => {
+            if (
+                sharedQueueRole !== 'host'
+                || String(sessionId || '') !== String(sharedQueueSessionId || '')
+            ) return;
+            renderQueue();
+        });
+        socket.off('listenTogetherQueueSnapshot').on('listenTogetherQueueSnapshot', ({ sessionId, revision, songIds } = {}) => {
+            if (
+                sharedQueueRole !== 'follower'
+                || String(sessionId || '') !== String(sharedQueueSessionId || '')
+                || !Number.isInteger(revision)
+                || revision <= sharedQueueSnapshotRevision
+                || !Array.isArray(songIds)
+            ) return;
+            sharedQueueSnapshotRevision = revision;
+            customQueue = songIds
+                .map(songId => playlist.find(track => String(track._id || track.id) === String(songId)))
+                .filter(Boolean);
+            renderQueue();
+        });
+        socket.off('listenTogetherQueueAddRequest').on('listenTogetherQueueAddRequest', ({ sessionId, songId } = {}, acknowledge = () => {}) => {
+            if (
+                sharedQueueRole !== 'host'
+                || String(sessionId || '') !== String(sharedQueueSessionId || '')
+            ) {
+                acknowledge({ success: false, error: 'El anfitrión no está conectado a esta cola.' });
+                return;
+            }
+            const track = playlist.find(item => String(item._id || item.id) === String(songId || ''));
+            if (!track) {
+                acknowledge({ success: false, error: 'La canción no está disponible en la biblioteca del anfitrión.' });
+                return;
+            }
+            const success = addTrackToQueue(track);
+            acknowledge({
+                success,
+                ...(success ? {} : { error: 'No se pudo añadir la canción a la cola.' })
+            });
+        });
+        socket.off('listenTogetherQueueSessionEnded').on('listenTogetherQueueSessionEnded', ({ sessionId } = {}) => {
+            if (String(sessionId || '') !== String(sharedQueueSessionId || '')) return;
+            const wasFollower = sharedQueueRole === 'follower';
+            sharedQueueSessionId = null;
+            sharedQueueRole = null;
+            sharedQueueJoinPending = false;
+            lastSharedQueueSnapshot = null;
+            sharedQueueSnapshotRevision = 0;
+            if (wasFollower && sharedQueueSavedLocalQueue) {
+                customQueue = sharedQueueSavedLocalQueue;
+                sharedQueueSavedLocalQueue = null;
+                renderQueue();
+            } else if (wasFollower) {
+                customQueue = [];
+                renderQueue();
+            } else {
+                renderQueue();
+            }
+        });
         socket.off('annoy').on('annoy', ({ senderId, senderName } = {}, acknowledge = () => {}) => {
             playAnnoySound().then(() => {
                 if (senderId) {
@@ -2997,19 +3344,24 @@ export function initMusicPlayer() {
                 showToast(error.message || 'No se pudo reproducir el audio de molestia.', true);
             });
         });
-        socket.off('presenceChanged').on('presenceChanged', ({ userId, isOnline, lastPlayed, updatedAt } = {}) => {
-            rememberFriendRealtimeUpdate(userId, { isOnline, lastPlayed, updatedAt });
+        socket.off('presenceChanged').on('presenceChanged', ({ userId, isOnline, updatedAt } = {}) => {
+            rememberFriendRealtimeUpdate(userId, { isOnline, updatedAt });
             const friend = currentFriends.find(item => String(item._id) === String(userId));
             if (!friend) return;
             const wasOnline = friend.isOnline;
-            const previousPlayback = friend.lastPlayed;
-            friendPresenceUpdatedAt.set(String(userId), Date.now());
             friend.isOnline = Boolean(isOnline);
+            if (
+                String(userId) === String(listeningTogetherUserId || '')
+                && (!friend.isOnline || !wasOnline)
+            ) {
+                listeningTogetherAwaitingFreshPlayback = true;
+            }
             if (updatedAt) friend.lastActive = updatedAt;
-            if (lastPlayed) friend.lastPlayed = getNewestPlayback(lastPlayed, friend.lastPlayed);
+            if (wasOnline === friend.isOnline) return;
             scheduleFriendsOfflineSave();
             renderFriendsSidebar();
             renderFriendsPanelList();
+            updateFriendsSidebarPlayback();
             if (activeChatFriendId && String(activeChatFriendId) === String(userId) && chatTitleStatus) {
                 chatTitleStatus.classList.toggle('online', friend.isOnline);
             }
@@ -3020,10 +3372,7 @@ export function initMusicPlayer() {
                     lastActive: friend.lastActive,
                     lastPlayed: friend.lastPlayed
                 };
-                const playbackIdentityChanged = wasOnline !== friend.isOnline
-                    || String(previousPlayback?.songId || '') !== String(friend.lastPlayed?.songId || '')
-                    || previousPlayback?.isPlaying !== friend.lastPlayed?.isPlaying;
-                if (playbackIdentityChanged) renderProfile();
+                if (wasOnline !== friend.isOnline) renderProfile();
                 else updateProfileActivityProgress();
             }
         });
@@ -3072,6 +3421,7 @@ export function initMusicPlayer() {
     }
 
     function stopRealtime() {
+        leaveListenTogetherQueue();
         socket.disconnect();
         realtimeConnectedBefore = false;
         skipNextRealtimeReconciliation = false;
@@ -3094,9 +3444,15 @@ export function initMusicPlayer() {
         }
         closeChat();
         currentFriends = [];
-        friendPresenceUpdatedAt.clear();
         friendRealtimeUpdates.clear();
+        friendsRequestSequence += 1;
         friendsOwnerId = null;
+        listeningTogetherUserId = null;
+        listeningTogetherAwaitingFreshPlayback = false;
+        listeningTogetherNeedsUserGesture = false;
+        if (currentTrackSource === 'together') currentTrackSource = 'regular';
+        resetSynchronizedPlaybackRate();
+        updateListeningTogetherStatus();
         renderFriendsSidebar();
         renderFriendsPanelList();
     }
@@ -3105,47 +3461,84 @@ export function initMusicPlayer() {
         updateProfileActivityProgress();
         syncListeningTogether();
         updateListeningTogetherStatus();
+        const friendsById = new Map(currentFriends.map(friend => [String(friend._id), friend]));
         friendsSidebarList?.querySelectorAll('.friend-sidebar-item[data-friend-id]').forEach(item => {
-            const friend = currentFriends.find(entry => String(entry._id) === String(item.dataset.friendId));
+            const friend = friendsById.get(String(item.dataset.friendId));
             const playback = friend?.lastPlayed;
             const duration = Number(playback?.duration) || 0;
             if (!friend || !playback) return;
 
             const isPlaying = Boolean(friend.isOnline && playback.songName && playback.isPlaying !== false);
-            const savedAt = Date.parse(playback.updatedAt);
-            const extraElapsed = isPlaying && Number.isFinite(savedAt)
-                ? Math.max(0, (Date.now() - savedAt) / 1000)
+            const extraElapsed = isPlaying
+                ? getFriendPlaybackElapsed(friend._id)
                 : 0;
             const elapsed = Math.min(duration, (Number(playback.currentTime) || 0) + extraElapsed);
-            const progress = Math.min(100, (elapsed / duration) * 100);
+            const progress = duration > 0 ? Math.min(100, (elapsed / duration) * 100) : 0;
             const progressFill = item.querySelector('[data-friend-progress]');
             const timeLabel = item.querySelector('[data-friend-playback-time]');
             if (progressFill) progressFill.style.width = `${progress}%`;
             if (timeLabel && isPlaying) timeLabel.textContent = `${formatTrackTime(elapsed)} / ${formatTrackTime(duration)}`;
+        });
+        friendsList?.querySelectorAll('.friend-item[data-friend-id]').forEach(item => {
+            const friend = friendsById.get(String(item.dataset.friendId));
+            const statusText = item.querySelector('.friend-status-label')?.lastChild;
+            if (friend && statusText?.nodeType === Node.TEXT_NODE) {
+                statusText.textContent = ` ${friendStatusLabel(friend)}`;
+            }
+        });
+        profileFriendsGrid?.querySelectorAll('.profile-friend-card[data-friend-id]').forEach(card => {
+            const friend = friendsById.get(String(card.dataset.friendId));
+            const statusLabel = card.querySelector('.profile-friend-status');
+            if (friend && statusLabel) statusLabel.textContent = friendStatusLabel(friend);
         });
     }
 
     function syncListeningTogether() {
         if (!listeningTogetherUserId) return;
         const friend = currentFriends.find(item => String(item._id) === String(listeningTogetherUserId));
-        if (!friend?.lastPlayed?.songId) return;
+        if (!friend) return;
+        if (!friend.lastPlayed?.songId) {
+            if (currentTrackSource === 'together') {
+                stopFollowingUnavailablePlayback('Tu amigo ya no está compartiendo una reproducción.');
+            }
+            return;
+        }
+        if (offlineOnly || !navigator.onLine) {
+            if (currentTrackSource === 'together') {
+                listeningTogetherAwaitingFreshPlayback = true;
+                resetSynchronizedPlaybackRate();
+                if (!audio.paused) audio.pause();
+            }
+            return;
+        }
         const playback = friend.lastPlayed;
 
         const remoteIndex = playlist.findIndex(item => String(item._id) === String(playback.songId));
-        if (remoteIndex < 0) return;
-
-        const remoteTime = Math.max(0, Number(playback.currentTime) || 0);
-        const remoteUpdatedAt = Date.parse(playback.updatedAt);
-        const playbackAge = Number.isFinite(remoteUpdatedAt)
-            ? Math.max(0, (Date.now() - remoteUpdatedAt) / 1000)
-            : 0;
-        if (!friend.isOnline) {
-            if (currentTrackSource === 'together' && !audio.paused) audio.pause();
+        if (remoteIndex < 0) {
+            if (currentTrackSource === 'together') {
+                stopFollowingUnavailablePlayback('La canción de tu amigo no está disponible en tu biblioteca.');
+            }
             return;
         }
-        const extraTime = playback.isPlaying !== false && Number.isFinite(remoteUpdatedAt)
-            ? playbackAge
-            : 0;
+
+        const remoteTime = Math.max(0, Number(playback.currentTime) || 0);
+        if (!friend.isOnline) {
+            if (currentTrackSource === 'together') {
+                listeningTogetherAwaitingFreshPlayback = true;
+                resetSynchronizedPlaybackRate();
+                if (!audio.paused) audio.pause();
+            }
+            return;
+        }
+        if (listeningTogetherAwaitingFreshPlayback) {
+            if (currentTrackSource === 'together' && !audio.paused) {
+                resetSynchronizedPlaybackRate();
+                audio.pause();
+            }
+            return;
+        }
+        const playbackAge = getFriendPlaybackElapsed(listeningTogetherUserId);
+        const extraTime = playback.isPlaying !== false ? playbackAge : 0;
         const durationLimits = [
             Number(playback.duration),
             currentTrackIndex === remoteIndex ? audio.duration : 0
@@ -3160,48 +3553,45 @@ export function initMusicPlayer() {
         const currentTrackChanged = currentTrackIndex !== remoteIndex || currentTrackSource !== 'together';
 
         if (currentTrackChanged) {
-            const syncAfterMetadata = () => {
-                if (
-                    String(getCurrentTrack()?._id || '') === String(playback.songId)
-                    && currentTrackSource === 'together'
-                ) {
-                    syncListeningTogether();
-                }
-            };
-            audio.addEventListener('loadedmetadata', syncAfterMetadata, { once: true });
-            loadAndPlayTrack(remoteIndex, 'together', playback.isPlaying !== false);
+            loadAndPlayTrack(remoteIndex, 'together', false);
+            waitForSynchronizedTrackMetadata(playback.songId);
             return;
         }
 
-        const expectedSrc = playlist[remoteIndex]?.path;
-        if (audio.src !== expectedSrc && !audio.src.endsWith(expectedSrc || '\0')) return;
+        if (!isCurrentAudioSource(playlist[remoteIndex])) return;
         if (audio.readyState < HTMLMediaElement.HAVE_METADATA) {
-            const trackId = String(playback.songId);
-            if (listeningTogetherMetadataWaitTrackId !== trackId) {
-                listeningTogetherMetadataWaitTrackId = trackId;
-                const waitToken = ++listeningTogetherMetadataWaitToken;
-                audio.addEventListener('loadedmetadata', () => {
-                    if (
-                        listeningTogetherMetadataWaitToken !== waitToken
-                        || listeningTogetherMetadataWaitTrackId !== trackId
-                    ) return;
-                    listeningTogetherMetadataWaitTrackId = null;
-                    if (
-                        String(getCurrentTrack()?._id || '') === trackId
-                        && currentTrackSource === 'together'
-                    ) {
-                        syncListeningTogether();
-                    }
-                }, { once: true });
-            }
+            waitForSynchronizedTrackMetadata(playback.songId);
             return;
         }
-        if (Math.abs(audio.currentTime - targetTime) > 0.75) {
+        const drift = targetTime - audio.currentTime;
+        if (audio.ended || Math.abs(drift) > 2) {
+            resetSynchronizedPlaybackRate();
+            audio.currentTime = Math.min(
+                targetTime,
+                Math.max(0, durationLimit - 0.05)
+            );
+        } else if (playback.isPlaying === false && Math.abs(drift) > 0.12) {
+            resetSynchronizedPlaybackRate();
             audio.currentTime = targetTime;
+        } else {
+            resetSynchronizedPlaybackRate();
         }
-        if (playback.isPlaying === false && !audio.paused) audio.pause();
-        if (playback.isPlaying !== false && audio.paused && !audio.ended) {
+        if (playback.isPlaying === false) {
+            resetSynchronizedPlaybackRate();
+            if (!audio.paused && currentTrackSource === 'together') audio.pause();
+        }
+        if (playback.isPlaying !== false && audio.paused) {
+            if (listeningTogetherNeedsUserGesture) {
+                updateListeningTogetherControls();
+                return;
+            }
             audio.play().catch(error => {
+                if (error?.name === 'NotAllowedError') {
+                    listeningTogetherNeedsUserGesture = true;
+                    updateListeningTogetherStatus();
+                    showToast('Tu navegador bloqueó la reproducción sincronizada. Pulsa reproducir para continuar.', true);
+                    return;
+                }
                 if (!isExpectedAudioPlayInterruption(error)) {
                     console.warn('No se pudo reanudar la reproducción sincronizada.', error);
                 }
@@ -3209,23 +3599,102 @@ export function initMusicPlayer() {
         }
     }
 
+    function waitForSynchronizedTrackMetadata(trackId) {
+        const normalizedTrackId = String(trackId);
+        if (listeningTogetherMetadataWaitTrackId === normalizedTrackId) return;
+        listeningTogetherMetadataWaitTrackId = normalizedTrackId;
+        const waitToken = ++listeningTogetherMetadataWaitToken;
+        audio.addEventListener('loadedmetadata', () => {
+            if (
+                listeningTogetherMetadataWaitToken !== waitToken
+                || listeningTogetherMetadataWaitTrackId !== normalizedTrackId
+            ) return;
+            listeningTogetherMetadataWaitTrackId = null;
+            if (
+                String(getCurrentTrack()?._id || '') === normalizedTrackId
+                && currentTrackSource === 'together'
+                && isCurrentAudioSource(getCurrentTrack())
+            ) {
+                syncListeningTogether();
+            }
+        }, { once: true });
+    }
+
+    function resetSynchronizedPlaybackRate() {
+        if (audio.playbackRate !== 1) audio.playbackRate = 1;
+    }
+
+    function stopFollowingUnavailablePlayback(message) {
+        if (currentTrackSource !== 'together') return;
+        leaveListenTogetherQueue();
+        listeningTogetherUserId = null;
+        listeningTogetherAwaitingFreshPlayback = false;
+        listeningTogetherNeedsUserGesture = false;
+        resetSynchronizedPlaybackRate();
+        audio.pause();
+        currentTrackSource = 'regular';
+        playbackActivityUserId = null;
+        updateListeningTogetherStatus();
+        showToast(message, true);
+    }
+
     function updateListeningTogetherStatus() {
-        if (!listeningTogetherStatus) return;
         const friend = listeningTogetherUserId
             ? currentFriends.find(item => String(item._id) === String(listeningTogetherUserId))
             : null;
-        listeningTogetherStatus.hidden = !friend;
-        if (friend) {
+        updateListeningTogetherControls();
+        if (!listeningTogetherStatus) return;
+        listeningTogetherStatus.hidden = !listeningTogetherUserId;
+        if (listeningTogetherUserId) {
             const label = listeningTogetherStatus.querySelector('span');
-            if (label) label.textContent = `ESCUCHANDO JUNTO A: ${friend.username}`;
+            const status = listeningTogetherNeedsUserGesture
+                ? 'PULSA REPRODUCIR PARA ESCUCHAR A'
+                : listeningTogetherAwaitingFreshPlayback
+                    ? (friend?.isOnline ? 'SINCRONIZANDO CON' : 'ESPERANDO A')
+                    : friend?.lastPlayed?.isPlaying === false
+                        ? 'EN PAUSA CON'
+                        : 'ESCUCHANDO JUNTO A';
+            if (label) label.textContent = `${status}: ${friend?.username || 'tu amigo'}`;
+        }
+    }
+
+    function isFollowingPlayback() {
+        return Boolean(listeningTogetherUserId && currentTrackSource === 'together');
+    }
+
+    function updateListeningTogetherControls() {
+        const following = isFollowingPlayback();
+        [btnPrev, btnNext, btnRewind, btnForward].forEach(button => {
+            if (button) button.disabled = following;
+        });
+        const followedFriend = listeningTogetherUserId
+            ? currentFriends.find(item => String(item._id) === String(listeningTogetherUserId))
+            : null;
+        const canRetryBlockedPlayback = following
+            && listeningTogetherNeedsUserGesture
+            && audio.paused
+            && followedFriend?.isOnline
+            && followedFriend.lastPlayed?.isPlaying !== false;
+        if (btnPlayPause) btnPlayPause.disabled = following && !canRetryBlockedPlayback;
+        if (progressContainer) {
+            progressContainer.setAttribute('aria-disabled', String(following));
+            progressContainer.classList.toggle('is-playback-following', following);
         }
     }
 
     if (btnExitListeningTogether) {
         btnExitListeningTogether.addEventListener('click', () => {
+            leaveListenTogetherQueue();
             listeningTogetherUserId = null;
+            listeningTogetherAwaitingFreshPlayback = false;
+            listeningTogetherNeedsUserGesture = false;
             if (currentTrackSource === 'together' && getCurrentTrack()) {
                 currentTrackSource = 'regular';
+                playbackActivityUserId = String(getStoredUser()?._id || '') || null;
+                sharedPlaybackTime = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+                sharedPlaybackDuration = Number.isFinite(audio.duration) ? audio.duration : 0;
+                sharedPlaybackPlaying = !audio.paused;
+                startPlaybackStatusSync();
             }
             updateListeningTogetherStatus();
             if (!isRestoringInitialPlayback && !suppressStartupPlaybackUpdates) {
@@ -3297,9 +3766,9 @@ export function initMusicPlayer() {
             shareFriendsList.innerHTML = '<li>Agregá amigos primero para poder compartir.</li>';
         } else {
             shareFriendsList.innerHTML = currentFriends.map(friend => `
-                <li class="share-playlist-item" data-friend-id="${friend._id}">
-                    ${friend.profilePhoto ? `<img src="${friend.profilePhoto}" alt="" class="share-friend-avatar" />` : '<span class="share-friend-avatar-placeholder">?</span>'}
-                    <span>${friend.username}</span>
+                <li class="share-playlist-item" data-friend-id="${escapeHtml(friend._id)}">
+                    ${friend.profilePhoto ? `<img src="${escapeHtml(friend.profilePhoto)}" alt="" class="share-friend-avatar" />` : '<span class="share-friend-avatar-placeholder">?</span>'}
+                    <span>${escapeHtml(friend.username)}</span>
                 </li>
             `).join('');
             shareFriendsList.querySelectorAll('li[data-friend-id]').forEach(item => {
@@ -3368,9 +3837,9 @@ export function initMusicPlayer() {
         const members = Array.isArray(pl.sharedWith) ? pl.sharedWith : [];
         manageMembersList.innerHTML = members.length
             ? members.map(member => `
-                <li class="share-playlist-item manage-member-item" data-member-id="${member._id}">
-                    ${member.profilePhoto ? `<img src="${member.profilePhoto}" alt="" class="share-friend-avatar" />` : '<span class="share-friend-avatar-placeholder">?</span>'}
-                    <span>${member.username || 'Usuario'}</span>
+                <li class="share-playlist-item manage-member-item" data-member-id="${escapeHtml(member._id)}">
+                    ${member.profilePhoto ? `<img src="${escapeHtml(member.profilePhoto)}" alt="" class="share-friend-avatar" />` : '<span class="share-friend-avatar-placeholder">?</span>'}
+                    <span>${escapeHtml(member.username || 'Usuario')}</span>
                     <img src="/img/cancel.png" alt="Quitar integrante" class="manage-member-remove-icon" />
                 </li>
             `).join('')
@@ -3580,12 +4049,15 @@ export function initMusicPlayer() {
             offlineOnly = false;
             offlineModeEnabled = false;
             musicDataRequestSequence += 1;
+            playlistsRequestSequence += 1;
             audio.pause();
             audio.removeAttribute('src');
             audio.load();
             playlist = [];
+            userPlaylists = [];
             currentTrackIndex = 0;
             currentTrackId = null;
+            activePlaylistId = null;
             generalQueueAnchorTrackId = null;
             activeQueueTracks = [];
             customQueue = [];
@@ -3835,18 +4307,18 @@ export function initMusicPlayer() {
                 ];
 
                 return `
-                    <li class="admin-user-row" data-user-id="${user._id}">
+                    <li class="admin-user-row" data-user-id="${escapeHtml(user._id)}">
                         <div class="admin-user-main">
-                            <span class="admin-user-name">${user.username}</span>
+                            <span class="admin-user-name">${escapeHtml(user.username)}</span>
                             <span class="admin-user-role">${user.isAdmin ? 'Administrador' : 'Usuario'}</span>
-                            <span class="admin-user-permissions">${permissions.length ? permissions.join(', ') : 'Sin permisos'}</span>
+                            <span class="admin-user-permissions">${escapeHtml(permissions.length ? permissions.join(', ') : 'Sin permisos')}</span>
                         </div>
                         <div class="admin-user-controls">
                             <div class="admin-user-actions-inline">
-                                <button class="admin-edit-user" data-user-id="${user._id}" type="button" aria-label="Editar usuario" title="Editar usuario">
+                                <button class="admin-edit-user" data-user-id="${escapeHtml(user._id)}" type="button" aria-label="Editar usuario" title="Editar usuario">
                                     <img src="/img/edit.png" alt="Editar usuario" draggable="false" />
                                 </button>
-                                <button class="admin-delete-user" data-user-id="${user._id}" type="button" aria-label="Eliminar usuario" title="Eliminar usuario">
+                                <button class="admin-delete-user" data-user-id="${escapeHtml(user._id)}" type="button" aria-label="Eliminar usuario" title="Eliminar usuario">
                                     <img src="/img/cancel.png" alt="Eliminar usuario" draggable="false" />
                                 </button>
                             </div>
@@ -3854,12 +4326,12 @@ export function initMusicPlayer() {
                                 <div class="admin-user-permissions-grid">
                                     ${permissionOptions.map((option) => `
                                         <label class="permission-check">
-                                            <input type="checkbox" data-user-id="${user._id}" data-permission="${option.value}" ${permissions.includes(option.value) ? 'checked' : ''} />
+                                            <input type="checkbox" data-user-id="${escapeHtml(user._id)}" data-permission="${option.value}" ${permissions.includes(option.value) ? 'checked' : ''} />
                                             <span>${option.label}</span>
                                         </label>
                                     `).join('')}
                                     <label class="admin-role-toggle">
-                                        <input type="checkbox" data-user-id="${user._id}" data-role-admin ${user.isAdmin ? 'checked' : ''} />
+                                        <input type="checkbox" data-user-id="${escapeHtml(user._id)}" data-role-admin ${user.isAdmin ? 'checked' : ''} />
                                         <span>Admin</span>
                                     </label>
                                 </div>
@@ -4162,6 +4634,9 @@ export function initMusicPlayer() {
     let editingTrackId = null;
     let editingSuggestionId = null;
     let songSaveInProgress = false;
+    let editingLyricColors = [];
+    let editingLyricColorAssignments = {};
+    let selectedLyricColor = '#ff8a00';
     let songSuggestions = [];
     let playlistEditorPreviousView = null;
     let originalEditLyrics = '';
@@ -4179,6 +4654,7 @@ export function initMusicPlayer() {
     const mergedSvg = merged.querySelector('svg');
 
     let userPlaylists = [];
+    let playlistsRequestSequence = 0;
     let playlistRealtimeRefresh = Promise.resolve();
     const pendingPlaylistTrackChanges = new Set();
     const pendingPlaylistOrderSaves = new Map();
@@ -4365,37 +4841,50 @@ export function initMusicPlayer() {
     }
 
     async function loadPlaylists() {
+        const requestSequence = ++playlistsRequestSequence;
+        const user = getStoredUser();
+        const isCurrentRequest = () => (
+            requestSequence === playlistsRequestSequence
+            && String(getStoredUser()?._id || '') === String(user?._id || '')
+        );
         try {
-            const user = getStoredUser();
             if (user?._id && (offlineOnly || !navigator.onLine)) {
                 const cachedPlaylists = await getOfflinePlaylists(user._id);
-                userPlaylists = cachedPlaylists?.playlists || [];
-                await hydrateOfflinePlaylistCovers(userPlaylists);
+                if (!isCurrentRequest()) return;
+                const loadedPlaylists = cachedPlaylists?.playlists || [];
+                await hydrateOfflinePlaylistCovers(loadedPlaylists);
+                if (!isCurrentRequest()) return;
+                userPlaylists = loadedPlaylists;
                 renderSidebarPlaylists();
                 renderProfile();
                 return;
             }
             if (user?._id) {
                 const refreshedUser = await fetchJsonWithRetry(`${API_URL}/auth/me`, {}, 2);
+                if (!isCurrentRequest()) return;
                 setStoredUser({ ...user, ...refreshedUser });
                 saveCachedOfflineUser({ ...user, ...refreshedUser });
                 syncAccessControls();
             }
             syncAccessControls();
             const query = user?._id ? `?userId=${encodeURIComponent(user._id)}` : '';
-            userPlaylists = await fetchJsonWithRetry(`${API_URL}/playlists${query}`);
+            const loadedPlaylists = await fetchJsonWithRetry(`${API_URL}/playlists${query}`);
+            if (!isCurrentRequest()) return;
             if (user?._id && offlineModeEnabled) {
                 try {
-                    await saveOfflinePlaylists(user._id, userPlaylists);
+                    await saveOfflinePlaylists(user._id, loadedPlaylists);
                 } catch (error) {
                     console.error('No se pudieron guardar las playlists offline.', error);
                     updateOfflineCacheStatus(`No se pudieron guardar las playlists: ${error.message}`);
                 }
             }
+            if (!isCurrentRequest()) return;
+            userPlaylists = loadedPlaylists;
             renderSidebarPlaylists();
             renderProfile();
             syncOfflineResources();
         } catch (e) {
+            if (!isCurrentRequest()) return;
             console.warn(e);
             const cachedUser = getCachedOfflineUser();
             const activeUser = getStoredUser();
@@ -4412,14 +4901,17 @@ export function initMusicPlayer() {
                 updateOfflineCacheStatus(`No se pudieron leer las playlists guardadas: ${cacheError.message}`);
                 return;
             }
+            if (!isCurrentRequest()) return;
             if (!cachedPlaylists) return;
+            const loadedPlaylists = cachedPlaylists.playlists || [];
+            await hydrateOfflinePlaylistCovers(loadedPlaylists);
+            if (!isCurrentRequest()) return;
             offlineOnly = true;
             syncOfflineStatusIndicators();
             socket.disconnect();
             startOfflineRecoveryTimer();
             setStoredUser(cachedUser);
-            userPlaylists = cachedPlaylists.playlists || [];
-            await hydrateOfflinePlaylistCovers(userPlaylists);
+            userPlaylists = loadedPlaylists;
             hideAuthOverlay();
             renderSidebarPlaylists();
             renderProfile();
@@ -4854,6 +5346,7 @@ export function initMusicPlayer() {
 
     const audio = new Audio();
     audio.crossOrigin = "anonymous";
+    audio.preservesPitch = true;
     audio.volume = currentVolume;
     function isExpectedAudioPlayInterruption(error) {
         return error?.name === 'AbortError'
@@ -4933,6 +5426,21 @@ export function initMusicPlayer() {
         });
     };
     if (editLyricsPreview) {
+        editLyricsPreview.addEventListener('contextmenu', event => {
+            const clickedWord = event.target.closest('.lyric-word');
+            const lyricLine = clickedWord?.closest('[data-lyric-color-key]');
+            if (
+                !clickedWord
+                || !clickedWord.closest('.lyric-highlight')
+                || !lyricLine
+                || editingLyricColors.length === 0
+            ) return;
+            event.preventDefault();
+            cycleEditedLyricWordColor(
+                lyricLine.dataset.lyricColorKey,
+                Number(clickedWord.dataset.lyricWordIndex)
+            );
+        });
         editLyricsPreview.addEventListener('click', event => {
             const clickedWord = event.target.closest('[data-lyric-word-index]');
             if (clickedWord) {
@@ -5165,6 +5673,117 @@ export function initMusicPlayer() {
         }
     }
 
+    function publishSharedQueueSnapshot() {
+        if (
+            sharedQueueRole !== 'host'
+            || !sharedQueueSessionId
+            || !socket.connected
+        ) return;
+        const songIds = customQueue.map(track => String(track?._id || track?.id || '')).filter(Boolean);
+        const signature = `${sharedQueueSessionId}:${songIds.join(',')}`;
+        if (signature === lastSharedQueueSnapshot) return;
+        lastSharedQueueSnapshot = signature;
+        socket.emit('listenTogetherQueueSnapshot', {
+            sessionId: sharedQueueSessionId,
+            songIds
+        }, response => {
+            if (response?.success) return;
+            if (lastSharedQueueSnapshot === signature) lastSharedQueueSnapshot = null;
+            showToast(response?.error || 'No se pudo sincronizar la cola compartida.', true);
+        });
+    }
+
+    function joinListenTogetherQueue(hostId, quiet = false) {
+        if (!hostId || !socket.connected) {
+            if (!quiet) showToast('No se pudo conectar con la cola compartida.', true);
+            return;
+        }
+        if (sharedQueueRole === 'follower' && sharedQueueSessionId) return;
+        if (sharedQueueJoinPending) return;
+        if (!sharedQueueSavedLocalQueue && sharedQueueRole !== 'follower') {
+            sharedQueueSavedLocalQueue = [...customQueue];
+        }
+        sharedQueueJoinPending = true;
+        socket.emit('listenTogetherQueueSessionJoin', { hostId: String(hostId) }, response => {
+            sharedQueueJoinPending = false;
+            if (!response?.success || !response.sessionId) {
+                const hadPendingAdds = pendingSharedQueueAdds.size > 0;
+                pendingSharedQueueAdds.clear();
+                if (hadPendingAdds) {
+                    showToast(response?.error || 'No se pudo conectar la cola para añadir las canciones.', true);
+                }
+                if (sharedQueueRole !== 'follower' && !sharedQueueSessionId) {
+                    sharedQueueSavedLocalQueue = null;
+                }
+                if (String(listeningTogetherUserId || '') === String(hostId)) {
+                    if (quiet) console.warn(response?.error || 'No se pudo sincronizar la cola compartida.');
+                    else if (!hadPendingAdds) showToast(response?.error || 'No se pudo sincronizar la cola compartida.', true);
+                }
+                return;
+            }
+            if (String(listeningTogetherUserId || '') !== String(hostId)) {
+                socket.emit('listenTogetherQueueSessionLeave', { sessionId: response.sessionId });
+                leaveListenTogetherQueue();
+                if (listeningTogetherUserId) joinListenTogetherQueue(listeningTogetherUserId, true);
+                return;
+            }
+            sharedQueueSessionId = response.sessionId;
+            sharedQueueRole = 'follower';
+            sharedQueueSnapshotRevision = 0;
+            lastSharedQueueSnapshot = null;
+            socket.emit('listenTogetherQueueSnapshotRequest', {
+                sessionId: sharedQueueSessionId
+            }, snapshotResponse => {
+                if (!snapshotResponse?.success) {
+                    showToast(snapshotResponse?.error || 'No se pudo cargar la cola compartida.', true);
+                }
+            });
+            const pendingSongIds = [...pendingSharedQueueAdds];
+            pendingSharedQueueAdds.clear();
+            pendingSongIds.forEach(songId => requestSharedQueueAdd(songId));
+        });
+    }
+
+    function requestSharedQueueAdd(songId) {
+        if (!sharedQueueSessionId || !socket.connected) {
+            showToast('La cola compartida se desconectó antes de añadir la canción.', true);
+            return;
+        }
+        socket.emit('listenTogetherQueueAddRequest', {
+            sessionId: sharedQueueSessionId,
+            songId: String(songId)
+        }, response => {
+            if (!response?.success) {
+                showToast(response?.error || 'No se pudo añadir la canción a la cola compartida.', true);
+                return;
+            }
+            showToast('Añadida a «A continuación en la cola».');
+        });
+    }
+
+    function leaveListenTogetherQueue() {
+        if (sharedQueueSessionId && socket.connected) {
+            socket.emit('listenTogetherQueueSessionLeave', { sessionId: sharedQueueSessionId });
+        }
+        const shouldRestoreQueue = sharedQueueRole === 'follower' || sharedQueueSavedLocalQueue !== null;
+        const restoredQueue = sharedQueueSavedLocalQueue;
+        sharedQueueSessionId = null;
+        sharedQueueRole = null;
+        sharedQueueJoinPending = false;
+        sharedQueueSnapshotRevision = 0;
+        lastSharedQueueSnapshot = null;
+        sharedQueueSavedLocalQueue = null;
+        pendingSharedQueueAdds.clear();
+        if (restoredQueue) {
+            customQueue = restoredQueue;
+        } else if (shouldRestoreQueue) {
+            customQueue = [];
+        }
+        if (shouldRestoreQueue) {
+            renderQueue();
+        }
+    }
+
     function addTrackToQueue(track, shouldRender = true) {
         if (!track) return false;
         const trackIds = [track._id, track.id].filter(Boolean).map(String);
@@ -5176,6 +5795,31 @@ export function initMusicPlayer() {
         if (!queuedTrack?._id) {
             showToast('No se pudo identificar la canción para añadirla a la cola.', true);
             return false;
+        }
+        if (sharedQueueRole === 'host' && customQueue.length >= 5000) {
+            showToast('La cola compartida alcanzó el máximo de 5000 canciones.', true);
+            return false;
+        }
+        if (isFollowingPlayback()) {
+            if (!sharedQueueSessionId || !socket.connected) {
+                if (socket.connected && listeningTogetherUserId && !sharedQueueJoinPending) {
+                    joinListenTogetherQueue(listeningTogetherUserId, true);
+                }
+                if (sharedQueueJoinPending && socket.connected) {
+                    pendingSharedQueueAdds.add(String(queuedTrack._id));
+                    showToast('Se añadirá a la cola compartida al conectarse.');
+                    return true;
+                }
+                showToast('La cola compartida todavía no está conectada.', true);
+                return false;
+            }
+            requestSharedQueueAdd(queuedTrack._id);
+            if (queueContainer && bottomBarWrapper) {
+                isQueueOpen = true;
+                queueContainer.classList.add('show');
+                bottomBarWrapper.classList.add('queue-open');
+            }
+            return true;
         }
         customQueue.push(queuedTrack);
         if (queueContainer && bottomBarWrapper) {
@@ -5634,6 +6278,7 @@ export function initMusicPlayer() {
         getSongSuggestions: () => songSuggestions,
         getSongCover,
         createImageMarkup,
+        escapeHtml,
         createSongContextMenuHtml,
         setupSongMenuListeners,
         setupQueueAddSwipe,
@@ -5863,6 +6508,17 @@ export function initMusicPlayer() {
         
         if (index !== null && playlist[index]) {
             const track = playlist[index];
+            editingLyricColors = Array.isArray(track.lyricColors)
+                ? track.lyricColors.filter(color => /^#[0-9a-f]{6}$/i.test(color))
+                : [];
+            editingLyricColorAssignments = track.lyricColorAssignments
+                && typeof track.lyricColorAssignments === 'object'
+                && !Array.isArray(track.lyricColorAssignments)
+                ? Object.fromEntries(Object.entries(track.lyricColorAssignments).map(([lineKey, words]) => [
+                    lineKey,
+                    words && typeof words === 'object' && !Array.isArray(words) ? { ...words } : {}
+                ]))
+                : {};
             if (getSongCover(track)) {
                 editSongDisplayCover.src = getSongCover(track);
                 editSongDisplayCover.style.display = 'block';
@@ -5882,6 +6538,8 @@ export function initMusicPlayer() {
             btnSaveEditedSong.textContent = "Guardar Cambios";
             if (btnDeleteSong) btnDeleteSong.style.display = canCurrentUser('delete_songs') ? 'inline-block' : 'none';
         } else {
+            editingLyricColors = [];
+            editingLyricColorAssignments = {};
             editingTrackIndex = null;
             editSongDisplayCover.removeAttribute('src');
             editSongDisplayCover.style.display = 'none';
@@ -5894,6 +6552,7 @@ export function initMusicPlayer() {
             btnSaveEditedSong.textContent = "Añadir Canción";
             if (btnDeleteSong) btnDeleteSong.style.display = 'none';
         }
+        renderLyricColorPalette();
         originalEditLyrics = editInputLyrics.value;
         setEditorStatus(editLyricsStatus, '');
 
@@ -5952,6 +6611,38 @@ export function initMusicPlayer() {
     if (editInputLyrics) {
         editInputLyrics.addEventListener('input', updateEditLyricsPreview);
     }
+    if (btnAddLyricColor && inputNewLyricColor) {
+        btnAddLyricColor.addEventListener('click', () => {
+            const shouldOpen = lyricColorPicker?.hidden !== false;
+            if (lyricColorPicker) lyricColorPicker.hidden = !shouldOpen;
+            btnAddLyricColor.setAttribute('aria-expanded', String(shouldOpen));
+            if (shouldOpen) {
+                inputNewLyricColor.value = editingLyricColors.at(-1) || editInputColor?.value || '#ffffff';
+                updateLyricColorSelectionPreview();
+            }
+        });
+        inputNewLyricColor.addEventListener('input', updateLyricColorSelectionPreview);
+        inputNewLyricColor.addEventListener('change', updateLyricColorSelectionPreview);
+        btnConfirmLyricColor?.addEventListener('click', () => {
+            const color = selectedLyricColor;
+            if (!/^#[0-9a-f]{6}$/i.test(color)) return;
+            if (editingLyricColors.some(existing => existing.toLowerCase() === color)) {
+                setEditorStatus(editLyricsStatus, 'Ese color ya está en la paleta.');
+                return;
+            }
+            editingLyricColors.push(color);
+            renderLyricColorPalette();
+            setEditorStatus(editLyricsStatus, `Color ${editingLyricColors.length} agregado. Guarda los cambios de la canción para compartirlo.`);
+            updateEditLyricsPreview(false);
+            if (lyricColorPicker) lyricColorPicker.hidden = true;
+            btnAddLyricColor.setAttribute('aria-expanded', 'false');
+        });
+        btnCancelLyricColor?.addEventListener('click', () => {
+            if (lyricColorPicker) lyricColorPicker.hidden = true;
+            btnAddLyricColor.setAttribute('aria-expanded', 'false');
+        });
+    }
+    editInputColor?.addEventListener('input', renderLyricColorPalette);
     if (editInputMp3) {
         editInputMp3.addEventListener('change', () => {
             stopEditPreviewAudio();
@@ -6072,6 +6763,8 @@ export function initMusicPlayer() {
             lyricsForSave = trackBeingEdited.lyrics;
         }
         formData.append('lyrics', lyricsForSave);
+        formData.append('lyricColors', JSON.stringify(editingLyricColors));
+        formData.append('lyricColorAssignments', JSON.stringify(editingLyricColorAssignments));
         formData.append('duration', String(
             trackBeingEdited
                 ? Number(trackBeingEdited.duration) || 0
@@ -6481,7 +7174,7 @@ export function initMusicPlayer() {
             li.className = 'add-pl-item';
             li.innerHTML = `
                 ${createImageMarkup(getPlaylistCover(pl))}
-                <span>${pl.name}</span>
+                <span>${escapeHtml(pl.name)}</span>
                 ${alreadyAdded ? '<small class="playlist-membership-status">Ya está añadida</small>' : ''}
             `;
             li.addEventListener('click', () => {
@@ -6922,7 +7615,7 @@ export function initMusicPlayer() {
 
         const container = document.createElement('div');
         container.className = 'lyrics-container';
-        const lyricsBackgroundColor = track?.color || '#151515';
+        const lyricsBackgroundColor = safeColor(track?.color, '#151515');
         container.style.setProperty('--lyrics-color', lyricsBackgroundColor);
         const lyricsTextColor = getContrastingTextColor(lyricsBackgroundColor);
         container.style.setProperty('--lyrics-text-color', lyricsTextColor);
@@ -7035,7 +7728,11 @@ export function initMusicPlayer() {
         rememberLocalPlaybackActivity();
         suppressStartupPlaybackUpdates = false;
         const activeUser = getStoredUser();
-        if (activeUser?._id && !isRestoringInitialPlayback) {
+        if (currentTrackSource === 'together') {
+            listeningTogetherNeedsUserGesture = false;
+            updateListeningTogetherStatus();
+            playbackActivityUserId = null;
+        } else if (activeUser?._id && !isRestoringInitialPlayback) {
             playbackActivityUserId = String(activeUser._id);
         }
         sharedPlaybackPlaying = true;
@@ -7065,6 +7762,7 @@ export function initMusicPlayer() {
         persistOfflineListeningBuffer(true);
         sharedPlaybackPlaying = false;
         stopPlaybackStatusSync();
+        updateListeningTogetherControls();
         persistPlaybackPosition(true);
         broadcastPlaybackState(true);
         if (playbackUiFrame) {
@@ -7074,13 +7772,17 @@ export function initMusicPlayer() {
         btnPlayPause.querySelector('img').src = '/img/play.png'; 
         stopSpin(); 
         if (!isLoggingOut) updateUserStatus(true);
-        broadcastPlaybackState(true);
         if (isProfileMode) renderProfile();
     });
 
     audio.addEventListener('loadstart', () => {
         if (inlineSpinner) inlineSpinner.style.display = 'block';
         if (perroGif) perroGif.style.display = 'none';
+    });
+
+    audio.addEventListener('error', () => {
+        if (currentTrackSource !== 'together' || !isCurrentAudioSource(getCurrentTrack())) return;
+        stopFollowingUnavailablePlayback('No se pudo cargar la canción que estás siguiendo.');
     });
 
     audio.addEventListener('waiting', () => {
@@ -7169,12 +7871,12 @@ export function initMusicPlayer() {
             const currentItem = document.createElement('li');
             currentItem.className = 'queue-item active';
             currentItem.dataset.trackIndex = String(currentTrackIndex);
-            currentItem.style.setProperty('--track-color', currentTrack.color);
+            currentItem.style.setProperty('--track-color', safeColor(currentTrack.color));
             currentItem.innerHTML = `
                 ${createImageMarkup(getSongCover(currentTrack), 'queue-item-img')}
                 <div class="queue-item-info">
-                    <span class="queue-item-name">${currentTrack.name}</span>
-                    <span class="queue-item-artist">${currentTrack.artist}</span>
+                    <span class="queue-item-name">${escapeHtml(currentTrack.name)}</span>
+                    <span class="queue-item-artist">${escapeHtml(currentTrack.artist)}</span>
                 </div>
             `;
             queueList.appendChild(currentItem);
@@ -7183,26 +7885,30 @@ export function initMusicPlayer() {
         if (customQueue.length > 0) {
             const header = document.createElement('div');
             header.className = 'queue-header';
-            header.textContent = 'A continuación en la cola';
+            header.textContent = sharedQueueSessionId
+                ? 'A continuación en la cola · compartida'
+                : 'A continuación en la cola';
             queueList.appendChild(header);
 
             customQueue.forEach((track, idx) => {
+                const canManageQueue = !isFollowingPlayback();
                 const li = document.createElement('li');
                 li.className = 'queue-item';
                 li.dataset.songId = String(track._id || track.id || '');
-                li.style.setProperty('--track-color', track.color);
+                li.style.setProperty('--track-color', safeColor(track.color));
                 li.innerHTML = `
                     ${createImageMarkup(getSongCover(track), 'queue-item-img')}
                     <div class="queue-item-info">
-                        <span class="queue-item-name">${track.name}</span>
-                        <span class="queue-item-artist">${track.artist}</span>
+                        <span class="queue-item-name">${escapeHtml(track.name)}</span>
+                        <span class="queue-item-artist">${escapeHtml(track.artist)}</span>
                     </div>
-                    <button class="remove-queue-btn" type="button">
+                    ${canManageQueue ? `<button class="remove-queue-btn" type="button">
                         <img src="/img/cancel.png" draggable="false" class="no-drag" alt="">
-                    </button>
+                    </button>` : ''}
                 `;
                 li.addEventListener('click', (e) => {
                     e.stopPropagation();
+                    if (isFollowingPlayback()) return;
                     if (li.dataset.wasDragged === 'true') {
                         delete li.dataset.wasDragged;
                         return;
@@ -7224,7 +7930,7 @@ export function initMusicPlayer() {
                         loadAndPlayTrack(trackIndex, 'custom');
                     }
                 });
-                setupCustomQueueDrag(li, idx);
+                if (canManageQueue) setupCustomQueueDrag(li, idx);
                 queueList.appendChild(li);
             });
 
@@ -7245,12 +7951,12 @@ export function initMusicPlayer() {
                 li.dataset.queueSource = isShuffle ? 'shuffle' : 'regular';
                 li.dataset.queuePosition = position;
                 li.dataset.trackIndex = String(origIndex);
-                li.style.setProperty('--track-color', track.color);
+                li.style.setProperty('--track-color', safeColor(track.color));
                 li.innerHTML = `
                     ${createImageMarkup(getSongCover(track), 'queue-item-img')}
                     <div class="queue-item-info">
-                        <span class="queue-item-name">${track.name}</span>
-                        <span class="queue-item-artist">${track.artist}</span>
+                        <span class="queue-item-name">${escapeHtml(track.name)}</span>
+                        <span class="queue-item-artist">${escapeHtml(track.artist)}</span>
                     </div>
                 `;
                 setupSongMenuListeners(li, origIndex);
@@ -7263,9 +7969,11 @@ export function initMusicPlayer() {
             emptyQueue.textContent = 'NO HAY MÁS CANCIONES EN LA COLA';
             queueList.appendChild(emptyQueue);
         }
+        publishSharedQueueSnapshot();
     }
 
     function loadAndPlayTrack(index, source = 'regular', shouldPlay = true) {
+        if (isFollowingPlayback() && source !== 'together') return;
         if (index >= playlist.length) index = 0;
         if (index < 0) index = playlist.length - 1;
 
@@ -7274,6 +7982,8 @@ export function initMusicPlayer() {
         playbackActivityUserId = null;
         currentTrackIndex = index;
         currentTrackSource = source;
+        resetSynchronizedPlaybackRate();
+        updateListeningTogetherControls();
         const track = playlist[currentTrackIndex];
         if (!track) return;
         currentTrackId = track._id;
@@ -7328,7 +8038,12 @@ export function initMusicPlayer() {
         };
         if (offlineModeEnabled || offlineOnly) {
             setAudioSource().catch(error => {
-                if (sourceLoadToken !== audioSourceLoadToken || isExpectedAudioPlayInterruption(error)) return;
+                if (sourceLoadToken !== audioSourceLoadToken) return;
+                if (source === 'together') {
+                    stopFollowingUnavailablePlayback(error.message || 'No se pudo cargar la canción de tu amigo.');
+                    return;
+                }
+                if (isExpectedAudioPlayInterruption(error)) return;
                 showToast(error.message || 'No se pudo abrir la canción guardada.', true);
             });
         } else {
@@ -7351,7 +8066,7 @@ export function initMusicPlayer() {
         trackNameEl.textContent = track.name;
         trackArtistEl.textContent = track.artist;
         updateDiscordPresence();
-        bottomBar.style.setProperty('--track-color', track.color);
+        bottomBar.style.setProperty('--track-color', safeColor(track.color));
         const trackCover = getSongCover(track);
         bottomBarCover.src = trackCover;
         bottomBarCover.alt = trackCover ? '' : 'SIN IMG';
@@ -7371,8 +8086,14 @@ export function initMusicPlayer() {
         popupCover.src = trackCover;
         popupCover.alt = trackCover ? '' : 'SIN IMG';
         popupCover.classList.toggle('no-image', !trackCover);
-        popupSongName.innerHTML = `${track.name}<span class="popup-artist">${track.artist}</span>`;
-        playerPopup.style.setProperty('--track-color', track.color);
+        popupSongName.replaceChildren();
+        const songName = document.createElement('span');
+        songName.textContent = track.name || '';
+        const artistName = document.createElement('span');
+        artistName.className = 'popup-artist';
+        artistName.textContent = track.artist || '';
+        popupSongName.append(songName, artistName);
+        playerPopup.style.setProperty('--track-color', safeColor(track.color));
         playerPopup.classList.add('active');
 
         if (popupTimeout) clearTimeout(popupTimeout);
@@ -7380,6 +8101,7 @@ export function initMusicPlayer() {
     }
 
     function playNextTrack() {
+        if (isFollowingPlayback()) return;
         if (customQueue.length > 0) {
             const nextTrack = customQueue.shift();
             const idx = playlist.findIndex(t => t.path === nextTrack.path);
@@ -7413,7 +8135,7 @@ export function initMusicPlayer() {
     }
 
     function rewindTrack() {
-        if (audio.duration) {
+        if (!isFollowingPlayback() && audio.duration) {
             if (playbackUiFrame) {
                 cancelAnimationFrame(playbackUiFrame);
                 playbackUiFrame = null;
@@ -7426,7 +8148,7 @@ export function initMusicPlayer() {
     }
 
     function forwardTrack() {
-        if (audio.duration) {
+        if (!isFollowingPlayback() && audio.duration) {
             if (playbackUiFrame) {
                 cancelAnimationFrame(playbackUiFrame);
                 playbackUiFrame = null;
@@ -7472,6 +8194,7 @@ export function initMusicPlayer() {
         playNextTrack();
     });
     btnPrev.addEventListener('click', () => {
+        if (isFollowingPlayback()) return;
         const previous = playbackHistory.pop();
         if (!previous) {
             const currentPosition = activeQueueTracks.findIndex(track => playlist.indexOf(track) === currentTrackIndex);
@@ -7640,6 +8363,19 @@ export function initMusicPlayer() {
     });
 
     btnPlayPause.addEventListener('click', () => {
+        if (isFollowingPlayback()) {
+            if (listeningTogetherNeedsUserGesture) {
+                audio.play().catch(error => {
+                    if (error?.name === 'NotAllowedError') {
+                        updateListeningTogetherStatus();
+                        showToast('El navegador sigue bloqueando la reproducción. Comprueba los permisos de audio e inténtalo de nuevo.', true);
+                    } else if (!isExpectedAudioPlayInterruption(error)) {
+                        console.warn('No se pudo reanudar la reproducción sincronizada.', error);
+                    }
+                });
+            }
+            return;
+        }
         if (audio.paused) {
             audio.play().catch(error => {
                 if (!isExpectedAudioPlayInterruption(error)) {
@@ -7651,6 +8387,7 @@ export function initMusicPlayer() {
     });
 
     progressContainer.addEventListener('click', (e) => {
+        if (isFollowingPlayback()) return;
         const width = progressContainer.clientWidth;
         const clickX = e.offsetX;
         const duration = audio.duration;

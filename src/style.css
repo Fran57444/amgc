@@ -283,6 +283,7 @@ input, textarea, select {
 #perro-gif { position: absolute; left: 27px; bottom: 10px; width: 70px; pointer-events: none; z-index: 10; }
 
 #progress-container { width: 100%; height: 6px; background: rgba(255, 255, 255, 0.2); position: absolute; top: 0; left: 0; cursor: pointer; }
+#progress-container[aria-disabled="true"] { cursor: not-allowed; }
 #progress-bar { height: 100%; background: var(--track-color, #fff); width: 0%; box-shadow: 0 0 15px var(--track-color, #fff); transition: width 0.1s linear, background-color 0.5s ease, box-shadow 0.5s ease; }
 
 .bar-content { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 15px 30px; }
@@ -303,6 +304,7 @@ input, textarea, select {
 }
 .control-btn img { width: 24px; }
 .control-btn:hover { transform: scale(1.1); }
+.control-btn:disabled { cursor: not-allowed; opacity: 0.45; }
 .control-btn.active { background: radial-gradient(ellipse 20px 50% at 50% 40%, rgba(255, 255, 255, 0.25) 0%, rgba(255, 255, 255, 0.05) 40%, transparent 80%); transform: scale(1.1); }
 
 .nav-btn-large { font-size: 1.8rem !important; padding: 0 6px; }
@@ -686,6 +688,26 @@ input, textarea, select {
 .lyrics-editor-btn { width: auto !important; min-height: 38px; padding: 8px 13px !important; justify-content: center; font-size: 0.78rem !important; }
 .lyrics-editor-btn.secondary { border: 1px solid rgba(255,255,255,0.24); background: rgba(255,255,255,0.06); color: #fff; }
 .lyrics-editor-btn.secondary:hover { background: rgba(255,255,255,0.14); }
+.lyric-color-customization { position: relative; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.lyric-color-add { display: inline-flex; align-items: center; gap: 6px; min-height: 0; padding: 5px 9px; border: 1px solid rgba(255,255,255,0.2); border-radius: 999px; background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.86); font: inherit; font-size: 0.76rem; cursor: pointer; transition: background-color 0.2s ease, border-color 0.2s ease; }
+.lyric-color-add:hover, .lyric-color-add[aria-expanded="true"] { border-color: rgba(255,255,255,0.42); background: rgba(255,255,255,0.13); }
+.lyric-color-add img { width: 13px; height: 13px; object-fit: contain; }
+.lyric-color-picker { position: absolute; top: calc(100% + 8px); left: 0; z-index: 20; display: grid; grid-template-columns: auto auto; align-items: center; gap: 10px 14px; min-width: 220px; padding: 12px; border: 1px solid rgba(255,255,255,0.18); border-radius: 12px; background: #202020; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
+.lyric-color-picker[hidden] { display: none; }
+.lyric-color-picker > label { color: rgba(255,255,255,0.82); font-size: 0.78rem; }
+.lyric-color-picker input[type="color"] { width: 42px; height: 32px; padding: 2px; border: 1px solid rgba(255,255,255,0.25); border-radius: 7px; background: transparent; cursor: pointer; }
+.lyric-color-selection { display: flex; align-items: center; gap: 7px; color: rgba(255,255,255,0.85); font-size: 0.75rem; font-variant-numeric: tabular-nums; }
+.lyric-color-picker-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 7px; }
+.lyric-color-picker-actions button { padding: 6px 9px; border: 1px solid rgba(255,255,255,0.2); border-radius: 7px; background: rgba(255,255,255,0.06); color: #fff; font: inherit; font-size: 0.74rem; cursor: pointer; }
+.lyric-color-picker-actions .lyric-color-picker-confirm { border-color: #8e44ad; background: #8e44ad; }
+.lyric-color-picker-actions button:hover { filter: brightness(1.15); }
+.lyric-color-palette { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.lyric-color-swatch { display: inline-flex; align-items: center; gap: 6px; padding: 5px 8px; border: 1px solid rgba(255,255,255,0.16); border-radius: 999px; color: rgba(255,255,255,0.82); font-size: 0.76rem; }
+.lyric-color-sample { width: 13px; height: 13px; border: 1px solid rgba(255,255,255,0.55); border-radius: 50%; }
+.lyric-color-remove { display: inline-grid; place-items: center; width: 17px; height: 17px; margin-left: 2px; padding: 0; border: 0; border-radius: 50%; background: rgba(255,255,255,0.12); color: rgba(255,255,255,0.8); font: inherit; font-size: 0.9rem; line-height: 1; cursor: pointer; }
+.lyric-color-remove:hover { background: rgba(255,80,80,0.8); color: #fff; }
+.lyric-color-help { flex: 1 1 100%; color: rgba(255,255,255,0.62); font-size: 0.78rem; }
+.editor-preview-list .lyric-word { cursor: context-menu; }
 .lyrics-editor-status { min-height: 1.2em; color: #96d69b; font-size: 0.82rem; }
 .lyrics-editor-status.error { color: #ff8585; }
 .lyrics-editor-preview-heading { margin-top: 8px; color: rgba(255,255,255,0.65); font-size: 0.8rem; }

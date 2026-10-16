@@ -464,6 +464,24 @@ function App() {
                 <button id="btn-play-edited-song" className="main-play-btn lyrics-editor-btn secondary" type="button">Reproducir esta canción</button>
                 <button id="btn-insert-edit-lyric-time" className="main-play-btn lyrics-editor-btn secondary" type="button">Insertar tiempo actual</button>
               </div>
+              <div className="lyric-color-customization">
+                <button id="btn-add-lyric-color" className="lyric-color-add" type="button" aria-expanded="false" aria-controls="lyric-color-picker">
+                  <img src="/img/add.png" alt="" draggable="false" />
+                  <span>Agregar nuevo color</span>
+                </button>
+                <div id="lyric-color-picker" className="lyric-color-picker" hidden>
+                  <label htmlFor="input-new-lyric-color">Selecciona un color</label>
+                  <div className="lyric-color-selection">
+                    <input id="input-new-lyric-color" type="color" defaultValue="#ffffff" aria-label="Seleccionar nuevo color para las letras" />
+                    <span id="lyric-color-selection-value">#ffffff</span>
+                  </div>
+                  <div className="lyric-color-picker-actions">
+                    <button id="btn-confirm-lyric-color" className="lyric-color-picker-confirm" type="button">Confirmar color</button>
+                    <button id="btn-cancel-lyric-color" className="lyric-color-picker-cancel" type="button">Cancelar</button>
+                  </div>
+                </div>
+                <div id="lyric-color-palette" className="lyric-color-palette" aria-live="polite"></div>
+              </div>
               <textarea id="edit-input-lyrics" className="lyrics-editor-input" rows="9" placeholder="00:00.000 | Primera línea&#10;00:04.250 | Segunda *línea*"></textarea>
               <label className="lyrics-ready-option">
                 <input type="checkbox" id="edit-input-lyrics-ready" />

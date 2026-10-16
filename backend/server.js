@@ -10,6 +10,7 @@ import multer from 'multer';
 import { google } from 'googleapis';
 import fs from 'fs';
 import axios from 'axios';
+import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -247,6 +248,8 @@ const songSchema = new mongoose.Schema({
   color: String,
   lyrics: String,
   lyricsReady: { type: Boolean, default: false },
+  lyricColors: { type: [String], default: [] },
+  lyricColorAssignments: { type: mongoose.Schema.Types.Mixed, default: () => ({}) },
   duration: { type: Number, default: 0 },
   addedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   editedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
@@ -396,6 +399,19 @@ const messageSchema = new mongoose.Schema({
 });
 const Message = mongoose.model('Message', messageSchema);
 let realtimeIo = null;
+const listenTogetherQueueSessions = new Map();
+const listenTogetherQueueSessionByUser = new Map();
+
+function removeListenTogetherQueueSession(sessionId, notify = true) {
+  const session = listenTogetherQueueSessions.get(sessionId);
+  if (!session) return;
+  listenTogetherQueueSessions.delete(sessionId);
+  listenTogetherQueueSessionByUser.delete(session.hostId);
+  listenTogetherQueueSessionByUser.delete(session.followerId);
+  if (notify) {
+    realtimeIo?.to(session.room).emit('listenTogetherQueueSessionEnded', { sessionId });
+  }
+}
 
 function emitUserStatsChanged(userId) {
   if (!userId || !realtimeIo) return;
@@ -408,6 +424,19 @@ function emitUserStatsChanged(userId) {
       }
     })
     .catch(error => console.error('No se pudieron notificar las estadísticas actualizadas:', error));
+}
+
+function emitUserHistoryChanged(user) {
+  if (!user || !realtimeIo) return;
+  const userId = String(user._id);
+  const payload = {
+    userId,
+    lastPlayedHistory: user.lastPlayedHistory || []
+  };
+  realtimeIo.to(`user:${userId}`).emit('userHistoryChanged', payload);
+  for (const friendId of user.friends || []) {
+    realtimeIo.to(`user:${friendId}`).emit('userHistoryChanged', payload);
+  }
 }
 
 function emitUserChanged(userId) {
@@ -1199,6 +1228,9 @@ app.put('/api/users/:id', async (req, res) => {
 app.delete('/api/users/:id', async (req, res) => {
   try {
     if (!await authorizePermission(res, req.user, 'manage_users')) return;
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ error: 'Usuario no válido' });
+    }
     const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
 
@@ -1206,8 +1238,25 @@ app.delete('/api/users/:id', async (req, res) => {
       return res.status(400).json({ error: 'No puedes eliminar al administrador principal.' });
     }
 
-    await User.findByIdAndDelete(req.params.id);
-    realtimeIo?.to(`user:${req.params.id}`).emit('accountRemoved');
+    const affectedFriends = await User.find({ friends: user._id }).select('_id').lean();
+    const affectedPlaylists = await Playlist.find({ sharedWith: user._id }).select('id userId').lean();
+    await User.findByIdAndDelete(user._id);
+    await Promise.all([
+      User.updateMany({ friends: user._id }, { $pull: { friends: user._id } }),
+      Playlist.updateMany({ sharedWith: user._id }, { $pull: { sharedWith: user._id } })
+    ]);
+    realtimeIo?.to(`user:${user._id}`).emit('accountRemoved');
+    for (const friend of affectedFriends) {
+      realtimeIo?.to(`user:${friend._id}`).emit('friendsChanged');
+    }
+    for (const affectedPlaylist of affectedPlaylists) {
+      if (affectedPlaylist.userId) {
+        realtimeIo?.to(`user:${affectedPlaylist.userId}`).emit('playlistChanged', {
+          playlistId: affectedPlaylist.id,
+          changedBy: String(user._id)
+        });
+      }
+    }
     emitAdminUsersChanged();
     res.json({ success: true, message: 'Usuario eliminado correctamente' });
   } catch (err) {
@@ -1228,16 +1277,22 @@ app.post('/api/users/status', async (req, res) => {
       if (isOnline || activeSockets.length === 0) updateData.isOnline = isOnline;
     }
     let previousUser = null;
+    let shouldRecordHistory = false;
     if (lastPlayed) {
       previousUser = await User.findById(userId).select('lastPlayed lastPlayedHistory');
       const isNewSong = String(previousUser?.lastPlayed?.songId || '') !== String(lastPlayed.songId || '');
+      const playbackColor = typeof lastPlayed.color === 'string' && /^#[0-9a-f]{6}$/i.test(lastPlayed.color)
+        ? lastPlayed.color
+        : '#ff8a00';
       updateData.lastPlayed = {
         ...lastPlayed,
+        color: playbackColor,
         updatedAt: new Date()
       };
       const latestHistorySongId = previousUser?.lastPlayedHistory?.at(-1)?.songId;
-      const shouldRecordHistory = String(latestHistorySongId || '') !== String(lastPlayed.songId || '');
+      shouldRecordHistory = String(latestHistorySongId || '') !== String(lastPlayed.songId || '');
       if (shouldRecordHistory || !previousUser?.lastPlayedHistory?.length) {
+        shouldRecordHistory = true;
         updateData.$push = {
           lastPlayedHistory: {
             $each: [{
@@ -1245,7 +1300,7 @@ app.post('/api/users/status', async (req, res) => {
               songName: lastPlayed.songName,
               artist: lastPlayed.artist,
               cover: lastPlayed.cover,
-              color: lastPlayed.color,
+              color: playbackColor,
               playedAt: new Date()
             }],
             $slice: -20
@@ -1264,14 +1319,14 @@ app.post('/api/users/status', async (req, res) => {
     }
     const updatedUser = await User.findByIdAndUpdate(userId, updateData, {
       returnDocument: 'after'
-    }).select('friends isOnline lastPlayed lastActive').lean();
+    }).select('friends isOnline lastActive lastPlayedHistory').lean();
     if (lastPlayed) emitUserStatsChanged(userId);
+    if (shouldRecordHistory) emitUserHistoryChanged(updatedUser);
     if (updatedUser && (typeof isOnline === 'boolean' || lastPlayed)) {
       for (const friendId of updatedUser.friends || []) {
         realtimeIo?.to(`user:${friendId}`).emit('presenceChanged', {
           userId: String(updatedUser._id),
           isOnline: updatedUser.isOnline,
-          lastPlayed: updatedUser.lastPlayed,
           updatedAt: updatedUser.lastActive
         });
       }
@@ -1472,12 +1527,12 @@ app.get('/api/users/friends/:userId', async (req, res) => {
       }
     });
     if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
-    const friends = (user.friends || []).map(friend => {
+    const friends = (user.friends || []).filter(Boolean).map(friend => {
       const friendData = friend.toObject();
       if (friendData.profilePhoto && friendData.profilePhoto.includes('drive.google.com')) {
         friendData.profilePhoto = `${req.protocol}://${req.get('host')}/api/media/${extractDriveId(friendData.profilePhoto)}`;
       }
-      friendData.friends = (friendData.friends || []).map(nestedFriend => {
+      friendData.friends = (friendData.friends || []).filter(Boolean).map(nestedFriend => {
         if (nestedFriend.profilePhoto && nestedFriend.profilePhoto.includes('drive.google.com')) {
           nestedFriend.profilePhoto = `${req.protocol}://${req.get('host')}/api/media/${extractDriveId(nestedFriend.profilePhoto)}`;
         }
@@ -1499,20 +1554,21 @@ app.post('/api/users/friends/add', async (req, res) => {
     if (friend._id.toString() === userId) return res.status(400).json({ error: 'No puedes añadirte a ti mismo' });
 
     const user = await User.findById(userId);
-    const isNewFriend = !user.friends.some(id => String(id) === String(friend._id));
-    if (isNewFriend) {
-      user.friends.push(friend._id);
-      await user.save();
-    }
-    if (!friend.friends.includes(user._id)) {
-      friend.friends.push(user._id);
-      friend.stats.friendsAdded = (friend.stats.friendsAdded || 0) + 1;
-      await friend.save();
-    }
-    if (isNewFriend) {
-      user.stats.friendsAdded = (user.stats.friendsAdded || 0) + 1;
-      await user.save();
-    }
+    if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
+    await User.updateOne(
+      { _id: userId, friends: { $ne: friend._id } },
+      {
+        $addToSet: { friends: friend._id },
+        $inc: { 'stats.friendsAdded': 1 }
+      }
+    );
+    await User.updateOne(
+      { _id: friend._id, friends: { $ne: user._id } },
+      {
+        $addToSet: { friends: user._id },
+        $inc: { 'stats.friendsAdded': 1 }
+      }
+    );
 
     realtimeIo?.to(`user:${user._id}`).emit('friendsChanged');
     realtimeIo?.to(`user:${friend._id}`).emit('friendsChanged');
@@ -1809,6 +1865,52 @@ app.post('/api/songs', upload.fields([{ name: 'mp3' }, { name: 'cover' }]), asyn
     if (duplicateSong) {
       return res.status(409).json({ error: 'Ya existe una canción con este mismo nombre y artista.' });
     }
+    let lyricColors;
+    let lyricColorAssignments;
+    try {
+      lyricColors = req.body.lyricColors === undefined
+        ? undefined
+        : JSON.parse(req.body.lyricColors);
+      lyricColorAssignments = req.body.lyricColorAssignments === undefined
+        ? undefined
+        : JSON.parse(req.body.lyricColorAssignments);
+    } catch {
+      return res.status(400).json({ error: 'La personalización de color de las letras no tiene un formato válido.' });
+    }
+    if ((lyricColors === undefined) !== (lyricColorAssignments === undefined)) {
+      return res.status(400).json({ error: 'La paleta y las asignaciones de color de las letras deben enviarse juntas.' });
+    }
+    const isHexColor = value => typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value);
+    if (req.body.color !== undefined && !isHexColor(req.body.color)) {
+      return res.status(400).json({ error: 'El color de la canción no es válido.' });
+    }
+    if (lyricColors !== undefined && (
+      !Array.isArray(lyricColors)
+      || !lyricColors.every(isHexColor)
+      || new Set(lyricColors.map(color => color.toLowerCase())).size !== lyricColors.length
+    )) {
+      return res.status(400).json({ error: 'La paleta de colores de las letras no es válida.' });
+    }
+    if (lyricColorAssignments !== undefined && (
+      !lyricColorAssignments
+      || typeof lyricColorAssignments !== 'object'
+      || Array.isArray(lyricColorAssignments)
+      || Object.entries(lyricColorAssignments).some(([lineKey, words]) => (
+        !/^\d+:\d+(?:\.\d+)?$/.test(lineKey)
+        || !words
+        || typeof words !== 'object'
+        || Array.isArray(words)
+        || Object.entries(words).some(([wordIndex, color]) => (
+          !/^\d+$/.test(wordIndex)
+          || (color !== 'default' && (
+            !isHexColor(color)
+            || !lyricColors.some(paletteColor => paletteColor.toLowerCase() === color.toLowerCase())
+          ))
+        ))
+      ))
+    )) {
+      return res.status(400).json({ error: 'Las asignaciones de color de las letras no son válidas.' });
+    }
     let pathUrl = req.body.existingPath || '';
     let coverUrl = req.body.existingCover || '';
 
@@ -1842,7 +1944,9 @@ app.post('/api/songs', upload.fields([{ name: 'mp3' }, { name: 'cover' }]), asyn
       lyricsReady: req.body.lyricsReady === 'true',
       duration: Math.max(0, Number(req.body.duration) || 0),
       path: pathUrl,
-      cover: coverUrl
+      cover: coverUrl,
+      ...(lyricColors !== undefined ? { lyricColors } : {}),
+      ...(lyricColorAssignments !== undefined ? { lyricColorAssignments } : {})
     };
 
     let savedSong;
@@ -2282,11 +2386,13 @@ app.post('/api/playlists/:id/save', async (req, res) => {
     if (String(playlist.userId) === String(userId)) {
       return res.status(400).json({ error: 'El propietario ya tiene esta playlist' });
     }
-    const alreadySaved = (await User.exists({ _id: userId, savedPlaylists: playlist.id })) !== null;
-    if (!alreadySaved) {
-      await User.findByIdAndUpdate(userId, { $addToSet: { savedPlaylists: playlist.id } });
-      await User.findByIdAndUpdate(userId, { $inc: { 'stats.playlistsSaved': 1 } });
-    }
+    await User.updateOne(
+      { _id: userId, savedPlaylists: { $ne: playlist.id } },
+      {
+        $addToSet: { savedPlaylists: playlist.id },
+        $inc: { 'stats.playlistsSaved': 1 }
+      }
+    );
     const updatedUser = await User.findById(userId).select('savedPlaylists').lean();
     const savedCount = await User.countDocuments({ savedPlaylists: playlist.id });
     const saver = await User.findById(userId).select('username profilePhoto').lean();
@@ -2320,12 +2426,16 @@ app.delete('/api/playlists/:id/save', async (req, res) => {
     if (String(playlist.userId) === String(userId)) {
       return res.status(400).json({ error: 'El propietario no puede quitar su propia playlist' });
     }
-    const hasSavedPlaylist = (await User.exists({ _id: userId, savedPlaylists: playlist.id })) !== null;
-    if (!hasSavedPlaylist) {
+    const updateResult = await User.updateOne(
+      { _id: userId, savedPlaylists: playlist.id },
+      {
+        $pull: { savedPlaylists: playlist.id },
+        $inc: { 'stats.playlistsSaved': -1 }
+      }
+    );
+    if (!updateResult.modifiedCount) {
       return res.status(403).json({ error: 'No tienes guardada esta playlist' });
     }
-    await User.findByIdAndUpdate(userId, { $pull: { savedPlaylists: playlist.id } });
-    await User.findByIdAndUpdate(userId, { $inc: { 'stats.playlistsSaved': -1 } });
     const updatedUser = await User.findById(userId).select('savedPlaylists').lean();
     const savedCount = await User.countDocuments({ savedPlaylists: playlist.id });
     const saver = await User.findById(userId).select('username profilePhoto').lean();
@@ -2647,12 +2757,29 @@ const isMainModule = process.argv[1]
 if (isMainModule) {
   const requestedPort = process.env.PORT === '0' ? 0 : Number(process.env.PORT) || 5000;
   const host = desktopDownloaderOnly ? '127.0.0.1' : undefined;
-  const server = app.listen(requestedPort, host, () => {
-    const boundPort = server.address().port;
+  const server = createServer(app);
+  server.on('error', error => {
+    console.error('No se pudo iniciar el servidor HTTP.', {
+      port: requestedPort,
+      host: host || '0.0.0.0',
+      code: error.code,
+      message: error.message
+    });
+    process.exitCode = 1;
+  });
+  const onListening = () => {
+    const address = server.address();
+    if (!address || typeof address === 'string') {
+      console.error('El servidor informó que inició, pero no tiene una dirección TCP disponible.');
+      return;
+    }
+    const boundPort = address.port;
     console.log(desktopDownloaderOnly
       ? `amgc_DESKTOP_DOWNLOADER_READY:${boundPort}`
       : `Servidor corriendo en puerto ${boundPort}`);
-  });
+  };
+  if (host) server.listen(requestedPort, host, onListening);
+  else server.listen(requestedPort, onListening);
 
   if (!desktopDownloaderOnly) {
     const io = new SocketIOServer(server, {
@@ -2759,28 +2886,220 @@ if (isMainModule) {
       }
     });
 
+    socket.on('listenTogetherQueueSessionJoin', async ({ hostId } = {}, acknowledge = () => {}) => {
+      const followerId = authenticatedUserId;
+      const normalizedHostId = normalizeUserId(hostId);
+      if (!normalizedHostId || !isValidObjectId(normalizedHostId) || normalizedHostId === followerId) {
+        acknowledge({ success: false, error: 'El anfitrión no es válido.' });
+        return;
+      }
+      try {
+        const [follower, host] = await Promise.all([
+          User.findById(followerId).select('friends').lean(),
+          User.findById(normalizedHostId).select('friends').lean()
+        ]);
+        const areFriends = follower?.friends?.some(id => String(id) === normalizedHostId)
+          && host?.friends?.some(id => String(id) === followerId);
+        if (!areFriends) {
+          acknowledge({ success: false, error: 'Solo puedes compartir la cola con un amigo.' });
+          return;
+        }
+        const hostSockets = await io.in(`user:${normalizedHostId}`).fetchSockets();
+        const hostSocket = hostSockets[0];
+        if (!hostSocket) {
+          acknowledge({ success: false, error: 'El anfitrión no está conectado.' });
+          return;
+        }
+        const existingSessionId = listenTogetherQueueSessionByUser.get(followerId)
+          || listenTogetherQueueSessionByUser.get(normalizedHostId);
+        const existingSession = existingSessionId
+          ? listenTogetherQueueSessions.get(existingSessionId)
+          : null;
+        if (existingSession && (
+          existingSession.hostId !== normalizedHostId
+          || existingSession.followerId !== followerId
+        )) {
+          acknowledge({ success: false, error: 'Uno de los usuarios ya participa en otra cola compartida.' });
+          return;
+        }
+        const session = existingSession || (() => {
+          const sessionId = randomBytes(16).toString('hex');
+          const createdSession = {
+            sessionId,
+            hostId: normalizedHostId,
+            followerId,
+            hostSocketId: hostSocket.id,
+            followerSocketId: socket.id,
+            room: `listen-together-queue:${sessionId}`,
+            queueRevision: 0
+          };
+          listenTogetherQueueSessions.set(sessionId, createdSession);
+          listenTogetherQueueSessionByUser.set(normalizedHostId, sessionId);
+          listenTogetherQueueSessionByUser.set(followerId, sessionId);
+          return createdSession;
+        })();
+        session.hostSocketId = hostSocket.id;
+        session.followerSocketId = socket.id;
+        await Promise.all([hostSocket.join(session.room), socket.join(session.room)]);
+        hostSocket.emit('listenTogetherQueueSessionStarted', {
+          sessionId: session.sessionId,
+          peerId: followerId
+        });
+        acknowledge({ success: true, sessionId: session.sessionId });
+      } catch (error) {
+        console.error('No se pudo iniciar la cola compartida.', error);
+        acknowledge({ success: false, error: 'No se pudo iniciar la cola compartida.' });
+      }
+    });
+
+    socket.on('listenTogetherQueueSnapshotRequest', ({ sessionId } = {}, acknowledge = () => {}) => {
+      const session = listenTogetherQueueSessions.get(String(sessionId || ''));
+      if (
+        !session
+        || session.followerId !== authenticatedUserId
+        || session.followerSocketId !== socket.id
+      ) {
+        acknowledge({ success: false, error: 'No tienes permiso para consultar esta cola compartida.' });
+        return;
+      }
+      const hostSocket = io.sockets.sockets.get(session.hostSocketId);
+      if (!hostSocket) {
+        acknowledge({ success: false, error: 'El anfitrión se ha desconectado.' });
+        return;
+      }
+      hostSocket.emit('listenTogetherQueueSnapshotRequest', { sessionId: session.sessionId });
+      acknowledge({ success: true });
+    });
+
+    socket.on('listenTogetherQueueSnapshot', async ({ sessionId, songIds } = {}, acknowledge = () => {}) => {
+      const session = listenTogetherQueueSessions.get(String(sessionId || ''));
+      if (!session || session.hostId !== authenticatedUserId || session.hostSocketId !== socket.id) {
+        acknowledge({ success: false, error: 'No tienes permiso para actualizar esta cola compartida.' });
+        return;
+      }
+      if (!Array.isArray(songIds) || songIds.length > 5000 || songIds.some(id => !isValidObjectId(String(id)))) {
+        acknowledge({ success: false, error: 'La cola compartida contiene canciones no válidas.' });
+        return;
+      }
+      try {
+        const queueRevision = ++session.queueRevision;
+        const normalizedSongIds = songIds.map(id => String(id).toLowerCase());
+        const existingSongIds = new Set((await Song.find({ _id: { $in: normalizedSongIds } })
+          .select('_id')
+          .lean()).map(song => String(song._id)));
+        if (
+          listenTogetherQueueSessions.get(session.sessionId) !== session
+          || session.queueRevision !== queueRevision
+        ) {
+          acknowledge({ success: true });
+          return;
+        }
+        if (normalizedSongIds.some(id => !existingSongIds.has(id))) {
+          acknowledge({ success: false, error: 'La cola compartida contiene canciones que ya no están disponibles.' });
+          return;
+        }
+        io.to(session.room).emit('listenTogetherQueueSnapshot', {
+          sessionId: session.sessionId,
+          revision: queueRevision,
+          songIds: normalizedSongIds
+        });
+        acknowledge({ success: true });
+      } catch (error) {
+        console.error('No se pudo validar la cola compartida.', error);
+        acknowledge({ success: false, error: 'No se pudo validar la cola compartida.' });
+      }
+    });
+
+    socket.on('listenTogetherQueueAddRequest', async ({ sessionId, songId } = {}, acknowledge = () => {}) => {
+      const session = listenTogetherQueueSessions.get(String(sessionId || ''));
+      const normalizedSongId = String(songId || '');
+      if (
+        !session
+        || session.followerId !== authenticatedUserId
+        || session.followerSocketId !== socket.id
+        || !isValidObjectId(normalizedSongId)
+      ) {
+        acknowledge({ success: false, error: 'No hay una sesión válida para compartir la cola.' });
+        return;
+      }
+      try {
+        if (!(await Song.exists({ _id: normalizedSongId }))) {
+          acknowledge({ success: false, error: 'La canción ya no está disponible.' });
+          return;
+        }
+        const hostSocket = io.sockets.sockets.get(session.hostSocketId);
+        if (!hostSocket) {
+          acknowledge({ success: false, error: 'El anfitrión se ha desconectado.' });
+          return;
+        }
+        hostSocket.timeout(5000).emit(
+          'listenTogetherQueueAddRequest',
+          { sessionId: session.sessionId, songId: normalizedSongId },
+          (deliveryError, response) => {
+            if (deliveryError) {
+              acknowledge({ success: false, error: 'El anfitrión no pudo actualizar la cola.' });
+              return;
+            }
+            acknowledge(response || { success: false, error: 'No se pudo añadir la canción a la cola compartida.' });
+          }
+        );
+      } catch (error) {
+        console.error('No se pudo añadir una canción a la cola compartida.', error);
+        acknowledge({ success: false, error: 'No se pudo añadir la canción a la cola compartida.' });
+      }
+    });
+
+    socket.on('listenTogetherQueueSessionLeave', ({ sessionId } = {}) => {
+      const session = listenTogetherQueueSessions.get(String(sessionId || ''));
+      if (!session || ![session.hostId, session.followerId].includes(authenticatedUserId)) return;
+      if (
+        (session.hostId === authenticatedUserId && session.hostSocketId !== socket.id)
+        || (session.followerId === authenticatedUserId && session.followerSocketId !== socket.id)
+      ) return;
+      removeListenTogetherQueueSession(session.sessionId);
+    });
+
     socket.on('songChanged', async ({ excludeUserId, playback } = {}) => {
       const normalizedId = authenticatedUserId;
       if (!playback || typeof playback !== 'object' || Array.isArray(playback)) return;
-      const normalizedExcludeId = normalizeUserId(excludeUserId);
-      for (const friendId of socket.data.friendIds || []) {
-        if (normalizedExcludeId && friendId === normalizedExcludeId) continue;
-        io.to(`user:${friendId}`).emit('songChanged', {
-          userId: normalizedId,
-          playback: { ...playback, updatedAt: playback.updatedAt || new Date().toISOString() }
-        });
-      }
-      if (normalizedExcludeId && socket.data.friendIds?.includes(normalizedExcludeId)) {
-        io.to(`user:${normalizedExcludeId}`).emit('playbackStatusChanged', {
-          userId: normalizedId,
-          playback: { ...playback, updatedAt: playback.updatedAt || new Date().toISOString() }
-        });
+      try {
+        const friendIds = Array.isArray(socket.data.friendIds)
+          ? socket.data.friendIds
+          : await refreshFriendIds();
+        const normalizedExcludeId = normalizeUserId(excludeUserId);
+        const sharedPlayback = { ...playback, updatedAt: new Date().toISOString() };
+        for (const friendId of friendIds) {
+          if (normalizedExcludeId && friendId === normalizedExcludeId) continue;
+          io.to(`user:${friendId}`).emit('songChanged', {
+            userId: normalizedId,
+            playback: sharedPlayback
+          });
+        }
+        if (normalizedExcludeId && friendIds.includes(normalizedExcludeId)) {
+          io.to(`user:${normalizedExcludeId}`).emit('playbackStatusChanged', {
+            userId: normalizedId,
+            playback: sharedPlayback
+          });
+        }
+      } catch (error) {
+        console.error('No se pudo difundir el estado de reproducción.', error);
       }
     });
     socket.on('disconnect', async () => {
       clearTimeout(tokenExpiryTimer);
       const normalizedId = socket.data.userId;
       if (!normalizedId) return;
+      const queueSessionId = listenTogetherQueueSessionByUser.get(normalizedId);
+      const queueSession = queueSessionId ? listenTogetherQueueSessions.get(queueSessionId) : null;
+      if (
+        queueSession
+        && (
+          (queueSession.hostId === normalizedId && queueSession.hostSocketId === socket.id)
+          || (queueSession.followerId === normalizedId && queueSession.followerSocketId === socket.id)
+        )
+      ) {
+        removeListenTogetherQueueSession(queueSession.sessionId);
+      }
       const remainingSockets = [...io.sockets.sockets.values()]
         .some(activeSocket => activeSocket.data.userId === normalizedId);
       if (remainingSockets) return;
@@ -2789,12 +3108,11 @@ if (isMainModule) {
           normalizedId,
           { isOnline: false, lastActive: new Date() },
           { returnDocument: 'after' }
-        ).select('friends lastPlayed lastActive').lean();
+        ).select('friends lastActive').lean();
         for (const friendId of user?.friends || []) {
           io.to(`user:${friendId}`).emit('presenceChanged', {
             userId: normalizedId,
             isOnline: false,
-            lastPlayed: user.lastPlayed,
             updatedAt: user.lastActive
           });
         }
