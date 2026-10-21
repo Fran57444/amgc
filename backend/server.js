@@ -1881,7 +1881,8 @@ app.post('/api/songs', upload.fields([{ name: 'mp3' }, { name: 'cover' }]), asyn
       return res.status(400).json({ error: 'La paleta y las asignaciones de color de las letras deben enviarse juntas.' });
     }
     const isHexColor = value => typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value);
-    if (req.body.color !== undefined && !isHexColor(req.body.color)) {
+    const isSongColor = value => typeof value === 'string' && /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(value);
+    if (req.body.color !== undefined && !isSongColor(req.body.color)) {
       return res.status(400).json({ error: 'El color de la canción no es válido.' });
     }
     if (lyricColors !== undefined && (

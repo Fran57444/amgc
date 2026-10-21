@@ -1549,8 +1549,11 @@ export function initMusicPlayer() {
         '"': '&quot;',
         "'": '&#39;'
     })[character]);
+    const isValidSongColor = value => (
+        typeof value === 'string' && /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(value)
+    );
     const safeColor = (value, fallback = '#ff8a00') => (
-        typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value) ? value : fallback
+        isValidSongColor(value) ? value : fallback
     );
 
     const syncSecretPhrasesFromUser = (user) => {
@@ -6528,7 +6531,7 @@ export function initMusicPlayer() {
             }
             editInputName.value = track.name || '';
             editInputArtist.value = track.artist || '';
-            editInputColor.value = track.color || "#ffffff";
+            editInputColor.value = isValidSongColor(track.color) ? track.color.slice(0, 7) : "#ffffff";
             editInputLyrics.value = formatTrackLyricsForEditor(track);
             if (editInputLyricsReady) editInputLyricsReady.checked = track.lyricsReady === true;
             if (editSongMetadata) editSongMetadata.hidden = false;
@@ -6743,7 +6746,11 @@ export function initMusicPlayer() {
 
         formData.append('name', editInputName.value.trim() || 'Canción Sin Título');
         formData.append('artist', editInputArtist.value.trim() || 'Artista Desconocido');
-        formData.append('color', editInputColor.value);
+        const selectedSongColor = editInputColor.value;
+        const existingSongColor = trackBeingEdited?.color;
+        const colorWasUnchanged = isValidSongColor(existingSongColor)
+            && existingSongColor.slice(0, 7).toLowerCase() === selectedSongColor.toLowerCase();
+        formData.append('color', colorWasUnchanged ? existingSongColor : selectedSongColor);
         formData.append('lyricsReady', String(editInputLyricsReady?.checked === true));
         let lyricsForSave = editInputLyrics.value;
         if (lyricsForSave !== originalEditLyrics) {
