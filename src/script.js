@@ -585,6 +585,9 @@ export function initMusicPlayer() {
     const btnSaveSecretPhrases = document.getElementById("btn-save-secret-phrases");
     const secretPhrasesStatus = document.getElementById("secret-phrases-status");
     const allSongsPanel = document.getElementById("all-songs-panel");
+    const quickAddPanel = document.getElementById("quick-add-panel");
+    const quickAddSuggestionsList = document.getElementById("quick-add-suggestions-list");
+    const btnCloseQuickAdd = document.getElementById("btn-close-quick-add");
     const settingsPanel = document.getElementById("settings-panel");
     const adminPanel = document.getElementById("admin-panel");
     const allSongsList = document.getElementById("all-songs-list");
@@ -784,10 +787,12 @@ export function initMusicPlayer() {
     const btnConfirmDeleteSong = document.getElementById("btn-confirm-delete-song");
     const songImageEditWrapper = document.getElementById("song-image-edit-wrapper");
     const editSongPhoto = document.getElementById("edit-song-photo");
+    const editSongPhotoStatus = document.getElementById("edit-song-photo-status");
 
     const editPlaylistPanel = document.getElementById("edit-playlist-panel");
     const editPlDisplayCover = document.getElementById("edit-pl-display-cover");
     const editPlPhoto = document.getElementById("edit-pl-photo");
+    const editPlPhotoStatus = document.getElementById("edit-pl-photo-status");
     const plImageEditWrapper = document.getElementById("pl-image-edit-wrapper");
     const editPlName = document.getElementById("edit-pl-name");
     const editPlDesc = document.getElementById("edit-pl-desc");
@@ -4621,6 +4626,7 @@ export function initMusicPlayer() {
     
     let isLyricsMode = false;
     let isAllSongsMode = false;
+    let isQuickAddMode = false;
     let isPlaylistViewMode = false;
     let isEditSongMode = false;
     let isEditPlaylistMode = false;
@@ -6286,10 +6292,257 @@ export function initMusicPlayer() {
         setupSongMenuListeners,
         setupQueueAddSwipe,
         openEditSongPanel,
-        openSongSuggestion: suggestion => openEditSongPanel(null, suggestion),
+        openSongSuggestion: suggestion => openQuickAddPanel(suggestion),
         deleteSongSuggestion: suggestion => deleteSongSuggestion(suggestion),
         canEditSuggestions: () => canCurrentUser('edit_songs'),
         canDeleteSuggestions: () => canCurrentUser('delete_songs')
+    });
+
+    function openQuickAddPanel(selectedSuggestion = null) {
+        if (!canCurrentUser('edit_songs')) {
+            showToast('No tienes permiso para agregar canciones desde las sugerencias.', true);
+            return;
+        }
+        isLyricsMode = false;
+        isAllSongsMode = false;
+        isQuickAddMode = true;
+        isPlaylistViewMode = false;
+        isEditSongMode = false;
+        isEditPlaylistMode = false;
+        isSettingsMode = false;
+        isAdminMode = false;
+        isProfileMode = false;
+        renderQuickAddSuggestions();
+        updateBackgroundAndViews();
+        if (selectedSuggestion?._id) {
+            requestAnimationFrame(() => {
+                Array.from(quickAddSuggestionsList?.children || [])
+                    .find(item => item.dataset.suggestionId === String(selectedSuggestion._id))
+                    ?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+            });
+        }
+    }
+
+    function createQuickAddField(labelText, input) {
+        const label = document.createElement('label');
+        label.className = 'quick-add-field';
+        const labelTextElement = document.createElement('span');
+        labelTextElement.textContent = labelText;
+        label.append(labelTextElement, input);
+        return label;
+    }
+
+    function renderQuickAddSuggestions() {
+        if (!quickAddSuggestionsList) return;
+        if (!canCurrentUser('edit_songs')) {
+            quickAddSuggestionsList.replaceChildren();
+            return;
+        }
+
+        const fragment = document.createDocumentFragment();
+        if (!songSuggestions.length) {
+            const emptyMessage = document.createElement('li');
+            emptyMessage.className = 'quick-add-empty';
+            emptyMessage.textContent = 'No hay sugerencias pendientes.';
+            fragment.appendChild(emptyMessage);
+        }
+
+        songSuggestions.forEach(suggestion => {
+            const suggestionId = String(suggestion._id || '');
+            const card = document.createElement('li');
+            card.className = 'quick-add-card';
+            card.dataset.suggestionId = suggestionId;
+
+            const heading = document.createElement('div');
+            heading.className = 'quick-add-card-heading';
+            const headingText = document.createElement('div');
+            const title = document.createElement('h3');
+            title.textContent = suggestion.name || 'Canción sin nombre';
+            const artist = document.createElement('p');
+            artist.textContent = suggestion.artist || 'Artista desconocido';
+            headingText.append(title, artist);
+            const author = document.createElement('span');
+            author.className = 'quick-add-author';
+            author.textContent = `Sugerida por ${suggestion.suggestedByName || 'Desconocido'}`;
+            heading.append(headingText, author);
+
+            const form = document.createElement('div');
+            form.className = 'quick-add-card-form';
+            const imageWrapper = document.createElement('div');
+            imageWrapper.className = 'quick-add-cover image-dropzone';
+            imageWrapper.setAttribute('role', 'button');
+            imageWrapper.tabIndex = 0;
+            imageWrapper.setAttribute('aria-label', `Seleccionar o arrastrar una portada para ${suggestion.name || 'la canción'}`);
+            const imagePreview = document.createElement('img');
+            imagePreview.className = 'quick-add-cover-preview';
+            imagePreview.alt = '';
+            imagePreview.hidden = true;
+            const imagePlaceholder = document.createElement('span');
+            imagePlaceholder.className = 'quick-add-cover-placeholder';
+            imagePlaceholder.innerHTML = '<strong>+</strong><span>Seleccionar o arrastrar foto</span>';
+            const imageStatus = document.createElement('span');
+            imageStatus.className = 'image-drop-hint';
+            imageStatus.setAttribute('aria-live', 'polite');
+            imageStatus.textContent = 'Portada';
+            const imageInput = document.createElement('input');
+            imageInput.type = 'file';
+            imageInput.accept = 'image/*';
+            imageInput.hidden = true;
+            imageWrapper.append(imagePreview, imagePlaceholder, imageStatus, imageInput);
+
+            const details = document.createElement('div');
+            details.className = 'quick-add-details';
+            const nameInput = document.createElement('input');
+            nameInput.type = 'text';
+            nameInput.maxLength = 200;
+            nameInput.value = suggestion.name || '';
+            nameInput.required = true;
+            nameInput.setAttribute('aria-label', 'Nombre de la canción');
+            const artistInput = document.createElement('input');
+            artistInput.type = 'text';
+            artistInput.maxLength = 200;
+            artistInput.value = suggestion.artist || '';
+            artistInput.required = true;
+            artistInput.setAttribute('aria-label', 'Artista');
+            details.append(
+                createQuickAddField('NOMBRE', nameInput),
+                createQuickAddField('ARTISTA', artistInput)
+            );
+
+            const mediaRow = document.createElement('div');
+            mediaRow.className = 'quick-add-media-row';
+            const audioInput = document.createElement('input');
+            audioInput.type = 'file';
+            audioInput.accept = 'audio/*';
+            audioInput.setAttribute('aria-label', 'Seleccionar archivo MP3');
+            const youtubeInput = document.createElement('input');
+            youtubeInput.type = 'url';
+            youtubeInput.placeholder = 'O pega un enlace de YouTube...';
+            youtubeInput.setAttribute('aria-label', 'Enlace de YouTube');
+            mediaRow.append(
+                createQuickAddField('ARCHIVO MP3', audioInput),
+                createQuickAddField('YOUTUBE', youtubeInput)
+            );
+
+            const optionsRow = document.createElement('div');
+            optionsRow.className = 'quick-add-options-row';
+            const colorInput = document.createElement('input');
+            colorInput.type = 'color';
+            colorInput.value = '#ffffff';
+            colorInput.setAttribute('aria-label', 'Color predominante de la portada');
+            const colorField = createQuickAddField('COLOR', colorInput);
+            colorField.classList.add('quick-add-color-field');
+            const saveButton = document.createElement('button');
+            saveButton.type = 'button';
+            saveButton.className = 'main-play-btn quick-add-save';
+            saveButton.textContent = 'Agregar canción';
+            optionsRow.append(colorField, saveButton);
+
+            form.append(imageWrapper, details, mediaRow, optionsRow);
+            card.append(heading, form);
+            fragment.appendChild(card);
+
+            bindImageDropzone(imageWrapper, imageInput, imagePreview, imageStatus, colorInput, imagePlaceholder);
+            youtubeInput.addEventListener('input', () => {
+                if (youtubeInput.value.trim()) audioInput.value = '';
+            });
+            audioInput.addEventListener('change', () => {
+                if (audioInput.files?.[0]) youtubeInput.value = '';
+            });
+            saveButton.addEventListener('click', async () => {
+                if (saveButton.disabled) return;
+                const name = nameInput.value.trim();
+                const songArtist = artistInput.value.trim();
+                const youtubeLink = youtubeInput.value.trim();
+                const audioFile = audioInput.files?.[0];
+                const coverFile = imageInput.files?.[0];
+                if (!name || !songArtist) {
+                    showToast('Indica el nombre de la canción y su artista.', true);
+                    return;
+                }
+                if (!audioFile && !youtubeLink) {
+                    showToast('Selecciona un archivo MP3 o ingresa un enlace de YouTube.', true);
+                    return;
+                }
+                if (youtubeLink && !isValidYoutubeLink(youtubeLink)) {
+                    showToast('El enlace de YouTube no es válido.', true);
+                    youtubeInput.focus();
+                    return;
+                }
+
+                saveButton.disabled = true;
+                saveButton.textContent = 'Guardando...';
+                const formData = new FormData();
+                formData.append('name', name);
+                formData.append('artist', songArtist);
+                formData.append('color', colorInput.value);
+                formData.append('lyricsReady', 'false');
+                formData.append('lyrics', '');
+                formData.append('lyricColors', '[]');
+                formData.append('lyricColorAssignments', '{}');
+                formData.append('duration', '0');
+                const currentUser = getStoredUser();
+                if (currentUser?._id) formData.append('userId', currentUser._id);
+                if (coverFile) formData.append('cover', coverFile);
+
+                try {
+                    if (youtubeLink && desktopYoutubeDownloader) {
+                        startYtDownloadProgress('Añadiendo canción');
+                        showYoutubeLinkStatus('Descargando el audio desde este equipo...', false);
+                        const downloadedAudio = await desktopYoutubeDownloader(youtubeLink);
+                        formData.append(
+                            'mp3',
+                            new File([downloadedAudio.bytes], `${downloadedAudio.title}.mp3`, { type: 'audio/mpeg' })
+                        );
+                    } else if (youtubeLink) {
+                        formData.append('ytLink', youtubeLink);
+                    } else if (audioFile) {
+                        formData.append('mp3', audioFile);
+                    }
+
+                    const response = await apiFetch(`${API_URL}/songs`, { method: 'POST', body: formData });
+                    const result = await response.json().catch(() => null);
+                    if (!response.ok) throw new Error(result?.error || 'No se pudo agregar la canción.');
+                    if (!socket.connected) await fetchMusicData();
+
+                    try {
+                        const completionResponse = await apiFetch(
+                            `${API_URL}/song-suggestions/${encodeURIComponent(suggestionId)}/complete`,
+                            { method: 'POST' }
+                        );
+                        const completionResult = await completionResponse.json().catch(() => null);
+                        if (!completionResponse.ok) {
+                            throw new Error(completionResult?.error || 'No se pudo cerrar la sugerencia.');
+                        }
+                        songSuggestions = songSuggestions.filter(item => String(item._id) !== suggestionId);
+                        renderAllSongs();
+                        renderQuickAddSuggestions();
+                        showToast('Canción agregada y sugerencia completada.');
+                    } catch (error) {
+                        console.error('La canción se guardó, pero la sugerencia no se pudo cerrar.', error);
+                        showToast('La canción se guardó, pero no se pudo cerrar la sugerencia.', true);
+                    }
+                    if (youtubeLink) {
+                        stopYtDownloadProgress({ success: true, message: 'Canción guardada en la biblioteca' });
+                    }
+                } catch (error) {
+                    console.error('No se pudo agregar la canción sugerida.', error);
+                    if (youtubeLink) stopYtDownloadProgress({ success: false, message: error.message });
+                    showToast(error.message || 'No se pudo agregar la canción.', true);
+                } finally {
+                    saveButton.disabled = false;
+                    saveButton.textContent = 'Agregar canción';
+                }
+            });
+        });
+
+        quickAddSuggestionsList.replaceChildren(fragment);
+    }
+
+    btnCloseQuickAdd?.addEventListener('click', () => {
+        isQuickAddMode = false;
+        isAllSongsMode = true;
+        updateBackgroundAndViews();
     });
 
     async function loadSongSuggestions(reportError = true) {
@@ -6300,6 +6553,7 @@ export function initMusicPlayer() {
             if (!response.ok) throw new Error(result?.error || 'No se pudieron cargar las sugerencias.');
             songSuggestions = Array.isArray(result) ? result : [];
             renderAllSongs();
+            renderQuickAddSuggestions();
         } catch (error) {
             console.warn('No se pudieron actualizar las sugerencias de canciones.', error);
             if (reportError) showToast(error.message || 'No se pudieron cargar las sugerencias.', true);
@@ -6562,6 +6816,8 @@ export function initMusicPlayer() {
         editInputMp3.value = "";
         if (editInputFileName) editInputFileName.value = "";
         editSongPhoto.value = "";
+        editSongPhotoStatus.textContent = 'Haz clic o arrastra una imagen';
+        editSongPhotoStatus.classList.remove('error');
         if (editInputYt) editInputYt.value = "";
 
         isEditSongMode = true;
@@ -6701,22 +6957,142 @@ export function initMusicPlayer() {
         });
     }
 
-    if (songImageEditWrapper && editSongPhoto) {
-        songImageEditWrapper.addEventListener('click', () => {
-            editSongPhoto.click();
-        });
+    async function getDominantImageColor(imageFile) {
+        const bitmap = await createImageBitmap(imageFile);
+        try {
+            const scale = Math.min(1, 64 / Math.max(bitmap.width, bitmap.height));
+            const canvas = document.createElement('canvas');
+            canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+            canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+            const context = canvas.getContext('2d', { willReadFrequently: true });
+            if (!context) throw new Error('No se pudo analizar la portada.');
+            context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+            const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+            const buckets = new Map();
+            for (let index = 0; index < pixels.length; index += 4) {
+                if (pixels[index + 3] < 128) continue;
+                const red = pixels[index];
+                const green = pixels[index + 1];
+                const blue = pixels[index + 2];
+                const bucket = `${red >> 4},${green >> 4},${blue >> 4}`;
+                const colorBucket = buckets.get(bucket) || { count: 0, red: 0, green: 0, blue: 0 };
+                colorBucket.count += 1;
+                colorBucket.red += red;
+                colorBucket.green += green;
+                colorBucket.blue += blue;
+                buckets.set(bucket, colorBucket);
+            }
+            const dominant = Array.from(buckets.values()).sort((left, right) => right.count - left.count)[0];
+            if (!dominant) throw new Error('No se pudo determinar el color predominante de la portada.');
+            return `#${[dominant.red, dominant.green, dominant.blue]
+                .map(channel => Math.round(channel / dominant.count).toString(16).padStart(2, '0'))
+                .join('')}`;
+        } finally {
+            bitmap.close();
+        }
+    }
 
-        editSongPhoto.addEventListener('change', (e) => {
-            if (e.target.files && e.target.files[0]) {
-                const reader = new FileReader();
-                reader.onload = (ev) => {
-                    editSongDisplayCover.src = ev.target.result;
-                    editSongDisplayCover.style.display = 'block';
-                };
-                reader.readAsDataURL(e.target.files[0]);
+    function bindImageDropzone(wrapper, input, preview, status, colorInput = null, placeholder = null) {
+        if (!wrapper || !input || !preview || !status) {
+            throw new Error('No se pudo inicializar el selector de imágenes.');
+        }
+
+        const defaultHint = 'Haz clic o arrastra una imagen';
+        const clearDragState = () => wrapper.classList.remove('is-drag-over');
+        const previewSelectedImage = async () => {
+            const imageFile = input.files?.[0];
+            if (!imageFile) return;
+            if (!imageFile.type.startsWith('image/')) {
+                status.textContent = 'El archivo seleccionado no es una imagen.';
+                status.classList.add('error');
+                input.value = '';
+                return;
+            }
+
+            preview.hidden = false;
+            if (placeholder) placeholder.hidden = true;
+            let colorError = null;
+            if (colorInput) {
+                status.textContent = 'Calculando el color predominante...';
+                try {
+                    colorInput.value = await getDominantImageColor(imageFile);
+                } catch (error) {
+                    colorError = error;
+                    console.error('No se pudo determinar el color predominante de la portada.', error);
+                }
+            }
+
+            const reader = new FileReader();
+            reader.onload = event => {
+                if (typeof event.target?.result !== 'string') {
+                    status.textContent = 'No se pudo leer la imagen.';
+                    status.classList.add('error');
+                    return;
+                }
+                preview.src = event.target.result;
+                preview.style.display = 'block';
+                status.textContent = colorError
+                    ? 'Imagen lista, pero no se pudo calcular su color predominante.'
+                    : colorInput
+                        ? 'Imagen lista. Color predominante actualizado.'
+                        : 'Imagen lista. Arrastra otra para cambiarla.';
+                status.classList.toggle('error', Boolean(colorError));
+            };
+            reader.onerror = () => {
+                status.textContent = 'No se pudo leer la imagen.';
+                status.classList.add('error');
+            };
+            reader.readAsDataURL(imageFile);
+        };
+
+        wrapper.addEventListener('click', () => input.click());
+        wrapper.addEventListener('keydown', event => {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                input.click();
             }
         });
+        input.addEventListener('change', previewSelectedImage);
+
+        wrapper.addEventListener('dragenter', event => {
+            event.preventDefault();
+            if (Array.from(event.dataTransfer?.types || []).includes('Files')) {
+                wrapper.classList.add('is-drag-over');
+                status.textContent = 'Suelta la imagen aquí';
+                status.classList.remove('error');
+            }
+        });
+        wrapper.addEventListener('dragover', event => {
+            event.preventDefault();
+            if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+            wrapper.classList.add('is-drag-over');
+        });
+        wrapper.addEventListener('dragleave', event => {
+            if (!wrapper.contains(event.relatedTarget)) {
+                clearDragState();
+                status.textContent = defaultHint;
+            }
+        });
+        wrapper.addEventListener('drop', event => {
+            event.preventDefault();
+            clearDragState();
+            const imageFile = Array.from(event.dataTransfer?.files || [])
+                .find(file => file.type.startsWith('image/'));
+            if (!imageFile) {
+                status.textContent = 'Arrastra un archivo de imagen para continuar.';
+                status.classList.add('error');
+                return;
+            }
+
+            const transfer = new DataTransfer();
+            transfer.items.add(imageFile);
+            input.files = transfer.files;
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+        });
     }
+
+    bindImageDropzone(songImageEditWrapper, editSongPhoto, editSongDisplayCover, editSongPhotoStatus, editInputColor);
+    bindImageDropzone(plImageEditWrapper, editPlPhoto, editPlDisplayCover, editPlPhotoStatus);
 
     btnSaveEditedSong.addEventListener('click', async () => {
         if (songSaveInProgress) return;
@@ -6985,6 +7361,7 @@ export function initMusicPlayer() {
             btnDeletePl.dataset.confirmDelete = 'false';
             btnDeletePl.textContent = 'Eliminar Playlist';
         }
+        editPlPhoto.value = '';
         if (editingPlaylistId) {
             const pl = userPlaylists.find(p => p.id === editingPlaylistId);
             if (pl) {
@@ -7004,8 +7381,9 @@ export function initMusicPlayer() {
             editPlDesc.value = '';
             editPlDisplayCover.removeAttribute('src');
             editPlDisplayCover.style.display = 'none';
-            editPlPhoto.value = ''; 
         }
+        editPlPhotoStatus.textContent = 'Haz clic o arrastra una imagen';
+        editPlPhotoStatus.classList.remove('error');
         
         if (btnDeletePl) {
             const currentUser = getStoredUser();
@@ -7038,21 +7416,6 @@ export function initMusicPlayer() {
 
     btnEditPlaylist.addEventListener('click', () => {
         openEditPlaylistPanel(activePlaylistId);
-    });
-
-    plImageEditWrapper.addEventListener('click', () => {
-        editPlPhoto.click();
-    });
-
-    editPlPhoto.addEventListener('change', (e) => {
-        if (e.target.files && e.target.files[0]) {
-            const reader = new FileReader();
-            reader.onload = (ev) => {
-                editPlDisplayCover.src = ev.target.result;
-                editPlDisplayCover.style.display = 'block';
-            };
-            reader.readAsDataURL(e.target.files[0]);
-        }
     });
 
     btnSaveEditedPl.addEventListener('click', async () => {
@@ -7678,7 +8041,13 @@ export function initMusicPlayer() {
     }
 
     function updateBackgroundAndViews() {
-        const anyViewOpen = isLyricsMode || isAllSongsMode || isPlaylistViewMode || isEditSongMode || isEditPlaylistMode || isSettingsMode || isAdminMode || isProfileMode;
+        if (isQuickAddMode && (
+            isLyricsMode || isAllSongsMode || isPlaylistViewMode || isEditSongMode
+            || isEditPlaylistMode || isSettingsMode || isAdminMode || isProfileMode
+        )) {
+            isQuickAddMode = false;
+        }
+        const anyViewOpen = isLyricsMode || isAllSongsMode || isQuickAddMode || isPlaylistViewMode || isEditSongMode || isEditPlaylistMode || isSettingsMode || isAdminMode || isProfileMode;
         nowPlayingLyric?.classList.toggle('is-view-open', anyViewOpen);
         secretText?.classList.toggle('is-view-open', anyViewOpen);
         
@@ -7704,6 +8073,7 @@ export function initMusicPlayer() {
         
         if(lyricsPanel) lyricsPanel.classList.toggle('active', isLyricsMode);
         if(allSongsPanel) allSongsPanel.classList.toggle('active', isAllSongsMode);
+        if(quickAddPanel) quickAddPanel.classList.toggle('active', isQuickAddMode);
         if(plViewPanel) plViewPanel.classList.toggle('active', isPlaylistViewMode);
         if(editSongPanel) editSongPanel.classList.toggle('active', isEditSongMode);
         if(editPlaylistPanel) editPlaylistPanel.classList.toggle('active', isEditPlaylistMode);

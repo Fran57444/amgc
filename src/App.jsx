@@ -147,6 +147,18 @@ function App() {
           <ul id="all-songs-list"></ul>
         </div>
 
+        <div id="quick-add-panel" className="view-panel quick-add-panel">
+          <div className="quick-add-header">
+            <div>
+              <span className="quick-add-kicker">SUGERENCIAS</span>
+              <h2>Agregado de sugerencias</h2>
+              <p>Apartado creado para agilizar la adicion de las surgerencias.</p>
+            </div>
+            <button id="btn-close-quick-add" className="modal-btn-text" type="button">Volver a canciones</button>
+          </div>
+          <ul id="quick-add-suggestions-list" className="quick-add-suggestions-list"></ul>
+        </div>
+
         <div id="profile-panel" className="view-panel">
           <div className="view-header-bar">
             <div className="profile-panel-heading">
@@ -404,7 +416,7 @@ function App() {
         <div id="edit-song-panel" className="view-panel">
           <div className="edit-song-container">
             <div className="edit-song-top">
-              <div className="edit-song-preview pl-image-edit-wrapper" id="song-image-edit-wrapper">
+              <div className="edit-song-preview pl-image-edit-wrapper image-dropzone" id="song-image-edit-wrapper" role="button" tabIndex={0} aria-label="Seleccionar o arrastrar una imagen para la canción">
                 <img id="edit-song-display-cover" src={null} alt="" />
                 <div className="pl-image-placeholder">
                   <img src="/img/add.png" alt="Añadir foto" />
@@ -413,6 +425,7 @@ function App() {
                 <div className="pl-image-edit-overlay">
                     <img src="/img/edit.png" alt="Editar" />
                 </div>
+                <span id="edit-song-photo-status" className="image-drop-hint" aria-live="polite">Haz clic o arrastra una imagen</span>
                 <input type="file" id="edit-song-photo" accept="image/*" style={{display: 'none'}} />
               </div>
               <div id="edit-song-metadata" className="edit-song-metadata" hidden>
@@ -513,7 +526,7 @@ function App() {
         <div id="edit-playlist-panel" className="view-panel">
           <div className="edit-song-container">
             <div className="edit-song-top">
-              <div className="edit-song-preview pl-image-edit-wrapper" id="pl-image-edit-wrapper">
+              <div className="edit-song-preview pl-image-edit-wrapper image-dropzone" id="pl-image-edit-wrapper" role="button" tabIndex={0} aria-label="Seleccionar o arrastrar una imagen para la playlist">
                 <img id="edit-pl-display-cover" src={null} alt="" />
                 <div className="pl-image-placeholder">
                   <img src="/img/add.png" alt="Añadir foto" />
@@ -522,6 +535,7 @@ function App() {
                 <div className="pl-image-edit-overlay">
                     <img src="/img/edit.png" alt="Editar" />
                 </div>
+                <span id="edit-pl-photo-status" className="image-drop-hint" aria-live="polite">Haz clic o arrastra una imagen</span>
                 <input type="file" id="edit-pl-photo" accept="image/*" style={{display: 'none'}} />
               </div>
 

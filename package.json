@@ -12,6 +12,12 @@
     "desktop:dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5163 && electron . --dev\"",
     "desktop:build": "npm run build && electron-builder --win nsis",
     "desktop:publish": "npm run build && electron-builder --win nsis --publish always",
+    "mobile:build": "vite build mobile --config vite.config.js",
+    "android:add": "cap add android",
+    "android:sync": "npm run mobile:build && cap sync android",
+    "android:build": "npm run android:sync && cd android && gradlew.bat assembleDebug",
+    "android:open": "cap open android",
+    "android:run": "npm run android:sync && cap run android",
     "build:vercel": "vite build --mode vercel",
     "oauth:token": "node backend/generate-oauth-token.js",
     "build": "vite build",
@@ -52,6 +58,8 @@
     }
   },
   "dependencies": {
+    "@capacitor/android": "^8.3.0",
+    "@capacitor/core": "^8.3.0",
     "@distube/ytdl-core": "^4.16.12",
     "axios": "^1.20.0",
     "bcryptjs": "^3.0.3",
@@ -77,6 +85,7 @@
     "ytdl-core": "^4.11.5"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.3.0",
     "@babel/core": "^7.29.7",
     "@rolldown/plugin-babel": "^0.2.3",
     "@types/react": "^19.2.18",

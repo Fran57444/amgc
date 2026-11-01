@@ -10,6 +10,8 @@ node_modules
 dist
 dist-ssr
 dist-electron
+mobile/
+android/
 .vercel
 tmp
 *.local
