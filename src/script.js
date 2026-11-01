@@ -6339,6 +6339,10 @@ export function initMusicPlayer() {
             return;
         }
 
+        const existingCards = new Map(
+            Array.from(quickAddSuggestionsList.querySelectorAll('.quick-add-card'))
+                .map(card => [card.dataset.suggestionId, card])
+        );
         const fragment = document.createDocumentFragment();
         if (!songSuggestions.length) {
             const emptyMessage = document.createElement('li');
@@ -6349,6 +6353,12 @@ export function initMusicPlayer() {
 
         songSuggestions.forEach(suggestion => {
             const suggestionId = String(suggestion._id || '');
+            const existingCard = existingCards.get(suggestionId);
+            if (existingCard) {
+                fragment.appendChild(existingCard);
+                return;
+            }
+
             const card = document.createElement('li');
             card.className = 'quick-add-card';
             card.dataset.suggestionId = suggestionId;
@@ -6432,11 +6442,14 @@ export function initMusicPlayer() {
             colorInput.setAttribute('aria-label', 'Color predominante de la portada');
             const colorField = createQuickAddField('COLOR', colorInput);
             colorField.classList.add('quick-add-color-field');
+            const uploadStatus = document.createElement('span');
+            uploadStatus.className = 'quick-add-upload-status';
+            uploadStatus.setAttribute('aria-live', 'polite');
             const saveButton = document.createElement('button');
             saveButton.type = 'button';
             saveButton.className = 'main-play-btn quick-add-save';
             saveButton.textContent = 'Agregar canción';
-            optionsRow.append(colorField, saveButton);
+            optionsRow.append(colorField, uploadStatus, saveButton);
 
             form.append(imageWrapper, details, mediaRow, optionsRow);
             card.append(heading, form);
@@ -6471,7 +6484,7 @@ export function initMusicPlayer() {
                 }
 
                 saveButton.disabled = true;
-                saveButton.textContent = 'Guardando...';
+                uploadStatus.textContent = 'Agregando canción...';
                 const formData = new FormData();
                 formData.append('name', name);
                 formData.append('artist', songArtist);
@@ -6484,11 +6497,9 @@ export function initMusicPlayer() {
                 const currentUser = getStoredUser();
                 if (currentUser?._id) formData.append('userId', currentUser._id);
                 if (coverFile) formData.append('cover', coverFile);
-
                 try {
                     if (youtubeLink && desktopYoutubeDownloader) {
-                        startYtDownloadProgress('Añadiendo canción');
-                        showYoutubeLinkStatus('Descargando el audio desde este equipo...', false);
+                        uploadStatus.textContent = 'Descargando audio...';
                         const downloadedAudio = await desktopYoutubeDownloader(youtubeLink);
                         formData.append(
                             'mp3',
@@ -6500,12 +6511,14 @@ export function initMusicPlayer() {
                         formData.append('mp3', audioFile);
                     }
 
+                    uploadStatus.textContent = 'Subiendo canción...';
                     const response = await apiFetch(`${API_URL}/songs`, { method: 'POST', body: formData });
                     const result = await response.json().catch(() => null);
                     if (!response.ok) throw new Error(result?.error || 'No se pudo agregar la canción.');
                     if (!socket.connected) await fetchMusicData();
 
                     try {
+                        uploadStatus.textContent = 'Completando sugerencia...';
                         const completionResponse = await apiFetch(
                             `${API_URL}/song-suggestions/${encodeURIComponent(suggestionId)}/complete`,
                             { method: 'POST' }
@@ -6522,16 +6535,13 @@ export function initMusicPlayer() {
                         console.error('La canción se guardó, pero la sugerencia no se pudo cerrar.', error);
                         showToast('La canción se guardó, pero no se pudo cerrar la sugerencia.', true);
                     }
-                    if (youtubeLink) {
-                        stopYtDownloadProgress({ success: true, message: 'Canción guardada en la biblioteca' });
-                    }
                 } catch (error) {
                     console.error('No se pudo agregar la canción sugerida.', error);
-                    if (youtubeLink) stopYtDownloadProgress({ success: false, message: error.message });
                     showToast(error.message || 'No se pudo agregar la canción.', true);
                 } finally {
                     saveButton.disabled = false;
                     saveButton.textContent = 'Agregar canción';
+                    uploadStatus.textContent = '';
                 }
             });
         });
@@ -6968,24 +6978,53 @@ export function initMusicPlayer() {
             if (!context) throw new Error('No se pudo analizar la portada.');
             context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
             const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
-            const buckets = new Map();
+            const colorBuckets = new Map();
+            const neutralBuckets = new Map();
+            const allBuckets = new Map();
+            const addToBucket = (buckets, red, green, blue, weight = 1) => {
+                const bucket = `${red >> 4},${green >> 4},${blue >> 4}`;
+                const colorBucket = buckets.get(bucket) || {
+                    weight: 0,
+                    red: 0,
+                    green: 0,
+                    blue: 0
+                };
+                colorBucket.weight += weight;
+                colorBucket.red += red * weight;
+                colorBucket.green += green * weight;
+                colorBucket.blue += blue * weight;
+                buckets.set(bucket, colorBucket);
+            };
             for (let index = 0; index < pixels.length; index += 4) {
                 if (pixels[index + 3] < 128) continue;
                 const red = pixels[index];
                 const green = pixels[index + 1];
                 const blue = pixels[index + 2];
-                const bucket = `${red >> 4},${green >> 4},${blue >> 4}`;
-                const colorBucket = buckets.get(bucket) || { count: 0, red: 0, green: 0, blue: 0 };
-                colorBucket.count += 1;
-                colorBucket.red += red;
-                colorBucket.green += green;
-                colorBucket.blue += blue;
-                buckets.set(bucket, colorBucket);
+                const brightness = Math.max(red, green, blue) / 255;
+                const saturation = brightness === 0
+                    ? 0
+                    : (brightness - Math.min(red, green, blue) / 255) / brightness;
+                if (brightness >= 0.14 && saturation >= 0.2) {
+                    const weight = saturation ** 1.5 * brightness;
+                    addToBucket(colorBuckets, red, green, blue, weight);
+                }
+
+                addToBucket(allBuckets, red, green, blue);
+                const luminance = red * 0.2126 + green * 0.7152 + blue * 0.0722;
+                if (luminance >= 12 && luminance <= 243) {
+                    addToBucket(neutralBuckets, red, green, blue);
+                }
             }
-            const dominant = Array.from(buckets.values()).sort((left, right) => right.count - left.count)[0];
+            const buckets = colorBuckets.size
+                ? colorBuckets
+                : neutralBuckets.size
+                    ? neutralBuckets
+                    : allBuckets;
+            const dominant = Array.from(buckets.values())
+                .sort((left, right) => right.weight - left.weight)[0];
             if (!dominant) throw new Error('No se pudo determinar el color predominante de la portada.');
             return `#${[dominant.red, dominant.green, dominant.blue]
-                .map(channel => Math.round(channel / dominant.count).toString(16).padStart(2, '0'))
+                .map(channel => Math.round(channel / dominant.weight).toString(16).padStart(2, '0'))
                 .join('')}`;
         } finally {
             bitmap.close();
