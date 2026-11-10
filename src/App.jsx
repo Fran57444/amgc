@@ -144,6 +144,18 @@ function App() {
               <img src="/img/play.png" draggable="false" className="no-drag" alt="Reproducir todas" width="20" />
             </button>
           </div>
+          <details id="spotify-likes-section" className="spotify-likes-section">
+            <summary>Mis Me gusta de Spotify</summary>
+            <div className="spotify-likes-toolbar">
+              <span id="spotify-likes-status" className="lyrics-editor-status" aria-live="polite">Conecta Spotify para cargar tus canciones guardadas.</span>
+              <button id="spotify-connect-button" className="modal-btn-text" type="button">Conectar Spotify</button>
+              <button id="spotify-refresh-button" className="modal-btn-text" type="button" hidden>Actualizar lista</button>
+              <button id="spotify-disconnect-button" className="modal-btn-text" type="button" hidden>Desconectar</button>
+              <button id="spotify-import-button" className="main-play-btn" type="button" hidden>Importar seleccionadas como sugerencias</button>
+            </div>
+            <input id="spotify-likes-search" className="all-songs-search" type="search" placeholder="Buscar canción o artista en Spotify..." aria-label="Buscar canción o artista en tus Me gusta de Spotify" hidden />
+            <ul id="spotify-likes-list" className="spotify-likes-list"></ul>
+          </details>
           <ul id="all-songs-list"></ul>
         </div>
 

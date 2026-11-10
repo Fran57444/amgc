@@ -19,6 +19,14 @@ services:
         sync: false
       - key: GOOGLE_OAUTH_TOKEN_JSON
         sync: false
+      - key: SPOTIFY_CLIENT_ID
+        sync: false
+      - key: SPOTIFY_CLIENT_SECRET
+        sync: false
+      - key: SPOTIFY_REDIRECT_URI
+        sync: false
+      - key: YOUTUBE_API_KEY
+        sync: false
       - key: INITIAL_ADMIN_USERNAME
         sync: false
       - key: INITIAL_ADMIN_PASSWORD

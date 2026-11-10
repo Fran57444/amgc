@@ -21,7 +21,13 @@ import ffmpegPath from 'ffmpeg-static';
 import { Server as SocketIOServer } from 'socket.io';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import {
+  createCipheriv,
+  createDecipheriv,
+  randomBytes,
+  scryptSync,
+  timingSafeEqual
+} from 'node:crypto';
 
 const desktopDownloaderOnly = process.env.amgc_DESKTOP_DOWNLOADER === 'true';
 if (!desktopDownloaderOnly) dotenv.config();
@@ -38,6 +44,7 @@ if (!jwtSecret) {
 if (jwtSecret.length < 32) {
   throw new Error('JWT_SECRET debe contener al menos 32 caracteres.');
 }
+const spotifyEncryptionKey = scryptSync(jwtSecret, 'amgc-spotify-refresh-token', 32);
 const JWT_EXPIRES_IN = '7d';
 let passwordMigrationComplete = false;
 let databaseInitializationPromise = null;
@@ -178,7 +185,10 @@ const userSchema = new mongoose.Schema({
     lastPlayedAt: Date
   },
   friends: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
-  profilePhoto: { type: String, default: '' }
+  profilePhoto: { type: String, default: '' },
+  spotify: {
+    refreshTokenEncrypted: { type: String, select: false }
+  }
 }, { timestamps: true });
 
 const User = mongoose.model('User', userSchema);
@@ -261,10 +271,102 @@ const Song = mongoose.model('Song', songSchema);
 const songSuggestionSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true, maxlength: 200 },
   artist: { type: String, required: true, trim: true, maxlength: 200 },
+  coverUrl: { type: String, trim: true, maxlength: 2048, default: '' },
+  spotifyTrackId: { type: String, trim: true, maxlength: 64, default: undefined },
   suggestedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   suggestedByName: { type: String, required: true }
 }, { timestamps: true });
 const SongSuggestion = mongoose.model('SongSuggestion', songSuggestionSchema);
+
+function getSpotifyConfiguration() {
+  const clientId = process.env.SPOTIFY_CLIENT_ID?.trim();
+  const clientSecret = process.env.SPOTIFY_CLIENT_SECRET?.trim();
+  const redirectUri = process.env.SPOTIFY_REDIRECT_URI?.trim();
+  return clientId && clientSecret && redirectUri ? { clientId, clientSecret, redirectUri } : null;
+}
+
+function encryptSpotifyRefreshToken(refreshToken) {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', spotifyEncryptionKey, iv);
+  const encrypted = Buffer.concat([cipher.update(refreshToken, 'utf8'), cipher.final()]);
+  return [iv, cipher.getAuthTag(), encrypted].map(value => value.toString('base64url')).join('.');
+}
+
+function decryptSpotifyRefreshToken(encryptedToken) {
+  const [iv, authTag, encrypted] = String(encryptedToken || '').split('.');
+  if (!iv || !authTag || !encrypted) throw new Error('La conexión de Spotify no es válida; vuelve a vincular la cuenta.');
+  const decipher = createDecipheriv('aes-256-gcm', spotifyEncryptionKey, Buffer.from(iv, 'base64url'));
+  decipher.setAuthTag(Buffer.from(authTag, 'base64url'));
+  return Buffer.concat([
+    decipher.update(Buffer.from(encrypted, 'base64url')),
+    decipher.final()
+  ]).toString('utf8');
+}
+
+async function getSpotifyAccessToken(user) {
+  const configuration = getSpotifyConfiguration();
+  if (!configuration) {
+    const error = new Error('Spotify no está configurado en el servidor.');
+    error.statusCode = 503;
+    throw error;
+  }
+  const linkedUser = await User.findById(user._id).select('+spotify.refreshTokenEncrypted');
+  if (!linkedUser?.spotify?.refreshTokenEncrypted) {
+    const error = new Error('Primero conecta tu cuenta de Spotify.');
+    error.statusCode = 409;
+    throw error;
+  }
+  const refreshToken = decryptSpotifyRefreshToken(linkedUser.spotify.refreshTokenEncrypted);
+  const response = await axios.post(
+    'https://accounts.spotify.com/api/token',
+    new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken }),
+    {
+      auth: { username: configuration.clientId, password: configuration.clientSecret },
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      timeout: 15000
+    }
+  );
+  if (response.data.refresh_token) {
+    linkedUser.spotify.refreshTokenEncrypted = encryptSpotifyRefreshToken(response.data.refresh_token);
+    await linkedUser.save();
+  }
+  return response.data.access_token;
+}
+
+async function fetchSpotifyLikedTracks(accessToken) {
+  const tracks = [];
+  let offset = 0;
+  while (offset < 1000) {
+    const response = await axios.get('https://api.spotify.com/v1/me/tracks', {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      params: { limit: 50, offset },
+      timeout: 15000
+    });
+    const items = response.data.items || [];
+    tracks.push(...items.map(item => item.track).filter(track => track && !track.is_local));
+    if (!response.data.next || !items.length) break;
+    offset += items.length;
+  }
+  return tracks;
+}
+
+const spotifyLikedTracksCache = new Map();
+
+async function getSpotifyLikedTracksForUser(userId, accessToken, refresh = false) {
+  const cacheKey = String(userId);
+  const cached = spotifyLikedTracksCache.get(cacheKey);
+  if (!refresh && cached && Date.now() - cached.cachedAt < 60_000) return cached.tracks;
+  const tracks = await fetchSpotifyLikedTracks(accessToken);
+  const now = Date.now();
+  for (const [key, entry] of spotifyLikedTracksCache) {
+    if (now - entry.cachedAt >= 60_000) spotifyLikedTracksCache.delete(key);
+  }
+  if (spotifyLikedTracksCache.size >= 100) {
+    spotifyLikedTracksCache.delete(spotifyLikedTracksCache.keys().next().value);
+  }
+  spotifyLikedTracksCache.set(cacheKey, { tracks, cachedAt: now });
+  return tracks;
+}
 
 function normalizeSongMetadata(value) {
   return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLocaleLowerCase('es');
@@ -324,7 +426,8 @@ function normalizeUserId(value) {
 const publicApiRoutes = new Set([
   'POST /auth/login',
   'GET /songs',
-  'GET /health'
+  'GET /health',
+  'GET /spotify/callback'
 ]);
 
 app.use('/api', async (_req, res, next) => {
@@ -1754,11 +1857,223 @@ app.post('/api/discord/artwork-url', async (req, res) => {
   }
 });
 
+app.get('/api/spotify/status', async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id).select('+spotify.refreshTokenEncrypted').lean();
+    res.json({
+      configured: Boolean(getSpotifyConfiguration()),
+      connected: Boolean(user?.spotify?.refreshTokenEncrypted)
+    });
+  } catch (error) {
+    console.error('No se pudo consultar la conexión de Spotify.', error);
+    res.status(500).json({ error: 'No se pudo consultar la conexión de Spotify.' });
+  }
+});
+
+app.post('/api/spotify/connect', async (req, res) => {
+  const configuration = getSpotifyConfiguration();
+  if (!configuration) {
+    return res.status(503).json({ error: 'Spotify no está configurado en el servidor.' });
+  }
+  const state = jwt.sign({ purpose: 'spotify_oauth' }, jwtSecret, {
+    subject: String(req.user._id),
+    expiresIn: '10m'
+  });
+  const authorizationUrl = new URL('https://accounts.spotify.com/authorize');
+  authorizationUrl.search = new URLSearchParams({
+    client_id: configuration.clientId,
+    response_type: 'code',
+    redirect_uri: configuration.redirectUri,
+    scope: 'user-library-read',
+    state
+  }).toString();
+  res.json({ authorizationUrl: authorizationUrl.toString() });
+});
+
+app.get('/api/spotify/callback', async (req, res) => {
+  const redirectToApp = result => {
+    const appUrl = process.env.PUBLIC_APP_URL
+      || (process.env.NODE_ENV === 'production' ? '' : 'http://localhost:5173');
+    if (!appUrl) return res.status(503).send('PUBLIC_APP_URL no está configurado.');
+    const redirectUrl = new URL(appUrl);
+    redirectUrl.searchParams.set('spotify', result);
+    return res.redirect(302, redirectUrl.toString());
+  };
+  try {
+    if (typeof req.query.error === 'string') return redirectToApp('error');
+    const code = typeof req.query.code === 'string' ? req.query.code : '';
+    const state = typeof req.query.state === 'string' ? req.query.state : '';
+    if (!code || !state) return redirectToApp('error');
+    const statePayload = jwt.verify(state, jwtSecret);
+    const userId = normalizeUserId(statePayload.sub);
+    if (statePayload.purpose !== 'spotify_oauth' || !userId || !isValidObjectId(userId)) {
+      return redirectToApp('error');
+    }
+    const configuration = getSpotifyConfiguration();
+    if (!configuration) return redirectToApp('error');
+    const tokenResponse = await axios.post(
+      'https://accounts.spotify.com/api/token',
+      new URLSearchParams({
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: configuration.redirectUri
+      }),
+      {
+        auth: { username: configuration.clientId, password: configuration.clientSecret },
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        timeout: 15000
+      }
+    );
+    if (!tokenResponse.data.refresh_token) throw new Error('Spotify no devolvió un token renovable.');
+    const user = await User.findById(userId).select('+spotify.refreshTokenEncrypted');
+    if (!user) return redirectToApp('error');
+    user.spotify = {
+      refreshTokenEncrypted: encryptSpotifyRefreshToken(tokenResponse.data.refresh_token)
+    };
+    await user.save();
+    spotifyLikedTracksCache.delete(String(user._id));
+    return redirectToApp('connected');
+  } catch (error) {
+    console.error('No se pudo completar la conexión con Spotify.', error.message || error);
+    return redirectToApp('error');
+  }
+});
+
+app.get('/api/spotify/liked-tracks', async (req, res) => {
+  try {
+    const accessToken = await getSpotifyAccessToken(req.user);
+    const tracks = await getSpotifyLikedTracksForUser(req.user._id, accessToken, req.query.refresh === 'true');
+    res.json(tracks.map(track => ({
+      id: track.id,
+      name: track.name,
+      artist: track.artists?.map(artist => artist.name).filter(Boolean).join(', ') || 'Artista desconocido',
+      coverUrl: track.album?.images?.[0]?.url || '',
+      album: track.album?.name || '',
+      externalUrl: track.external_urls?.spotify || ''
+    })));
+  } catch (error) {
+    const statusCode = error.statusCode || (error.response ? 502 : 500);
+    console.error('No se pudieron cargar los Me gusta de Spotify.', error.message || error);
+    res.status(statusCode).json({
+      error: error.statusCode ? error.message : 'Spotify no respondió al cargar tus canciones guardadas.'
+    });
+  }
+});
+
+app.post('/api/spotify/import', async (req, res) => {
+  try {
+    const trackIds = Array.isArray(req.body?.trackIds)
+      ? [...new Set(req.body.trackIds.filter(id => typeof id === 'string' && /^[A-Za-z0-9]{10,40}$/.test(id)))]
+      : [];
+    if (!trackIds.length || trackIds.length > 100) {
+      return res.status(400).json({ error: 'Selecciona entre 1 y 100 canciones de Spotify.' });
+    }
+    const accessToken = await getSpotifyAccessToken(req.user);
+    const likedTracks = await getSpotifyLikedTracksForUser(req.user._id, accessToken);
+    const likedTrackMap = new Map(likedTracks.map(track => [track.id, track]));
+    const selectedTracks = trackIds
+      .map(id => likedTrackMap.get(id))
+      .filter(track => track && track.name && track.artists?.length);
+    if (!selectedTracks.length) {
+      return res.status(400).json({ error: 'Las canciones seleccionadas ya no están en tus Me gusta de Spotify.' });
+    }
+
+    const metadataPairs = selectedTracks.map(track => ({
+      name: track.name.slice(0, 200),
+      artist: track.artists.map(artist => artist.name).filter(Boolean).join(', ').slice(0, 200)
+    }));
+    const pairConditions = metadataPairs.map(pair => ({ name: pair.name, artist: pair.artist }));
+    const [existingSongs, existingSuggestions] = await Promise.all([
+      Song.find({ $or: pairConditions }).collation(songMetadataCollation()).select('name artist').lean(),
+      SongSuggestion.find({
+        $or: [
+          ...pairConditions,
+          { spotifyTrackId: { $in: trackIds } }
+        ]
+      }).collation(songMetadataCollation()).select('name artist spotifyTrackId').lean()
+    ]);
+    const existingKeys = new Set(
+      [...existingSongs, ...existingSuggestions].map(item => (
+        `${normalizeSongMetadata(item.name)}\u0000${normalizeSongMetadata(item.artist)}`
+      ))
+    );
+    const existingTrackIds = new Set(existingSuggestions.map(item => item.spotifyTrackId).filter(Boolean));
+    const pending = [];
+    let duplicateCount = 0;
+    for (const track of selectedTracks) {
+      const name = track.name.trim().slice(0, 200);
+      const artist = track.artists.map(item => item.name).filter(Boolean).join(', ').trim().slice(0, 200);
+      const key = `${normalizeSongMetadata(name)}\u0000${normalizeSongMetadata(artist)}`;
+      if (!name || !artist || existingKeys.has(key) || existingTrackIds.has(track.id)) {
+        duplicateCount += 1;
+        continue;
+      }
+      existingKeys.add(key);
+      const coverUrl = track.album?.images?.[0]?.url || '';
+      pending.push({
+        name,
+        artist,
+        coverUrl: /^https:\/\/i\.scdn\.co\//i.test(coverUrl) ? coverUrl.slice(0, 2048) : '',
+        spotifyTrackId: track.id,
+        suggestedBy: req.user._id,
+        suggestedByName: req.user.username
+      });
+    }
+    const created = pending.length ? await SongSuggestion.create(pending) : [];
+    if (created.length) realtimeIo?.emit('songSuggestionsChanged');
+    res.json({ imported: created.length, duplicates: duplicateCount });
+  } catch (error) {
+    const statusCode = error.statusCode || (error.response ? 502 : 500);
+    console.error('No se pudieron importar canciones de Spotify.', error.message || error);
+    res.status(statusCode).json({
+      error: error.statusCode ? error.message : 'No se pudieron importar las canciones seleccionadas.'
+    });
+  }
+});
+
+app.post('/api/spotify/disconnect', async (req, res) => {
+  try {
+    await User.findByIdAndUpdate(req.user._id, { $unset: { spotify: 1 } });
+    spotifyLikedTracksCache.delete(String(req.user._id));
+    res.json({ success: true });
+  } catch (error) {
+    console.error('No se pudo desconectar Spotify.', error);
+    res.status(500).json({ error: 'No se pudo desconectar Spotify.' });
+  }
+});
+
+app.get('/api/youtube/search', async (req, res) => {
+  const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+  const apiKey = process.env.YOUTUBE_API_KEY?.trim();
+  if (!apiKey) return res.status(503).json({ error: 'La búsqueda de YouTube no está configurada en el servidor.' });
+  if (query.length < 2 || query.length > 200) {
+    return res.status(400).json({ error: 'Escribe un nombre de canción y artista válidos.' });
+  }
+  try {
+    const response = await axios.get('https://www.googleapis.com/youtube/v3/search', {
+      params: { part: 'snippet', type: 'video', maxResults: 8, q: query, key: apiKey },
+      timeout: 15000
+    });
+    res.json((response.data.items || []).map(item => ({
+      id: item.id?.videoId || '',
+      title: item.snippet?.title || '',
+      channel: item.snippet?.channelTitle || '',
+      thumbnail: item.snippet?.thumbnails?.medium?.url || item.snippet?.thumbnails?.default?.url || '',
+      url: item.id?.videoId ? `https://www.youtube.com/watch?v=${item.id.videoId}` : ''
+    })).filter(item => item.id && item.url));
+  } catch (error) {
+    console.error('No se pudo buscar en YouTube.', error.message || error);
+    res.status(502).json({
+      error: 'No se pudieron cargar los resultados de YouTube. Verifica la clave y la cuota de la API.'
+    });
+  }
+});
+
 app.get('/api/song-suggestions', async (_req, res) => {
   try {
     const suggestions = await SongSuggestion.find()
       .sort({ createdAt: -1 })
-      .select('name artist suggestedByName createdAt')
+      .select('name artist coverUrl spotifyTrackId suggestedByName createdAt')
       .lean();
     res.json(suggestions);
   } catch (error) {
@@ -1885,6 +2200,18 @@ app.post('/api/songs', upload.fields([{ name: 'mp3' }, { name: 'cover' }]), asyn
     if (req.body.color !== undefined && !isSongColor(req.body.color)) {
       return res.status(400).json({ error: 'El color de la canción no es válido.' });
     }
+    let spotifyCoverUrl = '';
+    if (req.body.coverUrl) {
+      try {
+        const parsedCoverUrl = new URL(req.body.coverUrl);
+        if (parsedCoverUrl.protocol !== 'https:' || parsedCoverUrl.hostname !== 'i.scdn.co') {
+          throw new Error('Host de portada no válido.');
+        }
+        spotifyCoverUrl = parsedCoverUrl.toString();
+      } catch {
+        return res.status(400).json({ error: 'La URL de la portada de Spotify no es válida.' });
+      }
+    }
     if (lyricColors !== undefined && (
       !Array.isArray(lyricColors)
       || !lyricColors.every(isHexColor)
@@ -1936,6 +2263,7 @@ app.post('/api/songs', upload.fields([{ name: 'mp3' }, { name: 'cover' }]), asyn
     }
 
     if (req.files['cover']) coverUrl = await uploadToDrive(req.files['cover'][0]);
+    else if (spotifyCoverUrl) coverUrl = spotifyCoverUrl;
 
     const songData = {
       name: songName,

@@ -594,6 +594,14 @@ export function initMusicPlayer() {
     const allSongsSearch = document.getElementById("all-songs-search");
     const songSuggestionForm = document.getElementById("song-suggestion-form");
     const songSuggestionInput = document.getElementById("song-suggestion-input");
+    const spotifyConnectButton = document.getElementById('spotify-connect-button');
+    const spotifyRefreshButton = document.getElementById('spotify-refresh-button');
+    const spotifyDisconnectButton = document.getElementById('spotify-disconnect-button');
+    const spotifyImportButton = document.getElementById('spotify-import-button');
+    const spotifyLikesSearch = document.getElementById('spotify-likes-search');
+    const spotifyLikesStatus = document.getElementById('spotify-likes-status');
+    const spotifyLikesList = document.getElementById('spotify-likes-list');
+    const spotifyLikesSection = document.getElementById('spotify-likes-section');
     const inputSeekSeconds = document.getElementById("input-seek-seconds");
     const inputMaxVolume = document.getElementById("input-max-volume");
     const discordPresenceImageTextInput = document.getElementById("discord-presence-image-text");
@@ -628,6 +636,9 @@ export function initMusicPlayer() {
     const ytDownloadPopupMessage = document.getElementById("yt-download-popup-message");
     const ytDownloadProgressFill = document.getElementById("yt-download-progress-fill");
     const ytDownloadProgressLabel = document.getElementById("yt-download-progress-label");
+    let spotifyLikedTracks = [];
+    let spotifySelectedTrackIds = new Set();
+    let spotifyIsConnected = false;
 
     const btnPlayAllSongs = document.getElementById("btn-play-all-songs");
     const btnPlayPlaylist = document.getElementById("btn-play-playlist");
@@ -4138,6 +4149,7 @@ export function initMusicPlayer() {
                 isLoggingOut = false;
                 accessToken = result.token;
                 setStoredUser(userPayload);
+                void loadSpotifyStatus();
                 saveCachedOfflineUser(userPayload);
                 try {
                     await saveOfflineCredential(password);
@@ -6298,6 +6310,206 @@ export function initMusicPlayer() {
         canDeleteSuggestions: () => canCurrentUser('delete_songs')
     });
 
+    function renderSpotifyLikedTracks() {
+        if (!spotifyLikesList) return;
+        const searchTerm = spotifyLikesSearch?.value.trim().toLocaleLowerCase() || '';
+        const filteredTracks = spotifyLikedTracks.filter(track => (
+            !searchTerm || `${track.name} ${track.artist}`.toLocaleLowerCase().includes(searchTerm)
+        ));
+        const fragment = document.createDocumentFragment();
+        if (!filteredTracks.length) {
+            const empty = document.createElement('li');
+            empty.className = 'spotify-likes-empty';
+            empty.textContent = spotifyLikedTracks.length
+                ? 'No hay canciones que coincidan con la búsqueda.'
+                : 'No se encontraron canciones guardadas.';
+            fragment.appendChild(empty);
+        }
+        for (const track of filteredTracks) {
+            const item = document.createElement('li');
+            item.className = 'spotify-like-item';
+            const label = document.createElement('label');
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.checked = spotifySelectedTrackIds.has(track.id);
+            checkbox.setAttribute('aria-label', `Seleccionar ${track.name} de ${track.artist}`);
+            checkbox.addEventListener('change', () => {
+                if (checkbox.checked && spotifySelectedTrackIds.size >= 100) {
+                    checkbox.checked = false;
+                    showToast('Puedes importar hasta 100 canciones por vez.', true);
+                    return;
+                }
+                if (checkbox.checked) spotifySelectedTrackIds.add(track.id);
+                else spotifySelectedTrackIds.delete(track.id);
+                if (spotifyImportButton) spotifyImportButton.hidden = !spotifySelectedTrackIds.size;
+            });
+            label.appendChild(checkbox);
+            if (track.coverUrl) {
+                const cover = document.createElement('img');
+                cover.src = track.coverUrl;
+                cover.alt = '';
+                cover.loading = 'lazy';
+                label.appendChild(cover);
+            }
+            const info = document.createElement('span');
+            info.className = 'spotify-like-info';
+            const name = document.createElement('strong');
+            name.textContent = track.name;
+            const artist = document.createElement('span');
+            artist.textContent = track.artist;
+            info.append(name, artist);
+            label.appendChild(info);
+            item.appendChild(label);
+            fragment.appendChild(item);
+        }
+        spotifyLikesList.replaceChildren(fragment);
+        if (spotifyImportButton) spotifyImportButton.hidden = !spotifySelectedTrackIds.size;
+    }
+
+    async function loadSpotifyLikedTracks(refresh = false) {
+        if (!spotifyIsConnected || !spotifyLikesStatus) return;
+        if (spotifyRefreshButton) spotifyRefreshButton.disabled = true;
+        spotifyLikesStatus.textContent = 'Cargando canciones guardadas de Spotify...';
+        try {
+            const response = await apiFetch(`${API_URL}/spotify/liked-tracks${refresh ? '?refresh=true' : ''}`);
+            const result = await response.json().catch(() => null);
+            if (!response.ok) throw new Error(result?.error || 'No se pudieron cargar tus Me gusta.');
+            spotifyLikedTracks = Array.isArray(result) ? result : [];
+            spotifySelectedTrackIds = new Set(
+                [...spotifySelectedTrackIds].filter(id => spotifyLikedTracks.some(track => track.id === id))
+            );
+            renderSpotifyLikedTracks();
+            spotifyLikesSearch.hidden = false;
+            spotifyRefreshButton.hidden = false;
+            spotifyLikesStatus.textContent = `${spotifyLikedTracks.length} canciones guardadas.`;
+        } catch (error) {
+            console.error('No se pudieron cargar los Me gusta de Spotify.', error);
+            spotifyLikesStatus.textContent = error.message || 'No se pudieron cargar tus Me gusta.';
+            showToast(spotifyLikesStatus.textContent, true);
+        } finally {
+            if (spotifyRefreshButton) spotifyRefreshButton.disabled = false;
+        }
+    }
+
+    async function loadSpotifyStatus(loadTracks = false) {
+        if (!getStoredUser()?._id || !accessToken || !navigator.onLine) return;
+        try {
+            const response = await apiFetch(`${API_URL}/spotify/status`);
+            const result = await response.json().catch(() => null);
+            if (!response.ok) throw new Error(result?.error || 'No se pudo consultar Spotify.');
+            spotifyIsConnected = result.connected;
+            if (spotifyConnectButton) {
+                spotifyConnectButton.hidden = result.connected;
+                spotifyConnectButton.disabled = !result.configured;
+                if (!result.configured) spotifyConnectButton.title = 'Configura Spotify en el servidor.';
+            }
+            if (spotifyRefreshButton) spotifyRefreshButton.hidden = !result.connected;
+            if (spotifyDisconnectButton) spotifyDisconnectButton.hidden = !result.connected;
+            if (spotifyLikesSearch) spotifyLikesSearch.hidden = !result.connected;
+            if (spotifyLikesStatus) {
+                spotifyLikesStatus.textContent = result.connected
+                    ? `Conectado${result.displayName ? ` como ${result.displayName}` : ''}.`
+                    : result.configured
+                        ? 'Conecta Spotify para cargar tus canciones guardadas.'
+                        : 'Spotify requiere configuración del servidor.';
+            }
+            if (result.connected && loadTracks) await loadSpotifyLikedTracks();
+        } catch (error) {
+            console.error('No se pudo consultar el estado de Spotify.', error);
+            if (spotifyLikesStatus) spotifyLikesStatus.textContent = error.message || 'No se pudo consultar Spotify.';
+        }
+    }
+
+    spotifyConnectButton?.addEventListener('click', async () => {
+        spotifyConnectButton.disabled = true;
+        try {
+            const response = await apiFetch(`${API_URL}/spotify/connect`, { method: 'POST' });
+            const result = await response.json().catch(() => null);
+            if (!response.ok) throw new Error(result?.error || 'No se pudo iniciar la conexión con Spotify.');
+            window.location.assign(result.authorizationUrl);
+        } catch (error) {
+            console.error('No se pudo iniciar la conexión con Spotify.', error);
+            showToast(error.message || 'No se pudo conectar Spotify.', true);
+            spotifyConnectButton.disabled = false;
+        }
+    });
+
+    spotifyRefreshButton?.addEventListener('click', () => loadSpotifyLikedTracks(true));
+    spotifyDisconnectButton?.addEventListener('click', async () => {
+        spotifyDisconnectButton.disabled = true;
+        try {
+            const response = await apiFetch(`${API_URL}/spotify/disconnect`, { method: 'POST' });
+            const result = await response.json().catch(() => null);
+            if (!response.ok) throw new Error(result?.error || 'No se pudo desconectar Spotify.');
+            spotifyIsConnected = false;
+            spotifyLikedTracks = [];
+            spotifySelectedTrackIds.clear();
+            spotifyLikesList?.replaceChildren();
+            if (spotifyLikesSearch) {
+                spotifyLikesSearch.value = '';
+                spotifyLikesSearch.hidden = true;
+            }
+            spotifyRefreshButton.hidden = true;
+            spotifyDisconnectButton.hidden = true;
+            spotifyImportButton.hidden = true;
+            spotifyConnectButton.hidden = false;
+            if (spotifyLikesStatus) spotifyLikesStatus.textContent = 'Spotify desconectado.';
+        } catch (error) {
+            console.error('No se pudo desconectar Spotify.', error);
+            showToast(error.message || 'No se pudo desconectar Spotify.', true);
+        } finally {
+            spotifyDisconnectButton.disabled = false;
+        }
+    });
+    spotifyLikesSearch?.addEventListener('input', renderSpotifyLikedTracks);
+    spotifyLikesSection?.addEventListener('toggle', () => {
+        if (spotifyLikesSection.open && spotifyIsConnected && !spotifyLikedTracks.length) {
+            void loadSpotifyLikedTracks();
+        }
+    });
+    spotifyImportButton?.addEventListener('click', async () => {
+        const trackIds = [...spotifySelectedTrackIds];
+        if (!trackIds.length) return;
+        spotifyImportButton.disabled = true;
+        spotifyLikesStatus.textContent = 'Importando canciones como sugerencias...';
+        try {
+            const response = await apiFetch(`${API_URL}/spotify/import`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ trackIds })
+            });
+            const result = await response.json().catch(() => null);
+            if (!response.ok) throw new Error(result?.error || 'No se pudieron importar las canciones.');
+            spotifySelectedTrackIds.clear();
+            renderSpotifyLikedTracks();
+            await loadSongSuggestions(false);
+            spotifyLikesStatus.textContent = `Se importaron ${result.imported} sugerencias; ${result.duplicates} ya existían.`;
+            showToast(spotifyLikesStatus.textContent);
+        } catch (error) {
+            console.error('No se pudieron importar las canciones de Spotify.', error);
+            spotifyLikesStatus.textContent = error.message || 'No se pudieron importar las canciones.';
+            showToast(spotifyLikesStatus.textContent, true);
+        } finally {
+            spotifyImportButton.disabled = false;
+        }
+    });
+
+    const spotifyCallbackResult = new URLSearchParams(window.location.search).get('spotify');
+    if (spotifyCallbackResult) {
+        const callbackUrl = new URL(window.location.href);
+        callbackUrl.searchParams.delete('spotify');
+        window.history.replaceState({}, '', callbackUrl);
+        if (spotifyCallbackResult === 'connected') {
+            showToast('Cuenta de Spotify conectada.');
+            void loadSpotifyStatus(true);
+        } else {
+            showToast('No se pudo conectar Spotify. Revisa la configuración y vuelve a intentarlo.', true);
+            void loadSpotifyStatus();
+        }
+    } else {
+        void loadSpotifyStatus();
+    }
+
     function openQuickAddPanel(selectedSuggestion = null) {
         if (!canCurrentUser('edit_songs')) {
             showToast('No tienes permiso para agregar canciones desde las sugerencias.', true);
@@ -6394,6 +6606,12 @@ export function initMusicPlayer() {
             imageStatus.className = 'image-drop-hint';
             imageStatus.setAttribute('aria-live', 'polite');
             imageStatus.textContent = 'Portada';
+            if (suggestion.coverUrl) {
+                imagePreview.src = suggestion.coverUrl;
+                imagePreview.hidden = false;
+                imagePlaceholder.hidden = true;
+                imageStatus.textContent = 'Portada de Spotify';
+            }
             const imageInput = document.createElement('input');
             imageInput.type = 'file';
             imageInput.accept = 'image/*';
@@ -6434,6 +6652,35 @@ export function initMusicPlayer() {
                 createQuickAddField('YOUTUBE', youtubeInput)
             );
 
+            const youtubeSearch = document.createElement('div');
+            youtubeSearch.className = 'youtube-search';
+            const youtubeSearchControls = document.createElement('div');
+            youtubeSearchControls.className = 'quick-add-media-row';
+            const youtubeSearchInput = document.createElement('input');
+            youtubeSearchInput.type = 'search';
+            youtubeSearchInput.value = `${suggestion.name || ''} ${suggestion.artist || ''}`.trim();
+            youtubeSearchInput.maxLength = 200;
+            youtubeSearchInput.placeholder = 'Buscar título y artista en YouTube...';
+            youtubeSearchInput.setAttribute('aria-label', 'Buscar esta sugerencia en YouTube');
+            const youtubeSearchButton = document.createElement('button');
+            youtubeSearchButton.type = 'button';
+            youtubeSearchButton.className = 'main-play-btn';
+            youtubeSearchButton.textContent = 'Buscar en YouTube';
+            youtubeSearchControls.append(
+                createQuickAddField('BÚSQUEDA', youtubeSearchInput),
+                youtubeSearchButton
+            );
+            const youtubeSearchResults = document.createElement('div');
+            youtubeSearchResults.className = 'youtube-search-results';
+            const youtubeSelectedResult = document.createElement('div');
+            youtubeSelectedResult.className = 'youtube-selected-result';
+            youtubeSelectedResult.setAttribute('aria-live', 'polite');
+            const youtubeSelectedUrl = document.createElement('input');
+            youtubeSelectedUrl.type = 'url';
+            youtubeSelectedUrl.readOnly = true;
+            youtubeSelectedUrl.setAttribute('aria-label', 'URL del video seleccionado');
+            youtubeSearch.append(youtubeSearchControls, youtubeSearchResults, youtubeSelectedResult);
+
             const optionsRow = document.createElement('div');
             optionsRow.className = 'quick-add-options-row';
             const colorInput = document.createElement('input');
@@ -6451,11 +6698,72 @@ export function initMusicPlayer() {
             saveButton.textContent = 'Agregar canción';
             optionsRow.append(colorField, uploadStatus, saveButton);
 
-            form.append(imageWrapper, details, mediaRow, optionsRow);
+            form.append(imageWrapper, details, mediaRow, youtubeSearch, optionsRow);
             card.append(heading, form);
             fragment.appendChild(card);
 
             bindImageDropzone(imageWrapper, imageInput, imagePreview, imageStatus, colorInput, imagePlaceholder);
+            youtubeSearchButton.addEventListener('click', async () => {
+                const query = youtubeSearchInput.value.trim();
+                if (!query) {
+                    showToast('Escribe una canción y un artista para buscar en YouTube.', true);
+                    return;
+                }
+                youtubeSearchButton.disabled = true;
+                youtubeSearchButton.textContent = 'Buscando...';
+                youtubeSearchResults.replaceChildren();
+                youtubeSelectedResult.textContent = '';
+                youtubeSelectedUrl.value = '';
+                try {
+                    const response = await apiFetch(
+                        `${API_URL}/youtube/search?q=${encodeURIComponent(query)}`
+                    );
+                    const results = await response.json().catch(() => null);
+                    if (!response.ok) throw new Error(results?.error || 'No se pudo buscar en YouTube.');
+                    if (!Array.isArray(results) || !results.length) {
+                        youtubeSearchResults.textContent = 'No se encontraron resultados.';
+                    }
+                    for (const result of results || []) {
+                        const resultButton = document.createElement('button');
+                        resultButton.type = 'button';
+                        resultButton.className = 'youtube-search-result';
+                        if (result.thumbnail) {
+                            const thumbnail = document.createElement('img');
+                            thumbnail.src = result.thumbnail;
+                            thumbnail.alt = '';
+                            thumbnail.loading = 'lazy';
+                            resultButton.appendChild(thumbnail);
+                        }
+                        const resultInfo = document.createElement('span');
+                        const resultTitle = document.createElement('strong');
+                        resultTitle.textContent = result.title;
+                        const resultChannel = document.createElement('small');
+                        resultChannel.textContent = result.channel;
+                        resultInfo.append(resultTitle, resultChannel);
+                        resultButton.appendChild(resultInfo);
+                        resultButton.addEventListener('click', () => {
+                            const selectedLabel = document.createElement('span');
+                            selectedLabel.textContent = 'Video seleccionado:';
+                            const selectedLink = document.createElement('a');
+                            selectedLink.href = result.url;
+                            selectedLink.target = '_blank';
+                            selectedLink.rel = 'noopener noreferrer';
+                            selectedLink.textContent = result.url;
+                            selectedLink.setAttribute('aria-label', `Abrir ${result.title} en YouTube`);
+                            youtubeSelectedUrl.value = result.url;
+                            youtubeSelectedResult.replaceChildren(selectedLabel, selectedLink);
+                        });
+                        youtubeSearchResults.appendChild(resultButton);
+                    }
+                } catch (error) {
+                    console.error('No se pudo buscar la sugerencia en YouTube.', error);
+                    youtubeSearchResults.textContent = error.message || 'No se pudo buscar en YouTube.';
+                } finally {
+                    youtubeSearchButton.disabled = false;
+                    youtubeSearchButton.textContent = 'Buscar en YouTube';
+                }
+            });
+            youtubeSearch.appendChild(createQuickAddField('URL DEL VIDEO SELECCIONADO', youtubeSelectedUrl));
             youtubeInput.addEventListener('input', () => {
                 if (youtubeInput.value.trim()) audioInput.value = '';
             });
@@ -6494,6 +6802,7 @@ export function initMusicPlayer() {
                 formData.append('lyricColors', '[]');
                 formData.append('lyricColorAssignments', '{}');
                 formData.append('duration', '0');
+                if (!coverFile && suggestion.coverUrl) formData.append('coverUrl', suggestion.coverUrl);
                 const currentUser = getStoredUser();
                 if (currentUser?._id) formData.append('userId', currentUser._id);
                 if (coverFile) formData.append('cover', coverFile);
