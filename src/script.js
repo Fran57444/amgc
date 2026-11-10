@@ -6374,7 +6374,7 @@ export function initMusicPlayer() {
                 badges.className = 'spotify-like-badges';
                 if (track.isInProgram) {
                     const programBadge = document.createElement('small');
-                    programBadge.textContent = 'En canciones';
+                    programBadge.textContent = 'Ya esta en AMGC';
                     programBadge.className = 'spotify-like-badge is-in-program';
                     badges.appendChild(programBadge);
                 }
@@ -6745,7 +6745,7 @@ export function initMusicPlayer() {
             const colorInput = document.createElement('input');
             colorInput.type = 'color';
             colorInput.value = '#ffffff';
-            colorInput.setAttribute('aria-label', 'Color predominante de la portada');
+            colorInput.setAttribute('aria-label', '');
             const colorField = createQuickAddField('COLOR', colorInput);
             colorField.classList.add('quick-add-color-field');
             const uploadStatus = document.createElement('span');
@@ -6865,7 +6865,6 @@ export function initMusicPlayer() {
                     youtubeSearchButton.textContent = 'Buscar en YouTube';
                 }
             });
-            youtubeSearch.appendChild(createQuickAddField('URL DEL VIDEO SELECCIONADO', youtubeSelectedUrl));
             youtubeInput.addEventListener('input', () => {
                 if (youtubeInput.value.trim()) audioInput.value = '';
                 if (youtubeInput.value.trim() !== youtubeSelectedUrl.value) {
@@ -6919,9 +6918,7 @@ export function initMusicPlayer() {
                     const currentUser = getStoredUser();
                     if (currentUser?._id) formData.append('userId', currentUser._id);
                     if (coverFile) formData.append('cover', coverFile);
-                    if (youtubeLink && youtubeSelectedUrl.value === youtubeLink) {
-                        formData.append('ytLink', youtubeLink);
-                    } else if (youtubeLink && desktopYoutubeDownloader) {
+                    if (youtubeLink && desktopYoutubeDownloader) {
                         uploadStatus.textContent = 'Descargando audio...';
                         const downloadedAudio = await desktopYoutubeDownloader(youtubeLink);
                         formData.append(
@@ -7494,10 +7491,10 @@ export function initMusicPlayer() {
                 preview.src = event.target.result;
                 preview.style.display = 'block';
                 status.textContent = colorError
-                    ? 'Imagen lista, pero no se pudo calcular su color predominante.'
+                    ? 'Imagen lista..'
                     : colorInput
-                        ? 'Imagen lista. Color predominante actualizado.'
-                        : 'Imagen lista. Arrastra otra para cambiarla.';
+                        ? 'Imagen lista.'
+                        : 'Imagen lista.';
                 status.classList.toggle('error', Boolean(colorError));
             };
             reader.onerror = () => {
