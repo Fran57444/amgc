@@ -84,14 +84,6 @@ export function createSongListRenderer({
                     suggestedBy.className = 'all-songs-suggestion-author';
                     suggestedBy.textContent = suggestion.suggestedByName || 'Desconocido';
                     heading.append(label, suggestedBy);
-                    if (suggestion.coverUrl) {
-                        const cover = document.createElement('img');
-                        cover.className = 'item-cover';
-                        cover.src = suggestion.coverUrl;
-                        cover.alt = '';
-                        cover.loading = 'lazy';
-                        item.appendChild(cover);
-                    }
                     const info = document.createElement('div');
                     info.className = 'all-songs-item-info';
                     const name = document.createElement('span');

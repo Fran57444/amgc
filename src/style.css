@@ -934,7 +934,7 @@ img.no-image { font-size: 0.65rem; object-fit: none; }
 .quick-add-save { min-height: 38px; padding: 8px 18px; }
 .quick-add-empty { grid-column: 1 / -1; padding: 24px; border: 1px dashed rgba(255,255,255,0.2); border-radius: 12px; color: rgba(255,255,255,0.64); text-align: center; }
 .spotify-likes-section {
-    margin: 0 0 18px;
+    margin: 18px 0 0;
     padding: 12px 16px;
     border: 1px solid rgba(255,255,255,0.12);
     border-radius: 12px;
@@ -953,6 +953,9 @@ img.no-image { font-size: 0.65rem; object-fit: none; }
 .spotify-like-info strong, .spotify-like-info span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .spotify-like-info strong { font-size: 0.83rem; }
 .spotify-like-info span { color: rgba(255,255,255,0.6); font-size: 0.72rem; }
+.spotify-like-badges { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 4px; }
+.spotify-like-info .spotify-like-badge { width: fit-content; padding: 2px 6px; border-radius: 999px; background: rgba(255,154,92,0.12); color: #ffba90; font-size: 0.63rem; }
+.spotify-like-info .spotify-like-badge.is-in-program { background: rgba(90,190,130,0.12); color: #9de0b5; }
 .spotify-likes-empty { grid-column: 1 / -1; padding: 16px; color: rgba(255,255,255,0.62); text-align: center; }
 .youtube-search { grid-column: 1 / -1; display: grid; gap: 8px; }
 .youtube-search-results { display: grid; gap: 6px; max-height: 220px; overflow-y: auto; }
@@ -961,6 +964,7 @@ img.no-image { font-size: 0.65rem; object-fit: none; }
 .youtube-search-result span { min-width: 0; }
 .youtube-search-result strong, .youtube-search-result small { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .youtube-search-result small { margin-top: 3px; color: rgba(255,255,255,0.6); }
+.youtube-search-result small.youtube-duration { color: #ffba90; }
 .youtube-selected-result { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: rgba(255,255,255,0.7); font-size: 0.76rem; overflow-wrap: anywhere; }
 .youtube-selected-result a { color: #ff9a5c; }
 @media (max-width: 580px) {

@@ -144,6 +144,7 @@ function App() {
               <img src="/img/play.png" draggable="false" className="no-drag" alt="Reproducir todas" width="20" />
             </button>
           </div>
+          <ul id="all-songs-list"></ul>
           <details id="spotify-likes-section" className="spotify-likes-section">
             <summary>Mis Me gusta de Spotify</summary>
             <div className="spotify-likes-toolbar">
@@ -152,11 +153,11 @@ function App() {
               <button id="spotify-refresh-button" className="modal-btn-text" type="button" hidden>Actualizar lista</button>
               <button id="spotify-disconnect-button" className="modal-btn-text" type="button" hidden>Desconectar</button>
               <button id="spotify-import-button" className="main-play-btn" type="button" hidden>Importar seleccionadas como sugerencias</button>
+              <button id="spotify-load-more-button" className="modal-btn-text" type="button" hidden>Cargar más</button>
             </div>
-            <input id="spotify-likes-search" className="all-songs-search" type="search" placeholder="Buscar canción o artista en Spotify..." aria-label="Buscar canción o artista en tus Me gusta de Spotify" hidden />
+            <input id="spotify-likes-search" className="all-songs-search" type="search" placeholder="Buscar entre las canciones cargadas..." aria-label="Buscar canción o artista entre los Me gusta cargados" hidden />
             <ul id="spotify-likes-list" className="spotify-likes-list"></ul>
           </details>
-          <ul id="all-songs-list"></ul>
         </div>
 
         <div id="quick-add-panel" className="view-panel quick-add-panel">

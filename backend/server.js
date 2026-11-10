@@ -333,30 +333,64 @@ async function getSpotifyAccessToken(user) {
   return response.data.access_token;
 }
 
-async function fetchSpotifyLikedTracks(accessToken) {
-  const tracks = [];
-  let offset = 0;
-  while (offset < 1000) {
-    const response = await axios.get('https://api.spotify.com/v1/me/tracks', {
-      headers: { Authorization: `Bearer ${accessToken}` },
-      params: { limit: 50, offset },
-      timeout: 15000
-    });
-    const items = response.data.items || [];
-    tracks.push(...items.map(item => item.track).filter(track => track && !track.is_local));
-    if (!response.data.next || !items.length) break;
-    offset += items.length;
-  }
-  return tracks;
+const SPOTIFY_TRACKS_PER_PAGE = 1000;
+const SPOTIFY_API_PAGE_SIZE = 50;
+const SPOTIFY_API_PAGES_PER_BATCH = 5;
+
+async function fetchSpotifyLikedTracks(accessToken, offset, limit = SPOTIFY_API_PAGE_SIZE) {
+  const response = await axios.get('https://api.spotify.com/v1/me/tracks', {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    params: { limit, offset },
+    timeout: 15000
+  });
+  const items = response.data.items || [];
+  return {
+    tracks: items.map(item => item.track).filter(track => track && !track.is_local),
+    total: Number(response.data.total) || 0,
+    hasMore: Boolean(response.data.next) && items.length > 0,
+    nextOffset: offset + items.length
+  };
 }
 
 const spotifyLikedTracksCache = new Map();
 
-async function getSpotifyLikedTracksForUser(userId, accessToken, refresh = false) {
+async function getSpotifyLikedTracksPage(userId, accessToken, offset = 0, refresh = false) {
   const cacheKey = String(userId);
-  const cached = spotifyLikedTracksCache.get(cacheKey);
-  if (!refresh && cached && Date.now() - cached.cachedAt < 60_000) return cached.tracks;
-  const tracks = await fetchSpotifyLikedTracks(accessToken);
+  let cached = spotifyLikedTracksCache.get(cacheKey);
+  if (refresh || (cached && Date.now() - cached.cachedAt >= 60_000)) {
+    spotifyLikedTracksCache.delete(cacheKey);
+    cached = null;
+  }
+  const cachedPage = cached?.pages.get(offset);
+  if (cachedPage) return cachedPage;
+
+  const tracks = [];
+  let total = 0;
+  let nextOffset = offset;
+  let hasMore = true;
+  for (
+    let batchOffset = offset;
+    batchOffset < offset + SPOTIFY_TRACKS_PER_PAGE && hasMore;
+    batchOffset += SPOTIFY_API_PAGE_SIZE * SPOTIFY_API_PAGES_PER_BATCH
+  ) {
+    const offsets = Array.from(
+      { length: SPOTIFY_API_PAGES_PER_BATCH },
+      (_value, index) => batchOffset + index * SPOTIFY_API_PAGE_SIZE
+    );
+    const pages = await Promise.all(
+      offsets.map(pageOffset => fetchSpotifyLikedTracks(accessToken, pageOffset))
+    );
+    for (const page of pages) {
+      tracks.push(...page.tracks);
+      total = page.total;
+      nextOffset = page.nextOffset;
+      if (!page.hasMore) {
+        hasMore = false;
+        break;
+      }
+    }
+  }
+  const page = { tracks, total, hasMore, nextOffset };
   const now = Date.now();
   for (const [key, entry] of spotifyLikedTracksCache) {
     if (now - entry.cachedAt >= 60_000) spotifyLikedTracksCache.delete(key);
@@ -364,12 +398,35 @@ async function getSpotifyLikedTracksForUser(userId, accessToken, refresh = false
   if (spotifyLikedTracksCache.size >= 100) {
     spotifyLikedTracksCache.delete(spotifyLikedTracksCache.keys().next().value);
   }
-  spotifyLikedTracksCache.set(cacheKey, { tracks, cachedAt: now });
-  return tracks;
+  cached = spotifyLikedTracksCache.get(cacheKey) || { pages: new Map(), cachedAt: now };
+  cached.pages.set(offset, page);
+  cached.cachedAt = now;
+  spotifyLikedTracksCache.set(cacheKey, cached);
+  return page;
+}
+
+async function getSpotifyLikedTracksByIds(userId, accessToken, trackIds) {
+  const found = new Map();
+  const remaining = new Set(trackIds);
+  let offset = 0;
+  let total = Number.POSITIVE_INFINITY;
+  while (remaining.size && offset < total) {
+    const page = await getSpotifyLikedTracksPage(userId, accessToken, offset);
+    total = page.total;
+    for (const track of page.tracks) {
+      if (remaining.has(track.id)) {
+        found.set(track.id, track);
+        remaining.delete(track.id);
+      }
+    }
+    if (!page.hasMore) break;
+    offset = page.nextOffset;
+  }
+  return found;
 }
 
 function normalizeSongMetadata(value) {
-  return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLocaleLowerCase('es');
+  return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLocaleLowerCase('es');
 }
 
 function isSongSuggestionPlaceholder(name, artist) {
@@ -1942,15 +1999,59 @@ app.get('/api/spotify/callback', async (req, res) => {
 app.get('/api/spotify/liked-tracks', async (req, res) => {
   try {
     const accessToken = await getSpotifyAccessToken(req.user);
-    const tracks = await getSpotifyLikedTracksForUser(req.user._id, accessToken, req.query.refresh === 'true');
-    res.json(tracks.map(track => ({
-      id: track.id,
-      name: track.name,
-      artist: track.artists?.map(artist => artist.name).filter(Boolean).join(', ') || 'Artista desconocido',
-      coverUrl: track.album?.images?.[0]?.url || '',
-      album: track.album?.name || '',
-      externalUrl: track.external_urls?.spotify || ''
-    })));
+    const offset = Number.parseInt(req.query.offset, 10) || 0;
+    if (offset < 0 || offset > 100_000 || offset % SPOTIFY_TRACKS_PER_PAGE !== 0) {
+      return res.status(400).json({ error: 'La posición de la lista de Spotify no es válida.' });
+    }
+    const page = await getSpotifyLikedTracksPage(
+      req.user._id,
+      accessToken,
+      offset,
+      req.query.refresh === 'true'
+    );
+    const metadataPairs = page.tracks.map(track => ({
+      name: (track.name || '').slice(0, 200),
+      artist: track.artists?.map(artist => artist.name).filter(Boolean).join(', ').slice(0, 200) || ''
+    })).filter(pair => pair.name && pair.artist);
+    const uniquePairs = new Map(metadataPairs.map(pair => [
+      `${normalizeSongMetadata(pair.name)}\u0000${normalizeSongMetadata(pair.artist)}`,
+      pair
+    ]));
+    const pairConditions = [...uniquePairs.values()].map(pair => ({
+      name: pair.name,
+      artist: pair.artist
+    }));
+    const [existingSongs, existingSuggestions] = pairConditions.length
+      ? await Promise.all([
+        Song.find({ $or: pairConditions }).collation(songMetadataCollation()).select('name artist').lean(),
+        SongSuggestion.find({
+          $or: [...pairConditions, { spotifyTrackId: { $in: page.tracks.map(track => track.id) } }]
+        }).collation(songMetadataCollation()).select('name artist spotifyTrackId').lean()
+      ])
+      : [[], []];
+    const keyFor = item => `${normalizeSongMetadata(item.name)}\u0000${normalizeSongMetadata(item.artist)}`;
+    const programKeys = new Set(existingSongs.map(keyFor));
+    const suggestionKeys = new Set(existingSuggestions.map(keyFor));
+    const suggestedTrackIds = new Set(existingSuggestions.map(item => item.spotifyTrackId).filter(Boolean));
+    res.json({
+      tracks: page.tracks.map(track => {
+        const artist = track.artists?.map(item => item.name).filter(Boolean).join(', ') || 'Artista desconocido';
+        const key = keyFor({ name: track.name || '', artist });
+        return {
+          id: track.id,
+          name: track.name,
+          artist,
+          coverUrl: track.album?.images?.[0]?.url || '',
+          album: track.album?.name || '',
+          externalUrl: track.external_urls?.spotify || '',
+          isInProgram: programKeys.has(key),
+          isSuggested: suggestionKeys.has(key) || suggestedTrackIds.has(track.id)
+        };
+      }),
+      total: page.total,
+      hasMore: page.hasMore,
+      nextOffset: page.nextOffset
+    });
   } catch (error) {
     const statusCode = error.statusCode || (error.response ? 502 : 500);
     console.error('No se pudieron cargar los Me gusta de Spotify.', error.message || error);
@@ -1969,8 +2070,7 @@ app.post('/api/spotify/import', async (req, res) => {
       return res.status(400).json({ error: 'Selecciona entre 1 y 100 canciones de Spotify.' });
     }
     const accessToken = await getSpotifyAccessToken(req.user);
-    const likedTracks = await getSpotifyLikedTracksForUser(req.user._id, accessToken);
-    const likedTrackMap = new Map(likedTracks.map(track => [track.id, track]));
+    const likedTrackMap = await getSpotifyLikedTracksByIds(req.user._id, accessToken, trackIds);
     const selectedTracks = trackIds
       .map(id => likedTrackMap.get(id))
       .filter(track => track && track.name && track.artists?.length);
@@ -2042,6 +2142,31 @@ app.post('/api/spotify/disconnect', async (req, res) => {
   }
 });
 
+app.get('/api/spotify/cover', async (req, res) => {
+  try {
+    const coverUrl = typeof req.query.url === 'string' ? new URL(req.query.url) : null;
+    if (!coverUrl || coverUrl.protocol !== 'https:' || coverUrl.hostname !== 'i.scdn.co'
+      || coverUrl.username || coverUrl.password || (coverUrl.port && coverUrl.port !== '443')) {
+      return res.status(400).json({ error: 'La URL de portada de Spotify no es válida.' });
+    }
+    const response = await axios.get(coverUrl.toString(), {
+      responseType: 'arraybuffer',
+      maxContentLength: 5 * 1024 * 1024,
+      maxBodyLength: 5 * 1024 * 1024,
+      maxRedirects: 0,
+      timeout: 15000
+    });
+    const contentType = response.headers['content-type'] || '';
+    if (!contentType.startsWith('image/')) {
+      return res.status(502).json({ error: 'Spotify no devolvió una imagen válida.' });
+    }
+    res.type(contentType).send(Buffer.from(response.data));
+  } catch (error) {
+    console.error('No se pudo cargar la portada de Spotify.', error.message || error);
+    res.status(502).json({ error: 'No se pudo cargar la portada de Spotify.' });
+  }
+});
+
 app.get('/api/youtube/search', async (req, res) => {
   const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
   const apiKey = process.env.YOUTUBE_API_KEY?.trim();
@@ -2054,11 +2179,37 @@ app.get('/api/youtube/search', async (req, res) => {
       params: { part: 'snippet', type: 'video', maxResults: 8, q: query, key: apiKey },
       timeout: 15000
     });
-    res.json((response.data.items || []).map(item => ({
+    const searchItems = response.data.items || [];
+    const videoIds = searchItems.map(item => item.id?.videoId).filter(Boolean);
+    const detailsResponse = videoIds.length
+      ? await axios.get('https://www.googleapis.com/youtube/v3/videos', {
+        params: { part: 'contentDetails', id: videoIds.join(','), key: apiKey },
+        timeout: 15000
+      })
+      : { data: { items: [] } };
+    const formatDuration = value => {
+      const match = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/.exec(value || '');
+      if (!match) return '';
+      const totalSeconds = (Number(match[1] || 0) * 24 + Number(match[2] || 0)) * 3600
+        + Number(match[3] || 0) * 60
+        + Number(match[4] || 0);
+      const hours = Math.floor(totalSeconds / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const seconds = totalSeconds % 60;
+      return hours
+        ? `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+        : `${minutes}:${String(seconds).padStart(2, '0')}`;
+    };
+    const durations = new Map((detailsResponse.data.items || []).map(item => [
+      item.id,
+      formatDuration(item.contentDetails?.duration)
+    ]));
+    res.json(searchItems.map(item => ({
       id: item.id?.videoId || '',
       title: item.snippet?.title || '',
       channel: item.snippet?.channelTitle || '',
       thumbnail: item.snippet?.thumbnails?.medium?.url || item.snippet?.thumbnails?.default?.url || '',
+      duration: durations.get(item.id?.videoId) || '',
       url: item.id?.videoId ? `https://www.youtube.com/watch?v=${item.id.videoId}` : ''
     })).filter(item => item.id && item.url));
   } catch (error) {
