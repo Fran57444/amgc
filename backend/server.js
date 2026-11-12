@@ -13,7 +13,7 @@ import axios from 'axios';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Readable } from 'node:stream';
 import ytdl from '@distube/ytdl-core';
 import youtubedl from 'youtube-dl-exec';
@@ -30,7 +30,11 @@ import {
 } from 'node:crypto';
 
 const desktopDownloaderOnly = process.env.amgc_DESKTOP_DOWNLOADER === 'true';
-if (!desktopDownloaderOnly) dotenv.config();
+if (!desktopDownloaderOnly) {
+  dotenv.config({
+    path: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../.env')
+  });
+}
 
 const app = express();
 if (process.env.NODE_ENV === 'production') {
@@ -338,16 +342,30 @@ const SPOTIFY_API_PAGE_SIZE = 50;
 const SPOTIFY_API_PAGES_PER_BATCH = 5;
 
 async function fetchSpotifyLikedTracks(accessToken, offset, limit = SPOTIFY_API_PAGE_SIZE) {
-  const response = await axios.get('https://api.spotify.com/v1/me/tracks', {
-    headers: { Authorization: `Bearer ${accessToken}` },
-    params: { limit, offset },
-    timeout: 15000
-  });
+  let response;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      response = await axios.get('https://api.spotify.com/v1/me/tracks', {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        params: { limit, offset },
+        timeout: 15000
+      });
+      break;
+    } catch (error) {
+      if (error.response?.status !== 429 || attempt === 2) throw error;
+      const retryAfterSeconds = Number(error.response.headers?.['retry-after']);
+      const waitMs = Number.isFinite(retryAfterSeconds)
+        ? Math.min(30_000, Math.max(0, retryAfterSeconds * 1000))
+        : 1000 * (attempt + 1);
+      await new Promise(resolve => setTimeout(resolve, waitMs));
+    }
+  }
   const items = response.data.items || [];
+  const total = Number(response.data.total) || 0;
   return {
     tracks: items.map(item => item.track).filter(track => track && !track.is_local),
-    total: Number(response.data.total) || 0,
-    hasMore: Boolean(response.data.next) && items.length > 0,
+    total,
+    hasMore: items.length > 0 && (Boolean(response.data.next) || offset + items.length < total),
     nextOffset: offset + items.length
   };
 }
@@ -427,6 +445,60 @@ async function getSpotifyLikedTracksByIds(userId, accessToken, trackIds) {
 
 function normalizeSongMetadata(value) {
   return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLocaleLowerCase('es');
+}
+
+function normalizeSongTitle(value) {
+  return normalizeSongMetadata(value)
+    .replace(/\s*(?:[-–—]\s*)?(?:\(?\s*)?(?:\d{4}\s+)?(?:remaster(?:ed)?|live|radio edit|deluxe(?: edition)?|single version|album version|version)\b[^)]*\)?\s*$/i, '')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+}
+
+function isSimilarSongTitle(first, second) {
+  const left = normalizeSongTitle(first);
+  const right = normalizeSongTitle(second);
+  if (!left || !right) return false;
+  if (left === right) return true;
+
+  const leftWords = left.split(' ');
+  const rightWords = right.split(' ');
+  const shorterWords = leftWords.length <= rightWords.length ? leftWords : rightWords;
+  const longerWords = leftWords.length > rightWords.length ? leftWords : rightWords;
+  if (shorterWords.length >= 2 && shorterWords.every(word => longerWords.includes(word))) return true;
+
+  const shorter = left.length <= right.length ? left : right;
+  const longer = left.length > right.length ? left : right;
+  if (shorter.length < 6) return false;
+  let previous = Array.from({ length: shorter.length + 1 }, (_value, index) => index);
+  for (let row = 1; row <= longer.length; row += 1) {
+    const current = [row];
+    for (let column = 1; column <= shorter.length; column += 1) {
+      current[column] = Math.min(
+        current[column - 1] + 1,
+        previous[column] + 1,
+        previous[column - 1] + (longer[row - 1] === shorter[column - 1] ? 0 : 1)
+      );
+    }
+    previous = current;
+  }
+  return 1 - previous[shorter.length] / longer.length >= 0.8;
+}
+
+function isSimilarSongMetadata(name, artist, candidate) {
+  return normalizeSongMetadata(artist) === normalizeSongMetadata(candidate.artist)
+    && isSimilarSongTitle(name, candidate.name);
+}
+
+function groupSongsByArtist(songs) {
+  const songsByArtist = new Map();
+  for (const song of songs) {
+    const artist = normalizeSongMetadata(song.artist);
+    if (!artist) continue;
+    const matchingSongs = songsByArtist.get(artist) || [];
+    matchingSongs.push(song);
+    songsByArtist.set(artist, matchingSongs);
+  }
+  return songsByArtist;
 }
 
 function isSongSuggestionPlaceholder(name, artist) {
@@ -2013,6 +2085,7 @@ app.get('/api/spotify/liked-tracks', async (req, res) => {
       name: (track.name || '').slice(0, 200),
       artist: track.artists?.map(artist => artist.name).filter(Boolean).join(', ').slice(0, 200) || ''
     })).filter(pair => pair.name && pair.artist);
+    const artistNames = [...new Set(metadataPairs.map(pair => pair.artist))];
     const uniquePairs = new Map(metadataPairs.map(pair => [
       `${normalizeSongMetadata(pair.name)}\u0000${normalizeSongMetadata(pair.artist)}`,
       pair
@@ -2021,22 +2094,24 @@ app.get('/api/spotify/liked-tracks', async (req, res) => {
       name: pair.name,
       artist: pair.artist
     }));
-    const [existingSongs, existingSuggestions] = pairConditions.length
+    const artistCondition = artistNames.length ? [{ artist: { $in: artistNames } }] : [];
+    const matchingConditions = [...pairConditions, ...artistCondition];
+    const [existingSongs, existingSuggestions] = matchingConditions.length
       ? await Promise.all([
-        Song.find({ $or: pairConditions }).collation(songMetadataCollation()).select('name artist').lean(),
+        Song.find({ $or: matchingConditions }).collation(songMetadataCollation()).select('name artist').lean(),
         SongSuggestion.find({
-          $or: [...pairConditions, { spotifyTrackId: { $in: page.tracks.map(track => track.id) } }]
+          $or: [...matchingConditions, { spotifyTrackId: { $in: page.tracks.map(track => track.id) } }]
         }).collation(songMetadataCollation()).select('name artist spotifyTrackId').lean()
       ])
       : [[], []];
-    const keyFor = item => `${normalizeSongMetadata(item.name)}\u0000${normalizeSongMetadata(item.artist)}`;
-    const programKeys = new Set(existingSongs.map(keyFor));
-    const suggestionKeys = new Set(existingSuggestions.map(keyFor));
+    const programSongsByArtist = groupSongsByArtist(existingSongs);
+    const suggestedSongsByArtist = groupSongsByArtist(existingSuggestions);
     const suggestedTrackIds = new Set(existingSuggestions.map(item => item.spotifyTrackId).filter(Boolean));
     res.json({
       tracks: page.tracks.map(track => {
         const artist = track.artists?.map(item => item.name).filter(Boolean).join(', ') || 'Artista desconocido';
-        const key = keyFor({ name: track.name || '', artist });
+        const programCandidates = programSongsByArtist.get(normalizeSongMetadata(artist)) || [];
+        const suggestionCandidates = suggestedSongsByArtist.get(normalizeSongMetadata(artist)) || [];
         return {
           id: track.id,
           name: track.name,
@@ -2044,8 +2119,9 @@ app.get('/api/spotify/liked-tracks', async (req, res) => {
           coverUrl: track.album?.images?.[0]?.url || '',
           album: track.album?.name || '',
           externalUrl: track.external_urls?.spotify || '',
-          isInProgram: programKeys.has(key),
-          isSuggested: suggestionKeys.has(key) || suggestedTrackIds.has(track.id)
+          isInProgram: programCandidates.some(candidate => isSimilarSongMetadata(track.name, artist, candidate)),
+          isSuggested: suggestedTrackIds.has(track.id)
+            || suggestionCandidates.some(candidate => isSimilarSongMetadata(track.name, artist, candidate))
         };
       }),
       total: page.total,
@@ -2083,32 +2159,37 @@ app.post('/api/spotify/import', async (req, res) => {
       artist: track.artists.map(artist => artist.name).filter(Boolean).join(', ').slice(0, 200)
     }));
     const pairConditions = metadataPairs.map(pair => ({ name: pair.name, artist: pair.artist }));
+    const artistNames = [...new Set(metadataPairs.map(pair => pair.artist))];
+    const matchingConditions = [
+      ...pairConditions,
+      ...(artistNames.length ? [{ artist: { $in: artistNames } }] : [])
+    ];
     const [existingSongs, existingSuggestions] = await Promise.all([
-      Song.find({ $or: pairConditions }).collation(songMetadataCollation()).select('name artist').lean(),
+      Song.find({ $or: matchingConditions }).collation(songMetadataCollation()).select('name artist').lean(),
       SongSuggestion.find({
         $or: [
-          ...pairConditions,
+          ...matchingConditions,
           { spotifyTrackId: { $in: trackIds } }
         ]
       }).collation(songMetadataCollation()).select('name artist spotifyTrackId').lean()
     ]);
-    const existingKeys = new Set(
-      [...existingSongs, ...existingSuggestions].map(item => (
-        `${normalizeSongMetadata(item.name)}\u0000${normalizeSongMetadata(item.artist)}`
-      ))
-    );
+    const existingSongsByArtist = groupSongsByArtist([...existingSongs, ...existingSuggestions]);
     const existingTrackIds = new Set(existingSuggestions.map(item => item.spotifyTrackId).filter(Boolean));
     const pending = [];
     let duplicateCount = 0;
     for (const track of selectedTracks) {
       const name = track.name.trim().slice(0, 200);
       const artist = track.artists.map(item => item.name).filter(Boolean).join(', ').trim().slice(0, 200);
-      const key = `${normalizeSongMetadata(name)}\u0000${normalizeSongMetadata(artist)}`;
-      if (!name || !artist || existingKeys.has(key) || existingTrackIds.has(track.id)) {
+      const artistKey = normalizeSongMetadata(artist);
+      const existingByArtist = existingSongsByArtist.get(artistKey) || [];
+      if (!name || !artist || existingTrackIds.has(track.id)
+        || existingByArtist.some(candidate => isSimilarSongMetadata(name, artist, candidate))) {
         duplicateCount += 1;
         continue;
       }
-      existingKeys.add(key);
+      existingByArtist.push({ name, artist });
+      existingSongsByArtist.set(artistKey, existingByArtist);
+      existingTrackIds.add(track.id);
       const coverUrl = track.album?.images?.[0]?.url || '';
       pending.push({
         name,

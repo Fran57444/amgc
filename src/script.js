@@ -21,6 +21,9 @@ export function initMusicPlayer() {
     const desktopYoutubeLocalSaver = window.amgcDesktop?.saveYoutubeAudioLocally;
     const desktopOpenLocalMp3Folder = window.amgcDesktop?.openLocalMp3Folder;
     const desktopSetDiscordPresence = window.amgcDesktop?.setDiscordPresence;
+    const desktopSubscribeTaskbarControls = window.amgcDesktop?.subscribeTaskbarControls;
+    const desktopUnsubscribeTaskbarControls = window.amgcDesktop?.unsubscribeTaskbarControls;
+    const desktopSetTaskbarPlaybackState = window.amgcDesktop?.setTaskbarPlaybackState;
     const desktopUpdates = window.amgcDesktop;
     const accessTokenStorageKey = 'amgc-access-token';
     let accessToken = localStorage.getItem(accessTokenStorageKey) || '';
@@ -138,11 +141,11 @@ export function initMusicPlayer() {
                 maxVolume = Math.min(10, Math.max(1, Number(updatedUser.settings.maxVolume) / 100));
                 localStorage.setItem('maxVolume', String(maxVolume));
                 if (inputMaxVolume) inputMaxVolume.value = String(Math.round(maxVolume * 100));
-                if (volumeSlider) volumeSlider.max = String(maxVolume);
+                if (volumeSlider) volumeSlider.max = String(maxVolume * 100);
                 if (currentVolume > maxVolume) {
                     currentVolume = maxVolume;
                     gainNode.gain.value = maxVolume;
-                    if (volumeSlider) volumeSlider.value = String(maxVolume);
+                    if (volumeSlider) volumeSlider.value = String(maxVolume * 100);
                 }
                 updateVolumeSliderUI(currentVolume);
             }
@@ -627,6 +630,10 @@ export function initMusicPlayer() {
     const adminPermissionOptions = Array.from(document.querySelectorAll('[data-permission-option]'));
     
     const editInputYt = document.getElementById("edit-input-yt");
+    const editYoutubeSearchInput = document.getElementById("edit-youtube-search-input");
+    const editYoutubeSearchButton = document.getElementById("edit-youtube-search-button");
+    const editYoutubeSearchResults = document.getElementById("edit-youtube-search-results");
+    const editYoutubeSelectedResult = document.getElementById("edit-youtube-selected-result");
     const btnSettingsYt = document.getElementById("btn-settings-yt-download");
     const btnOpenLocalMp3Folder = document.getElementById("btn-open-local-mp3-folder");
     const inputSettingsYt = document.getElementById("settings-yt-link");
@@ -4635,7 +4642,7 @@ export function initMusicPlayer() {
     let currentVolume = 1;
     let maxVolume = Math.min(10, Math.max(1, Number(localStorage.getItem('maxVolume')) || 2));
     if (inputMaxVolume) inputMaxVolume.value = String(Math.round(maxVolume * 100));
-    if (volumeSlider) volumeSlider.max = String(maxVolume);
+    if (volumeSlider) volumeSlider.max = String(maxVolume * 100);
     let customQueue = []; 
     let activeQueueTracks = [];
     let unplayedIndices = [];
@@ -4957,6 +4964,7 @@ export function initMusicPlayer() {
 
     let ytDownloadProgressTimer = null;
     let ytLongWaitTimer = null;
+    let ytDownloadPopupHideTimer = null;
 
     function isSlowYoutubeStatusMessage(message = '') {
         return /(tardó demasiado|tardó|sigue en curso|procesando|demora|demor|espere|puede tardar)/i.test(message);
@@ -4992,6 +5000,8 @@ export function initMusicPlayer() {
     function startYtDownloadProgress(title = 'Descargando canción') {
         if (ytDownloadProgressTimer) clearInterval(ytDownloadProgressTimer);
         if (ytLongWaitTimer) clearTimeout(ytLongWaitTimer);
+        if (ytDownloadPopupHideTimer) clearTimeout(ytDownloadPopupHideTimer);
+        ytDownloadPopupHideTimer = null;
 
         let current = 8;
         updateYtDownloadPopup({ title, message: 'Conectando con YouTube...', percent: current, visible: true, isError: false });
@@ -5022,14 +5032,21 @@ export function initMusicPlayer() {
             clearTimeout(ytLongWaitTimer);
             ytLongWaitTimer = null;
         }
+        if (ytDownloadPopupHideTimer) clearTimeout(ytDownloadPopupHideTimer);
 
         if (!ytDownloadPopup) return;
         if (success) {
             updateYtDownloadPopup({ title: 'Canción añadida', message, percent: 100, visible: true, isError: false });
-            setTimeout(() => updateYtDownloadPopup({ visible: false }), 1200);
+            ytDownloadPopupHideTimer = setTimeout(() => {
+                ytDownloadPopupHideTimer = null;
+                updateYtDownloadPopup({ visible: false });
+            }, 1200);
         } else {
             updateYtDownloadPopup({ title: error ? 'No se pudo descargar' : 'Descarga detenida', message, percent: 100, visible: true, isError: true });
-            setTimeout(() => updateYtDownloadPopup({ visible: false }), 2500);
+            ytDownloadPopupHideTimer = setTimeout(() => {
+                ytDownloadPopupHideTimer = null;
+                updateYtDownloadPopup({ visible: false });
+            }, 2500);
         }
     }
 
@@ -6609,6 +6626,108 @@ export function initMusicPlayer() {
         return label;
     }
 
+    function bindYoutubeSearch({
+        searchInput,
+        searchButton,
+        searchResults,
+        selectedResult,
+        youtubeInput,
+        searchContext
+    }) {
+        let selectedUrl = '';
+        searchButton.addEventListener('click', async () => {
+            const query = searchInput.value.trim();
+            if (!query) {
+                showToast('Escribe una canción y un artista para buscar en YouTube.', true);
+                return;
+            }
+
+            if (youtubeInput.value.trim() === selectedUrl) youtubeInput.value = '';
+            selectedUrl = '';
+            selectedResult.replaceChildren();
+            searchResults.replaceChildren();
+            searchButton.disabled = true;
+            searchButton.textContent = 'Buscando...';
+            try {
+                const response = await apiFetch(`${API_URL}/youtube/search?q=${encodeURIComponent(query)}`);
+                const results = await response.json().catch(() => null);
+                if (!response.ok) throw new Error(results?.error || 'No se pudo buscar en YouTube.');
+                if (!Array.isArray(results) || !results.length) {
+                    searchResults.textContent = 'No se encontraron resultados.';
+                    return;
+                }
+
+                for (const result of results) {
+                    const resultButton = document.createElement('button');
+                    resultButton.type = 'button';
+                    resultButton.className = 'youtube-search-result';
+                    if (result.thumbnail) {
+                        const thumbnail = document.createElement('img');
+                        thumbnail.src = result.thumbnail;
+                        thumbnail.alt = '';
+                        thumbnail.loading = 'lazy';
+                        resultButton.appendChild(thumbnail);
+                    }
+                    const resultInfo = document.createElement('span');
+                    const resultTitle = document.createElement('strong');
+                    resultTitle.textContent = result.title || 'Video sin título';
+                    const resultChannel = document.createElement('small');
+                    resultChannel.textContent = result.channel || 'Canal desconocido';
+                    const resultDuration = document.createElement('small');
+                    resultDuration.className = 'youtube-duration';
+                    resultDuration.textContent = result.duration || 'Duración no disponible';
+                    resultInfo.append(resultTitle, resultChannel, resultDuration);
+                    resultButton.appendChild(resultInfo);
+                    resultButton.addEventListener('click', () => {
+                        selectedUrl = result.url;
+                        youtubeInput.value = result.url;
+                        youtubeInput.dispatchEvent(new Event('input', { bubbles: true }));
+                        const selectedLabel = document.createElement('span');
+                        selectedLabel.textContent = 'Video seleccionado:';
+                        const selectedLink = document.createElement('a');
+                        selectedLink.href = result.url;
+                        selectedLink.target = '_blank';
+                        selectedLink.rel = 'noopener noreferrer';
+                        selectedLink.textContent = result.url;
+                        selectedLink.setAttribute('aria-label', `Abrir ${result.title || 'video'} en YouTube`);
+                        selectedResult.replaceChildren(selectedLabel, selectedLink);
+                    });
+                    searchResults.appendChild(resultButton);
+                }
+            } catch (error) {
+                console.error(`No se pudo buscar ${searchContext} en YouTube.`, error);
+                searchResults.textContent = error.message || 'No se pudo buscar en YouTube.';
+            } finally {
+                searchButton.disabled = false;
+                searchButton.textContent = 'Buscar en YouTube';
+            }
+        });
+
+        youtubeInput.addEventListener('input', () => {
+            if (youtubeInput.value.trim() !== selectedUrl) {
+                selectedUrl = '';
+                selectedResult.replaceChildren();
+            }
+        });
+
+        return () => {
+            selectedUrl = '';
+            searchResults.replaceChildren();
+            selectedResult.replaceChildren();
+            searchButton.disabled = false;
+            searchButton.textContent = 'Buscar en YouTube';
+        };
+    }
+
+    const resetEditYoutubeSearch = bindYoutubeSearch({
+        searchInput: editYoutubeSearchInput,
+        searchButton: editYoutubeSearchButton,
+        searchResults: editYoutubeSearchResults,
+        selectedResult: editYoutubeSelectedResult,
+        youtubeInput: editInputYt,
+        searchContext: 'la canción'
+    });
+
     function renderQuickAddSuggestions() {
         if (!quickAddSuggestionsList) return;
         if (!canCurrentUser('edit_songs')) {
@@ -6734,10 +6853,6 @@ export function initMusicPlayer() {
             const youtubeSelectedResult = document.createElement('div');
             youtubeSelectedResult.className = 'youtube-selected-result';
             youtubeSelectedResult.setAttribute('aria-live', 'polite');
-            const youtubeSelectedUrl = document.createElement('input');
-            youtubeSelectedUrl.type = 'url';
-            youtubeSelectedUrl.readOnly = true;
-            youtubeSelectedUrl.setAttribute('aria-label', 'URL del video seleccionado');
             youtubeSearch.append(youtubeSearchControls, youtubeSearchResults, youtubeSelectedResult);
 
             const optionsRow = document.createElement('div');
@@ -6800,80 +6915,22 @@ export function initMusicPlayer() {
                     }
                 })()
                 : Promise.resolve(true);
-            youtubeSearchButton.addEventListener('click', async () => {
-                const query = youtubeSearchInput.value.trim();
-                if (!query) {
-                    showToast('Escribe una canción y un artista para buscar en YouTube.', true);
-                    return;
-                }
-                youtubeSearchButton.disabled = true;
-                youtubeSearchButton.textContent = 'Buscando...';
-                youtubeSearchResults.replaceChildren();
-                youtubeSelectedResult.textContent = '';
-                youtubeSelectedUrl.value = '';
-                try {
-                    const response = await apiFetch(
-                        `${API_URL}/youtube/search?q=${encodeURIComponent(query)}`
-                    );
-                    const results = await response.json().catch(() => null);
-                    if (!response.ok) throw new Error(results?.error || 'No se pudo buscar en YouTube.');
-                    if (!Array.isArray(results) || !results.length) {
-                        youtubeSearchResults.textContent = 'No se encontraron resultados.';
-                    }
-                    for (const result of results || []) {
-                        const resultButton = document.createElement('button');
-                        resultButton.type = 'button';
-                        resultButton.className = 'youtube-search-result';
-                        if (result.thumbnail) {
-                            const thumbnail = document.createElement('img');
-                            thumbnail.src = result.thumbnail;
-                            thumbnail.alt = '';
-                            thumbnail.loading = 'lazy';
-                            resultButton.appendChild(thumbnail);
-                        }
-                        const resultInfo = document.createElement('span');
-                        const resultTitle = document.createElement('strong');
-                        resultTitle.textContent = result.title;
-                        const resultChannel = document.createElement('small');
-                        resultChannel.textContent = result.channel;
-                        const resultDuration = document.createElement('small');
-                        resultDuration.className = 'youtube-duration';
-                        resultDuration.textContent = result.duration || 'Duración no disponible';
-                        resultInfo.append(resultTitle, resultChannel, resultDuration);
-                        resultButton.appendChild(resultInfo);
-                        resultButton.addEventListener('click', () => {
-                            const selectedLabel = document.createElement('span');
-                            selectedLabel.textContent = 'Video seleccionado:';
-                            const selectedLink = document.createElement('a');
-                            selectedLink.href = result.url;
-                            selectedLink.target = '_blank';
-                            selectedLink.rel = 'noopener noreferrer';
-                            selectedLink.textContent = result.url;
-                            selectedLink.setAttribute('aria-label', `Abrir ${result.title} en YouTube`);
-                            youtubeSelectedUrl.value = result.url;
-                            youtubeInput.value = result.url;
-                            youtubeInput.dispatchEvent(new Event('input', { bubbles: true }));
-                            youtubeSelectedResult.replaceChildren(selectedLabel, selectedLink);
-                        });
-                        youtubeSearchResults.appendChild(resultButton);
-                    }
-                } catch (error) {
-                    console.error('No se pudo buscar la sugerencia en YouTube.', error);
-                    youtubeSearchResults.textContent = error.message || 'No se pudo buscar en YouTube.';
-                } finally {
-                    youtubeSearchButton.disabled = false;
-                    youtubeSearchButton.textContent = 'Buscar en YouTube';
-                }
+            bindYoutubeSearch({
+                searchInput: youtubeSearchInput,
+                searchButton: youtubeSearchButton,
+                searchResults: youtubeSearchResults,
+                selectedResult: youtubeSelectedResult,
+                youtubeInput,
+                searchContext: 'la sugerencia'
             });
             youtubeInput.addEventListener('input', () => {
                 if (youtubeInput.value.trim()) audioInput.value = '';
-                if (youtubeInput.value.trim() !== youtubeSelectedUrl.value) {
-                    youtubeSelectedUrl.value = '';
-                    youtubeSelectedResult.replaceChildren();
-                }
             });
             audioInput.addEventListener('change', () => {
-                if (audioInput.files?.[0]) youtubeInput.value = '';
+                if (audioInput.files?.[0]) {
+                    youtubeInput.value = '';
+                    youtubeInput.dispatchEvent(new Event('input', { bubbles: true }));
+                }
             });
             saveButton.addEventListener('click', async () => {
                 if (saveButton.disabled) return;
@@ -6918,8 +6975,11 @@ export function initMusicPlayer() {
                     const currentUser = getStoredUser();
                     if (currentUser?._id) formData.append('userId', currentUser._id);
                     if (coverFile) formData.append('cover', coverFile);
-                    if (youtubeLink && desktopYoutubeDownloader) {
+                    if (youtubeLink) {
                         uploadStatus.textContent = 'Descargando audio...';
+                        startYtDownloadProgress(`Descargando: ${name} - ${songArtist}`);
+                    }
+                    if (youtubeLink && desktopYoutubeDownloader) {
                         const downloadedAudio = await desktopYoutubeDownloader(youtubeLink);
                         formData.append(
                             'mp3',
@@ -6937,6 +6997,9 @@ export function initMusicPlayer() {
                     if (!response.ok) throw new Error(result?.error || 'No se pudo agregar la canción.');
                     if (!socket.connected) await fetchMusicData();
 
+                    if (youtubeLink) {
+                        stopYtDownloadProgress({ success: true, message: `${name} - ${songArtist} descargada y agregada.` });
+                    }
                     try {
                         uploadStatus.textContent = 'Completando sugerencia...';
                         const completionResponse = await apiFetch(
@@ -6956,6 +7019,13 @@ export function initMusicPlayer() {
                         showToast('La canción se guardó, pero no se pudo cerrar la sugerencia.', true);
                     }
                 } catch (error) {
+                    if (youtubeLink) {
+                        stopYtDownloadProgress({
+                            success: false,
+                            message: error.message || 'No se pudo agregar la canción sugerida.',
+                            error: true
+                        });
+                    }
                     console.error('No se pudo agregar la canción sugerida.', error);
                     showToast(error.message || 'No se pudo agregar la canción.', true);
                 } finally {
@@ -7249,6 +7319,10 @@ export function initMusicPlayer() {
         editSongPhotoStatus.textContent = 'Haz clic o arrastra una imagen';
         editSongPhotoStatus.classList.remove('error');
         if (editInputYt) editInputYt.value = "";
+        if (editYoutubeSearchInput) {
+            editYoutubeSearchInput.value = `${editInputName.value} ${editInputArtist.value}`.trim();
+        }
+        resetEditYoutubeSearch();
 
         isEditSongMode = true;
         isEditPlaylistMode = false;
@@ -7336,8 +7410,15 @@ export function initMusicPlayer() {
         editInputMp3.addEventListener('change', () => {
             stopEditPreviewAudio();
             updateEditLyricsPreview();
+            if (editInputMp3.files?.[0]) {
+                editInputYt.value = '';
+                editInputYt.dispatchEvent(new Event('input', { bubbles: true }));
+            }
         });
     }
+    editInputYt?.addEventListener('input', () => {
+        if (editInputYt.value.trim() && editInputMp3.files?.[0]) editInputMp3.value = '';
+    });
 
     if (btnPlayEditedSong) {
         btnPlayEditedSong.addEventListener('click', () => {
@@ -8561,6 +8642,7 @@ export function initMusicPlayer() {
     }
 
     audio.addEventListener('play', () => { 
+        desktopSetTaskbarPlaybackState?.(true);
         updateDiscordPresence();
         rememberLocalPlaybackActivity();
         suppressStartupPlaybackUpdates = false;
@@ -8588,6 +8670,7 @@ export function initMusicPlayer() {
         if (isProfileMode) renderProfile();
     });
     audio.addEventListener('pause', () => { 
+        desktopSetTaskbarPlaybackState?.(false);
         updateDiscordPresence();
         rememberLocalPlaybackActivity();
         recordOfflineListeningProgress(
@@ -8640,12 +8723,13 @@ export function initMusicPlayer() {
     btnVolume.addEventListener('click', () => {
         if (gainNode.gain.value > 0) {
             gainNode.gain.value = 0;
-            volumeSlider.value = 0;
+            volumeSlider.value = '0';
             btnVolume.querySelector('img').src = '/img/mute.png';
             updateVolumeSliderUI(0);
         } else {
-            gainNode.gain.value = currentVolume > 0 ? currentVolume : 1;
-            volumeSlider.value = gainNode.gain.value;
+            currentVolume = currentVolume > 0 ? currentVolume : 1;
+            gainNode.gain.value = currentVolume;
+            volumeSlider.value = String(currentVolume * 100);
             btnVolume.querySelector('img').src = '/img/volume.png';
             updateVolumeSliderUI(gainNode.gain.value);
         }
@@ -8654,27 +8738,55 @@ export function initMusicPlayer() {
     const updateVolumeSliderUI = (val) => {
         const isMuted = gainNode.gain.value <= 0;
         const displayValue = isMuted ? 0 : val;
-        const percent = Math.round(displayValue * 100);
-        volumeTooltip.textContent = percent + '%';
+        const percent = displayValue * 100;
+        if (document.activeElement !== volumeTooltip) {
+            volumeTooltip.value = String(Number(percent.toFixed(2)));
+        }
         const sliderPercent = (displayValue / maxVolume) * 100;
         const trackColor = getCurrentTrack()?.color || '#ffffff';
 
         if (percent <= 100) {
             volumeSlider.style.background = `linear-gradient(to right, ${trackColor} ${sliderPercent}%, #333 ${sliderPercent}%)`;
-            volumeTooltip.style.color = '#fff';
+            volumeTooltip.parentElement.style.color = '#fff';
         } else {
             const normalPercent = (1 / maxVolume) * 100;
             volumeSlider.style.background = `linear-gradient(to right, ${trackColor} ${normalPercent}%, red ${normalPercent}%, red ${sliderPercent}%, #333 ${sliderPercent}%)`;
-            volumeTooltip.style.color = 'red';
+            volumeTooltip.parentElement.style.color = 'red';
         }
     };
 
     volumeSlider.addEventListener('input', (e) => {
-        const val = parseFloat(e.target.value);
+        const val = parseFloat(e.target.value) / 100;
         gainNode.gain.value = val;
         currentVolume = val;
-        btnVolume.querySelector('img').src = val === 0 ? '/img/mute.png' : '/img/volume.png';
+        btnVolume.querySelector('img').src = '/img/volume.png';
         updateVolumeSliderUI(val);
+    });
+
+    volumeTooltip.addEventListener('change', () => {
+        const inputValue = volumeTooltip.value.trim();
+        const numericInput = inputValue.endsWith('%') ? inputValue.slice(0, -1).trim() : inputValue;
+        const percent = Number(numericInput.replace(',', '.'));
+        const maxPercent = maxVolume * 100;
+        if (!numericInput || !Number.isFinite(percent)) {
+            volumeTooltip.value = String(Number((currentVolume * 100).toFixed(2)));
+            showToast('Ingresa un porcentaje de volumen válido.', true);
+            return;
+        }
+        const clampedPercent = Math.min(maxPercent, Math.max(0, percent));
+        const val = clampedPercent / 100;
+        gainNode.gain.value = val;
+        currentVolume = val;
+        volumeSlider.value = String(clampedPercent);
+        btnVolume.querySelector('img').src = val === 0 ? '/img/mute.png' : '/img/volume.png';
+        volumeTooltip.value = String(Number(clampedPercent.toFixed(2)));
+        updateVolumeSliderUI(val);
+    });
+    volumeTooltip.addEventListener('keydown', event => {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            volumeTooltip.blur();
+        }
     });
 
     if (inputMaxVolume) {
@@ -8684,11 +8796,11 @@ export function initMusicPlayer() {
             maxVolume = clampedPercent / 100;
             event.target.value = String(clampedPercent);
             localStorage.setItem('maxVolume', String(maxVolume));
-            volumeSlider.max = String(maxVolume);
+            volumeSlider.max = String(clampedPercent);
             if (currentVolume > maxVolume) {
                 currentVolume = maxVolume;
                 gainNode.gain.value = maxVolume;
-                volumeSlider.value = String(maxVolume);
+                volumeSlider.value = String(clampedPercent);
             }
             updateVolumeSliderUI(currentVolume);
         });
@@ -9223,6 +9335,13 @@ export function initMusicPlayer() {
         else { audio.pause(); }
     });
 
+    desktopSubscribeTaskbarControls?.(action => {
+        if (action === 'previous') btnPrev.click();
+        else if (action === 'play-pause') btnPlayPause.click();
+        else if (action === 'next') btnNext.click();
+    });
+    desktopSetTaskbarPlaybackState?.(!audio.paused);
+
     progressContainer.addEventListener('click', (e) => {
         if (isFollowingPlayback()) return;
         const width = progressContainer.clientWidth;
@@ -9374,5 +9493,6 @@ export function initMusicPlayer() {
         window.removeEventListener('online', handleOnline);
         stopRealtime();
         desktopUpdates?.unsubscribeUpdateState?.();
+        desktopUnsubscribeTaskbarControls?.();
     };
 }

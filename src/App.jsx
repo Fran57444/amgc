@@ -284,7 +284,7 @@ function App() {
                   defaultValue="200"
                   min="100"
                   max="1000"
-                  step="10"
+                  step="1"
                   className="settings-input-dark settings-input-narrow"
                 />
               </div>
@@ -464,6 +464,23 @@ function App() {
                   <label>PISTA DE AUDIO</label>
                   <input type="file" id="edit-input-mp3" accept="audio/*" />
                   <input type="text" id="edit-input-yt" className="settings-input-dark settings-input-spaced" placeholder="O ingresa el link de YouTube aquí..." />
+                  <div id="edit-youtube-search" className="youtube-search">
+                    <div className="quick-add-media-row">
+                      <label className="quick-add-field">
+                        <span>BÚSQUEDA</span>
+                        <input
+                          type="search"
+                          id="edit-youtube-search-input"
+                          maxLength="200"
+                          placeholder="Buscar título y artista en YouTube..."
+                          aria-label="Buscar esta canción en YouTube"
+                        />
+                      </label>
+                      <button id="edit-youtube-search-button" type="button" className="main-play-btn">Buscar en YouTube</button>
+                    </div>
+                    <div id="edit-youtube-search-results" className="youtube-search-results"></div>
+                    <div id="edit-youtube-selected-result" className="youtube-selected-result" aria-live="polite"></div>
+                  </div>
                   <input
                     type="text"
                     id="edit-input-file-name"
@@ -712,8 +729,17 @@ function App() {
                         <img src="/img/volume.png" draggable="false" className="no-drag" alt=""/>
                     </button>
                     <div className="volume-slider-container">
-                        <span id="volume-tooltip">100%</span>
-                        <input type="range" id="volume-slider" min="0" max="2" step="0.01" defaultValue="1" />
+                        <div className="volume-value-display">
+                          <input
+                            type="text"
+                            id="volume-tooltip"
+                            inputMode="decimal"
+                            aria-label="Porcentaje de volumen"
+                            defaultValue="100"
+                          />
+                          <span aria-hidden="true">%</span>
+                        </div>
+                        <input type="range" id="volume-slider" min="0" max="200" step="1" defaultValue="100" />
                     </div>
                 </div>
                 <button id="btn-lyrics" className="control-btn">

@@ -4,6 +4,10 @@ const updateStateListener = (_event, state) => {
     updateStateCallback?.(state);
 };
 let updateStateCallback = null;
+const taskbarControlListener = (_event, action) => {
+    taskbarControlCallback?.(action);
+};
+let taskbarControlCallback = null;
 
 contextBridge.exposeInMainWorld('amgcDesktop', {
     downloadYoutubeAudio: (ytLink, fileName) => ipcRenderer.invoke('amgc:download-youtube', ytLink, fileName),
@@ -21,6 +25,19 @@ contextBridge.exposeInMainWorld('amgcDesktop', {
         updateStateCallback = null;
         ipcRenderer.removeListener('amgc:update-state', updateStateListener);
     },
+    subscribeTaskbarControls: callback => {
+        taskbarControlCallback = callback;
+        ipcRenderer.removeListener('amgc:taskbar-control', taskbarControlListener);
+        ipcRenderer.on('amgc:taskbar-control', taskbarControlListener);
+    },
+    unsubscribeTaskbarControls: () => {
+        taskbarControlCallback = null;
+        ipcRenderer.removeListener('amgc:taskbar-control', taskbarControlListener);
+    },
+    setTaskbarPlaybackState: isPlaying => ipcRenderer.send(
+        'amgc:taskbar-playback-state',
+        Boolean(isPlaying)
+    ),
     saveYoutubeAudioLocally: (ytLink, fileName) => ipcRenderer.invoke(
         'amgc:download-youtube',
         ytLink,

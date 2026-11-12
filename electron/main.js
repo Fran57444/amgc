@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, nativeImage, shell } from 'electron';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { appendFile, readFileSync } from 'node:fs';
@@ -16,6 +16,18 @@ const isDevelopment = process.argv.includes('--dev');
 const appUrl = isDevelopment ? developmentUrl : productionUrl;
 const trustedOrigins = new Set([new URL(productionUrl).origin, new URL(developmentUrl).origin]);
 const desktopDownloadKey = randomBytes(32).toString('hex');
+function createTaskbarIcon(svg) {
+    return nativeImage.createFromDataURL(
+        `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`
+    );
+}
+
+const taskbarIcons = {
+    previous: createTaskbarIcon('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"><path fill="#fff" d="M6 4h2v16H6zM20 5v14l-11-7z"/></svg>'),
+    play: createTaskbarIcon('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"><path fill="#fff" d="M7 4v16l13-8z"/></svg>'),
+    pause: createTaskbarIcon('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"><path fill="#fff" d="M6 4h5v16H6zM14 4h5v16h-5z"/></svg>'),
+    next: createTaskbarIcon('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"><path fill="#fff" d="M16 4h2v16h-2zM4 5v14l11-7z"/></svg>')
+};
 const electronProfile = process.env.AMGC_ELECTRON_PROFILE;
 if (electronProfile) {
     if (!/^[a-zA-Z0-9_-]{1,32}$/.test(electronProfile)) {
@@ -52,6 +64,27 @@ function setDesktopUpdateState(nextState) {
             window.webContents.send('amgc:update-state', desktopUpdateState);
         }
     });
+}
+
+function updateTaskbarButtons(window, isPlaying) {
+    if (process.platform !== 'win32' || window.isDestroyed()) return;
+    window.setThumbarButtons([
+        {
+            tooltip: 'Canción anterior',
+            icon: taskbarIcons.previous,
+            click: () => window.webContents.send('amgc:taskbar-control', 'previous')
+        },
+        {
+            tooltip: isPlaying ? 'Pausar' : 'Reproducir',
+            icon: isPlaying ? taskbarIcons.pause : taskbarIcons.play,
+            click: () => window.webContents.send('amgc:taskbar-control', 'play-pause')
+        },
+        {
+            tooltip: 'Siguiente canción',
+            icon: taskbarIcons.next,
+            click: () => window.webContents.send('amgc:taskbar-control', 'next')
+        }
+    ]);
 }
 
 function initializeDesktopUpdates() {
@@ -248,6 +281,12 @@ function isTrustedSender(event) {
         return false;
     }
 }
+
+ipcMain.on('amgc:taskbar-playback-state', (event, isPlaying) => {
+    if (!isTrustedSender(event) || typeof isPlaying !== 'boolean') return;
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (window) updateTaskbarButtons(window, isPlaying);
+});
 
 ipcMain.handle('amgc:update:get-state', event => {
     if (!isTrustedSender(event)) throw new Error('Origen no autorizado para consultar actualizaciones.');
@@ -579,6 +618,8 @@ function createMainWindow() {
             webSecurity: true
         }
     });
+
+    updateTaskbarButtons(window, false);
 
     window.webContents.session.webRequest.onBeforeRequest({
         urls: [`${new URL(productionUrl).origin}/api/media/*`]
