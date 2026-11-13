@@ -295,6 +295,21 @@ input, textarea, select {
 .track-title-container { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; }
 #track-name { flex: 0 1 auto; font-size: 0.95rem; color: #fff; font-weight: 600; }
 #track-artist { font-weight: 400; color: rgba(255, 255, 255, 0.7); font-size: 0.8rem; }
+.shared-playback-status { display: flex; min-width: 0; align-items: center; gap: 9px; }
+.shared-playback-status[hidden] { display: none; }
+.shared-playback-status > img { width: 42px; height: 42px; flex: 0 0 42px; border-radius: 4px; object-fit: cover; }
+.shared-playback-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 2px; }
+.shared-playback-copy strong { color: #ffbf78; font-size: .68rem; }
+.shared-playback-copy > span:not(.shared-playback-progress), .shared-playback-copy small { overflow: hidden; color: #fff; font-size: .68rem; text-overflow: ellipsis; white-space: nowrap; }
+.shared-playback-copy small { color: rgba(255,255,255,.65); }
+.shared-playback-progress { display: block; width: min(100%, 220px); height: 3px; overflow: hidden; border-radius: 3px; background: rgba(255,255,255,.18); }
+.shared-playback-progress span { display: block; width: 0; height: 100%; background: #ffbf78; }
+#bottom-bar.is-remote-playback #bottom-bar-cover,
+#bottom-bar.is-remote-playback .track-title-container,
+#bottom-bar.is-remote-playback #track-artist,
+#bottom-bar.is-remote-playback #track-duration { display: none; }
+#bottom-bar.is-remote-playback #progress-bar { display: none; }
+#progress-container[aria-disabled="true"] { pointer-events: none; }
 
 .track-controls { justify-self: center; display: flex; gap: 12px; align-items: center; }
 #btn-prev, #btn-next { min-width: 48px; min-height: 44px; font-size: 1.35rem; }

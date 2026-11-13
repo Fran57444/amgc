@@ -16,17 +16,15 @@ const isDevelopment = process.argv.includes('--dev');
 const appUrl = isDevelopment ? developmentUrl : productionUrl;
 const trustedOrigins = new Set([new URL(productionUrl).origin, new URL(developmentUrl).origin]);
 const desktopDownloadKey = randomBytes(32).toString('hex');
-function createTaskbarIcon(svg) {
-    return nativeImage.createFromDataURL(
-        `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`
-    );
+function createTaskbarIcon(png) {
+    return nativeImage.createFromBuffer(Buffer.from(png, 'base64'));
 }
 
 const taskbarIcons = {
-    previous: createTaskbarIcon('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"><path fill="#fff" d="M6 4h2v16H6zM20 5v14l-11-7z"/></svg>'),
-    play: createTaskbarIcon('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"><path fill="#fff" d="M7 4v16l13-8z"/></svg>'),
-    pause: createTaskbarIcon('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"><path fill="#fff" d="M6 4h5v16H6zM14 4h5v16h-5z"/></svg>'),
-    next: createTaskbarIcon('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"><path fill="#fff" d="M16 4h2v16h-2zM4 5v14l11-7z"/></svg>')
+    previous: createTaskbarIcon('iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAANklEQVR4nGNgGD7gPxQQUkO2AQQtwKXgPxogyQB0zSQZgE0zfQ2g2Au4DCHZAGLlKU9IQxcAALVZ3yEl5u/fAAAAAElFTkSuQmCC'),
+    play: createTaskbarIcon('iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAANElEQVR4nGNgGH7gPxBQbAAMUGwAWQZhM4AkQ3AZQLRBNDOAIi8QrRndAJI0IhtAlsahCwBxObdJV+HtsQAAAABJRU5ErkJggg=='),
+    pause: createTaskbarIcon('iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGklEQVR4nGNgGF7gPxIgRW7UgFEDqGvA0AQAuPvvEbI20YkAAAAASUVORK5CYII='),
+    next: createTaskbarIcon('iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAANElEQVR4nGNgGH7gPxAQkserhpACog3ApZBkA9AVk2UAsoaBMYAiL+CSJ2gAufKUJ6ShBwD5zt8hSArCBwAAAABJRU5ErkJggg==')
 };
 const electronProfile = process.env.AMGC_ELECTRON_PROFILE;
 if (electronProfile) {

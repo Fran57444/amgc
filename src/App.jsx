@@ -705,6 +705,16 @@ function App() {
                   </div>
                   <span id="track-artist" />
                   <span id="track-duration" aria-label="Duración de la canción">0:00</span>
+                  <div id="shared-playback-status" className="shared-playback-status" hidden role="status" aria-live="polite">
+                    <img id="shared-playback-cover" alt="" />
+                    <span className="shared-playback-copy">
+                      <strong id="shared-playback-source"></strong>
+                      <span id="shared-playback-title"></span>
+                      <small id="shared-playback-artist"></small>
+                      <span className="shared-playback-progress"><span id="shared-playback-progress-fill" /></span>
+                      <small id="shared-playback-time"></small>
+                    </span>
+                  </div>
                 </div>
               </div>
 

@@ -159,6 +159,8 @@ const userSchema = new mongoose.Schema({
     currentTime: Number,
     duration: Number,
     isPlaying: Boolean,
+    deviceId: String,
+    deviceType: String,
     updatedAt: Date
   },
   lastPlayedHistory: [{
@@ -631,6 +633,7 @@ const messageSchema = new mongoose.Schema({
 });
 const Message = mongoose.model('Message', messageSchema);
 let realtimeIo = null;
+const playbackStateByUser = new Map();
 const listenTogetherQueueSessions = new Map();
 const listenTogetherQueueSessionByUser = new Map();
 
@@ -1552,6 +1555,7 @@ app.post('/api/users/status', async (req, res) => {
     const updatedUser = await User.findByIdAndUpdate(userId, updateData, {
       returnDocument: 'after'
     }).select('friends isOnline lastActive lastPlayedHistory').lean();
+    if (lastPlayed && updatedUser) playbackStateByUser.set(String(updatedUser._id), updateData.lastPlayed);
     if (lastPlayed) emitUserStatsChanged(userId);
     if (shouldRecordHistory) emitUserHistoryChanged(updatedUser);
     if (updatedUser && (typeof isOnline === 'boolean' || lastPlayed)) {
@@ -3398,6 +3402,21 @@ if (isMainModule) {
       }
     }).catch(error => console.error('Error actualizando presencia y amigos del socket:', error));
 
+    socket.on('playbackStateRequest', async () => {
+      try {
+        const playback = playbackStateByUser.get(authenticatedUserId)
+          || (await User.findById(authenticatedUserId).select('lastPlayed').lean())?.lastPlayed;
+        if (playback?.songId) {
+          socket.emit('playbackOwnerChanged', {
+            userId: authenticatedUserId,
+            playback
+          });
+        }
+      } catch (error) {
+        console.error('No se pudo consultar la reproducción activa del usuario:', error);
+      }
+    });
+
     socket.on('friendsChanged', () => {
       refreshFriendIds().catch(error => console.error('Error actualizando amigos del socket:', error));
     });
@@ -3624,11 +3643,21 @@ if (isMainModule) {
       const normalizedId = authenticatedUserId;
       if (!playback || typeof playback !== 'object' || Array.isArray(playback)) return;
       try {
+        const sharedPlayback = {
+          ...playback,
+          deviceId: typeof playback.deviceId === 'string' ? playback.deviceId.slice(0, 128) : '',
+          deviceType: ['mobile', 'desktop'].includes(playback.deviceType) ? playback.deviceType : 'unknown',
+          updatedAt: new Date().toISOString()
+        };
+        playbackStateByUser.set(normalizedId, sharedPlayback);
+        io.to(`user:${normalizedId}`).except(socket.id).emit('playbackOwnerChanged', {
+          userId: normalizedId,
+          playback: sharedPlayback
+        });
         const friendIds = Array.isArray(socket.data.friendIds)
           ? socket.data.friendIds
           : await refreshFriendIds();
         const normalizedExcludeId = normalizeUserId(excludeUserId);
-        const sharedPlayback = { ...playback, updatedAt: new Date().toISOString() };
         for (const friendId of friendIds) {
           if (normalizedExcludeId && friendId === normalizedExcludeId) continue;
           io.to(`user:${friendId}`).emit('songChanged', {

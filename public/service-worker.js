@@ -1,4 +1,4 @@
-const SHELL_CACHE = 'amgc-app-shell-v4';
+const SHELL_CACHE = 'amgc-app-shell-v5';
 const DATABASE_NAME = 'amgc-offline-cache';
 const DATABASE_VERSION = 3;
 
@@ -102,9 +102,18 @@ self.addEventListener('fetch', event => {
         requestUrl.pathname.startsWith('/api/')
         || requestUrl.pathname.startsWith('/socket.io/')
         || requestUrl.pathname.startsWith('/mp3/')
+        || requestUrl.pathname.startsWith('/uploads/')
+        || requestUrl.pathname.startsWith('/media/')
     ) return;
+    const isNavigation = event.request.mode === 'navigate';
+    const isStaticAsset = ['script', 'style', 'image', 'font', 'manifest'].includes(event.request.destination);
+    if (!isNavigation && !isStaticAsset) return;
     event.respondWith((async () => {
         const cache = await caches.open(SHELL_CACHE);
+        if (isStaticAsset) {
+            const cached = await cache.match(event.request);
+            if (cached) return cached;
+        }
         try {
             const response = await fetch(event.request);
             if (response.ok && response.type === 'basic') {
@@ -114,7 +123,7 @@ self.addEventListener('fetch', event => {
         } catch (error) {
             const cached = await cache.match(event.request, { ignoreVary: true });
             if (cached) return cached;
-            if (event.request.mode === 'navigate') {
+            if (isNavigation) {
                 const appShell = await cache.match('/index.html');
                 if (appShell) return appShell;
             }

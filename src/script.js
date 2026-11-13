@@ -26,6 +26,15 @@ export function initMusicPlayer() {
     const desktopSetTaskbarPlaybackState = window.amgcDesktop?.setTaskbarPlaybackState;
     const desktopUpdates = window.amgcDesktop;
     const accessTokenStorageKey = 'amgc-access-token';
+    const playbackDeviceStorageKey = 'amgc-playback-device-id';
+    let playbackDeviceId = localStorage.getItem(playbackDeviceStorageKey);
+    if (!playbackDeviceId) {
+        playbackDeviceId = window.crypto && typeof window.crypto.randomUUID === 'function'
+            ? window.crypto.randomUUID()
+            : `desktop-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        localStorage.setItem(playbackDeviceStorageKey, playbackDeviceId);
+    }
+    const playbackDeviceType = 'desktop';
     let accessToken = localStorage.getItem(accessTokenStorageKey) || '';
     let isLoggingOut = false;
     let offlineOnly = false;
@@ -38,6 +47,9 @@ export function initMusicPlayer() {
     let offlineListeningSyncInProgress = false;
     let suppressNextListeningDelta = false;
     let playbackStatusSyncTimer = null;
+    let sharedDevicePlayback = null;
+    let suppressRemotePlaybackPause = false;
+    let sharedPlaybackClockTimer = null;
     const socket = io(import.meta.env.VITE_SOCKET_URL || window.location.origin, {
         autoConnect: false,
         transports: ['websocket', 'polling'],
@@ -238,6 +250,7 @@ export function initMusicPlayer() {
         connectRealtime();
     });
     socket.off('connect').on('connect', async () => {
+        socket.emit('playbackStateRequest');
         const isReconnect = realtimeConnectedBefore;
         realtimeConnectedBefore = true;
         void loadSongSuggestions(false);
@@ -545,6 +558,13 @@ export function initMusicPlayer() {
     const btnForward = document.getElementById("btn-forward");
     const progressContainer = document.getElementById("progress-container");
     const progressBar = document.getElementById("progress-bar");
+    const sharedPlaybackStatus = document.getElementById('shared-playback-status');
+    const sharedPlaybackSource = document.getElementById('shared-playback-source');
+    const sharedPlaybackTitle = document.getElementById('shared-playback-title');
+    const sharedPlaybackArtist = document.getElementById('shared-playback-artist');
+    const sharedPlaybackCover = document.getElementById('shared-playback-cover');
+    const sharedPlaybackProgressFill = document.getElementById('shared-playback-progress-fill');
+    const sharedPlaybackTimeLabel = document.getElementById('shared-playback-time');
     const bottomBarCover = document.getElementById("bottom-bar-cover");
     const btnShuffle = document.getElementById("btn-shuffle");
     const btnQueue = document.getElementById("btn-queue");
@@ -2148,17 +2168,29 @@ export function initMusicPlayer() {
 
         if (profileActivity) {
             const isOwnProfile = !isFriendProfile;
+            const ownRemotePlayback = isOwnProfile
+                && sharedDevicePlayback?.deviceId !== playbackDeviceId
+                ? sharedDevicePlayback
+                : null;
             const track = isOwnProfile && currentTrackId !== null ? getCurrentTrack() : null;
             const recentTrack = hasPlaybackEvidence(user?.lastPlayed) ? user.lastPlayed : null;
-            const displayTrack = isOwnProfile ? (track || recentTrack) : recentTrack;
-            const currentSourceMatchesTrack = Boolean(track && isCurrentAudioSource(track));
-            const isLoadingTrack = Boolean(isOwnProfile && track && !currentSourceMatchesTrack);
+            const displayTrack = isOwnProfile ? (ownRemotePlayback || track || recentTrack) : recentTrack;
+            const currentSourceMatchesTrack = Boolean(!ownRemotePlayback && track && isCurrentAudioSource(track));
+            const isLoadingTrack = Boolean(isOwnProfile && track && !ownRemotePlayback && !currentSourceMatchesTrack);
             const isListening = isOwnProfile
-                ? Boolean(track && !audio.paused)
+                ? Boolean(ownRemotePlayback
+                    ? ownRemotePlayback.isPlaying !== false
+                    : track && !audio.paused)
                 : Boolean(user?.isOnline && displayTrack && displayTrack.isPlaying !== false);
             const isOnline = Boolean(user) && (isListening || user.isOnline !== false);
             const isOfflineProfile = isOwnProfile && offlineOnly;
-            const currentCover = track ? getSongCover(track) : (displayTrack?.cover || '/img/vinculo.png');
+            const displayDeviceType = ownRemotePlayback
+                ? ownRemotePlayback.deviceType
+                : isOwnProfile && track
+                    ? playbackDeviceType
+                    : displayTrack?.deviceType;
+            const currentCover = ownRemotePlayback?.cover
+                || (track && !ownRemotePlayback ? getSongCover(track) : (displayTrack?.cover || '/img/vinculo.png'));
             const activityColor = displayTrack?.color || '#ff8a00';
             const currentProfileTrackId = track?._id ? String(track._id) : null;
             const localPlaybackUpdatedAt = isOwnProfile && currentProfileTrackId
@@ -2175,9 +2207,9 @@ export function initMusicPlayer() {
             const listeningLabel = isLoadingTrack
                 ? 'Cargando'
                 : isListening
-                    ? 'Escuchando'
+                    ? `Escuchando desde ${playbackDeviceLabel(displayDeviceType)}`
                 : displayTrack
-                    ? `Estaba escuchando${lastPlayedLabel}`
+                    ? `${displayDeviceType ? `Pausado en ${playbackDeviceLabel(displayDeviceType)}` : 'Estaba escuchando'}${lastPlayedLabel}`
                     : 'Sin actividad reciente';
             const statusLabel = isOfflineProfile ? 'Modo offline' : isOnline ? 'En línea' : 'Desconectado';
             const statusMeta = !isOfflineProfile && !isOnline && user?.lastActive ? ` · ${timeAgo(user.lastActive)}` : '';
@@ -2185,12 +2217,16 @@ export function initMusicPlayer() {
                 ? getFriendPlaybackElapsed(user?._id)
                 : 0;
             const elapsed = isOwnProfile
-                ? (currentSourceMatchesTrack && Number.isFinite(audio.currentTime) ? audio.currentTime : 0)
+                ? (ownRemotePlayback
+                    ? getSharedPlaybackTime(ownRemotePlayback)
+                    : currentSourceMatchesTrack && Number.isFinite(audio.currentTime) ? audio.currentTime : 0)
                 : Math.min(Number(displayTrack?.duration) || 0, (Number(displayTrack?.currentTime) || 0) + friendElapsedOffset);
             const total = isOwnProfile
-                ? (currentSourceMatchesTrack && Number.isFinite(audio.duration) && audio.duration > 0
-                    ? audio.duration
-                    : Number(track?.duration) || 0)
+                ? (ownRemotePlayback
+                    ? Number(ownRemotePlayback.duration) || 0
+                    : currentSourceMatchesTrack && Number.isFinite(audio.duration) && audio.duration > 0
+                        ? audio.duration
+                        : Number(track?.duration) || 0)
                 : (Number(displayTrack?.duration) || 0);
             const progress = total > 0 ? Math.min(100, (elapsed / total) * 100) : 0;
             const localTrackIndex = isFriendProfile && displayTrack?.songId
@@ -2318,14 +2354,23 @@ export function initMusicPlayer() {
     function updateProfileActivityProgress() {
         if (!profileActivity || !isProfileMode) return;
         if (selectedProfileUser) {
-            const playback = selectedProfileUser.lastPlayed;
+            const ownRemotePlayback = String(selectedProfileUser._id || '') === String(getStoredUser()?._id || '')
+                && sharedDevicePlayback?.deviceId !== playbackDeviceId
+                ? sharedDevicePlayback
+                : null;
+            const playback = ownRemotePlayback || selectedProfileUser.lastPlayed;
             const duration = Number(playback?.duration) || 0;
             if (!playback || !playback.songName || duration <= 0) return;
-            const isPlaying = Boolean(selectedProfileUser.isOnline && playback.isPlaying !== false);
+            const isPlaying = Boolean(ownRemotePlayback
+                ? playback.isPlaying !== false
+                : selectedProfileUser.isOnline && playback.isPlaying !== false);
             const extraElapsed = isPlaying
+                && !ownRemotePlayback
                 ? getFriendPlaybackElapsed(selectedProfileUser._id)
                 : 0;
-            const elapsed = Math.min(duration, (Number(playback.currentTime) || 0) + extraElapsed);
+            const elapsed = ownRemotePlayback
+                ? getSharedPlaybackTime(playback)
+                : Math.min(duration, (Number(playback.currentTime) || 0) + extraElapsed);
             const progressFill = profileActivity.querySelector('.profile-activity-progress span');
             const timeLabel = profileActivity.querySelector('[data-profile-time]');
             if (progressFill) progressFill.style.width = `${Math.min(100, (elapsed / duration) * 100)}%`;
@@ -2357,6 +2402,100 @@ export function initMusicPlayer() {
         const mins = Math.floor(safeSeconds / 60);
         const secs = safeSeconds % 60;
         return `${mins}:${String(secs).padStart(2, '0')}`;
+    }
+
+    function playbackDeviceLabel(deviceType) {
+        return deviceType === 'mobile' ? 'el celular' : deviceType === 'desktop' ? 'la PC' : 'otro dispositivo';
+    }
+
+    function getSharedPlaybackTime(playback) {
+        const duration = Math.max(0, Number(playback?.duration) || 0);
+        const baseTime = Math.max(0, Number(playback?.currentTime) || 0);
+        const updatedAt = Date.parse(playback?.updatedAt || '');
+        const elapsed = playback?.isPlaying !== false && Number.isFinite(updatedAt)
+            ? Math.max(0, (Date.now() - updatedAt) / 1000)
+            : 0;
+        const currentTime = baseTime + elapsed;
+        return duration > 0 ? Math.min(duration, currentTime) : currentTime;
+    }
+
+    function isRemotePlaybackLocked() {
+        return Boolean(
+            sharedDevicePlayback?.deviceId
+            && sharedDevicePlayback.deviceId !== playbackDeviceId
+            && sharedDevicePlayback.isPlaying !== false
+        );
+    }
+
+    function updatePlaybackControlLock() {
+        const locked = isRemotePlaybackLocked();
+        [btnPrev, btnPlayPause, btnNext, btnRewind, btnForward].forEach(button => {
+            if (button) button.disabled = locked;
+        });
+        if (progressContainer) progressContainer.setAttribute('aria-disabled', String(locked));
+        bottomBar?.classList.toggle('is-remote-playback', Boolean(sharedDevicePlayback?.songName));
+    }
+
+    function renderSharedPlaybackStatus() {
+        const playback = sharedDevicePlayback;
+        if (!sharedPlaybackStatus) return;
+        const visible = Boolean(playback?.songName && playback.deviceId !== playbackDeviceId);
+        sharedPlaybackStatus.hidden = !visible;
+        if (!visible) {
+            updatePlaybackControlLock();
+            return;
+        }
+        const duration = Math.max(0, Number(playback.duration) || 0);
+        const currentTime = getSharedPlaybackTime(playback);
+        const progress = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
+        sharedPlaybackSource.textContent = playback.isPlaying === false
+            ? `En pausa en ${playbackDeviceLabel(playback.deviceType)}`
+            : `Reproduciendo desde ${playbackDeviceLabel(playback.deviceType)}`;
+        sharedPlaybackTitle.textContent = playback.songName || '';
+        sharedPlaybackArtist.textContent = playback.artist || '';
+        sharedPlaybackCover.src = playback.cover || '/img/vinculo.png';
+        sharedPlaybackProgressFill.style.width = `${progress}%`;
+        sharedPlaybackTimeLabel.textContent = `${formatTrackTime(currentTime)} / ${formatTrackTime(duration)}`;
+        updatePlaybackControlLock();
+    }
+
+    function pauseForRemotePlayback() {
+        if (audio.paused) return;
+        suppressRemotePlaybackPause = true;
+        audio.pause();
+    }
+
+    function handleOwnPlaybackUpdate({ userId, playback } = {}) {
+        const ownUserId = String(getStoredUser()?._id || '');
+        if (!ownUserId || String(userId || '') !== ownUserId || !playback) return;
+        if (
+            !playback.deviceId
+            || playback.deviceId === playbackDeviceId
+            || playback.isPlaying === false
+        ) {
+            const hadRemotePlayback = Boolean(sharedDevicePlayback);
+            sharedDevicePlayback = null;
+            if (sharedPlaybackClockTimer) clearInterval(sharedPlaybackClockTimer);
+            sharedPlaybackClockTimer = null;
+            renderSharedPlaybackStatus();
+            if (hadRemotePlayback && isProfileMode && String(selectedProfileUser?._id || '') === ownUserId) {
+                renderProfile();
+            }
+            return;
+        }
+        const previousSongId = sharedDevicePlayback?.songId;
+        sharedDevicePlayback = playback;
+        playbackActivityUserId = null;
+        sharedPlaybackPlaying = false;
+        stopPlaybackStatusSync();
+        if (playback.isPlaying !== false) pauseForRemotePlayback();
+        renderSharedPlaybackStatus();
+        if (sharedPlaybackClockTimer) clearInterval(sharedPlaybackClockTimer);
+        sharedPlaybackClockTimer = setInterval(renderSharedPlaybackStatus, 1000);
+        if (isProfileMode && String(selectedProfileUser?._id || '') === ownUserId) {
+            if (String(previousSongId || '') !== String(playback.songId || '')) renderProfile();
+            else updateProfileActivityProgress();
+        }
     }
 
     function hasPlaybackEvidence(playback) {
@@ -2468,6 +2607,8 @@ export function initMusicPlayer() {
                     ? audio.duration
                     : Number(track.duration) || 0,
                 isPlaying: !audio.paused,
+                deviceId: playbackDeviceId,
+                deviceType: playbackDeviceType,
                 updatedAt: new Date().toISOString()
             }
         });
@@ -2478,7 +2619,7 @@ export function initMusicPlayer() {
             const playback = friend.lastPlayed;
             const duration = Number(playback?.duration) || 0;
             if (hasPlaybackEvidence(playback) && playback?.isPlaying !== false && duration > 0) {
-                return `En línea · ${formatTrackTime(Number(playback.currentTime) || 0)} / ${formatTrackTime(duration)}`;
+                return `En línea · Escuchando desde ${playbackDeviceLabel(playback.deviceType)} · ${formatTrackTime(Number(playback.currentTime) || 0)} / ${formatTrackTime(duration)}`;
             }
             return 'En línea';
         }
@@ -2512,7 +2653,9 @@ export function initMusicPlayer() {
                         </div>
                         ${hasActivity ? `
                             <div class="friend-sidebar-song" style="--profile-track-color: ${safeColor(playback.color)}">
-                                <small>${escapeHtml(isPlaying ? 'Escuchando' : `Escuchó por última vez${lastPlayedLabel}`)}</small>
+                                <small>${escapeHtml(isPlaying
+                                    ? `Escuchando desde ${playbackDeviceLabel(playback.deviceType)}`
+                                    : `Escuchó por última vez${lastPlayedLabel}`)}</small>
                                 <strong>${escapeHtml(playback.songName)}</strong>
                                 <small>${escapeHtml(playback.artist || '')}</small>
                                 <div class="friend-sidebar-progress${duration > 0 ? '' : ' is-hidden'}">
@@ -3184,6 +3327,8 @@ export function initMusicPlayer() {
                 currentTime: sharedPlaybackTime,
                 duration: sharedPlaybackDuration || Number(track.duration) || 0,
                 isPlaying: sharedPlaybackPlaying,
+                deviceId: playbackDeviceId,
+                deviceType: playbackDeviceType,
                 countListeningDelta: isFollowingPlayback() || !suppressNextListeningDelta
             };
         }
@@ -3222,6 +3367,7 @@ export function initMusicPlayer() {
                 || previousPlayback?.artist !== playback.artist
                 || previousPlayback?.cover !== playback.cover
                 || previousPlayback?.color !== playback.color
+                || previousPlayback?.deviceType !== playback.deviceType
                 || Number(previousPlayback?.duration) !== Number(playback.duration)
                 || previousPlayback?.isPlaying !== playback.isPlaying
                 || !wasOnline;
@@ -3242,8 +3388,10 @@ export function initMusicPlayer() {
                 else updateProfileActivityProgress();
             }
         };
+        socket.off('playbackOwnerChanged').on('playbackOwnerChanged', handleOwnPlaybackUpdate);
         socket.off('songChanged').on('songChanged', handleFriendPlayback);
         socket.off('playbackStatusChanged').on('playbackStatusChanged', handleFriendPlayback);
+        if (socket.connected) socket.emit('playbackStateRequest');
         socket.off('playlistChanged').on('playlistChanged', ({ playlistId, deleted, changedBy } = {}) => {
             if (String(changedBy || '') === String(getStoredUser()?._id || '')) return;
             playlistRealtimeRefresh = playlistRealtimeRefresh.then(async () => {
@@ -3454,6 +3602,10 @@ export function initMusicPlayer() {
     function stopRealtime() {
         leaveListenTogetherQueue();
         socket.disconnect();
+        sharedDevicePlayback = null;
+        if (sharedPlaybackClockTimer) clearInterval(sharedPlaybackClockTimer);
+        sharedPlaybackClockTimer = null;
+        renderSharedPlaybackStatus();
         realtimeConnectedBefore = false;
         skipNextRealtimeReconciliation = false;
         friendsFallbackRefreshInProgress = false;
@@ -6391,7 +6543,7 @@ export function initMusicPlayer() {
                 badges.className = 'spotify-like-badges';
                 if (track.isInProgram) {
                     const programBadge = document.createElement('small');
-                    programBadge.textContent = 'Ya esta en AMGC';
+                    programBadge.textContent = 'Ya está en AMGC';
                     programBadge.className = 'spotify-like-badge is-in-program';
                     badges.appendChild(programBadge);
                 }
@@ -8642,6 +8794,14 @@ export function initMusicPlayer() {
     }
 
     audio.addEventListener('play', () => { 
+        if (isRemotePlaybackLocked()) {
+            pauseForRemotePlayback();
+            return;
+        }
+        sharedDevicePlayback = null;
+        if (sharedPlaybackClockTimer) clearInterval(sharedPlaybackClockTimer);
+        sharedPlaybackClockTimer = null;
+        renderSharedPlaybackStatus();
         desktopSetTaskbarPlaybackState?.(true);
         updateDiscordPresence();
         rememberLocalPlaybackActivity();
@@ -8670,6 +8830,17 @@ export function initMusicPlayer() {
         if (isProfileMode) renderProfile();
     });
     audio.addEventListener('pause', () => { 
+        if (suppressRemotePlaybackPause) {
+            suppressRemotePlaybackPause = false;
+            desktopSetTaskbarPlaybackState?.(false);
+            sharedPlaybackPlaying = false;
+            stopPlaybackStatusSync();
+            updatePlaybackControlLock();
+            btnPlayPause.querySelector('img').src = '/img/play.png';
+            stopSpin();
+            if (isProfileMode) renderProfile();
+            return;
+        }
         desktopSetTaskbarPlaybackState?.(false);
         updateDiscordPresence();
         rememberLocalPlaybackActivity();
@@ -8922,6 +9093,10 @@ export function initMusicPlayer() {
     }
 
     function loadAndPlayTrack(index, source = 'regular', shouldPlay = true) {
+        if (shouldPlay && isRemotePlaybackLocked()) {
+            showToast(`La reproducción está activa en ${playbackDeviceLabel(sharedDevicePlayback.deviceType)}.`, true);
+            return;
+        }
         if (isFollowingPlayback() && source !== 'together') return;
         if (index >= playlist.length) index = 0;
         if (index < 0) index = playlist.length - 1;
@@ -9050,7 +9225,7 @@ export function initMusicPlayer() {
     }
 
     function playNextTrack() {
-        if (isFollowingPlayback()) return;
+        if (isFollowingPlayback() || isRemotePlaybackLocked()) return;
         if (customQueue.length > 0) {
             const nextTrack = customQueue.shift();
             const idx = playlist.findIndex(t => t.path === nextTrack.path);
@@ -9084,7 +9259,7 @@ export function initMusicPlayer() {
     }
 
     function rewindTrack() {
-        if (!isFollowingPlayback() && audio.duration) {
+        if (!isFollowingPlayback() && !isRemotePlaybackLocked() && audio.duration) {
             if (playbackUiFrame) {
                 cancelAnimationFrame(playbackUiFrame);
                 playbackUiFrame = null;
@@ -9097,7 +9272,7 @@ export function initMusicPlayer() {
     }
 
     function forwardTrack() {
-        if (!isFollowingPlayback() && audio.duration) {
+        if (!isFollowingPlayback() && !isRemotePlaybackLocked() && audio.duration) {
             if (playbackUiFrame) {
                 cancelAnimationFrame(playbackUiFrame);
                 playbackUiFrame = null;
@@ -9312,6 +9487,7 @@ export function initMusicPlayer() {
     });
 
     btnPlayPause.addEventListener('click', () => {
+        if (isRemotePlaybackLocked()) return;
         if (isFollowingPlayback()) {
             if (listeningTogetherNeedsUserGesture) {
                 audio.play().catch(error => {
@@ -9343,7 +9519,7 @@ export function initMusicPlayer() {
     desktopSetTaskbarPlaybackState?.(!audio.paused);
 
     progressContainer.addEventListener('click', (e) => {
-        if (isFollowingPlayback()) return;
+        if (isFollowingPlayback() || isRemotePlaybackLocked()) return;
         const width = progressContainer.clientWidth;
         const clickX = e.offsetX;
         const duration = audio.duration;
