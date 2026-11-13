@@ -2439,10 +2439,8 @@ export function initMusicPlayer() {
         };
         const deviceType = getPlaybackDeviceType(playback);
         playbackDeviceTriggers.forEach(trigger => {
-            const phoneIcon = trigger.querySelector('[data-playback-device-phone]');
-            const pcIcon = trigger.querySelector('[data-playback-device-pc]');
-            if (phoneIcon) phoneIcon.hidden = deviceType !== 'mobile';
-            if (pcIcon) pcIcon.hidden = deviceType !== 'desktop';
+            trigger.innerHTML = playbackDeviceIconMarkup(deviceType)
+                .replace('class="playback-device-inline"', 'class="playback-device-trigger-icon"');
         });
     }
 
@@ -2877,8 +2875,12 @@ export function initMusicPlayer() {
         if (friend.isOnline) {
             const playback = friend.lastPlayed;
             const duration = Number(playback?.duration) || 0;
-            if (hasPlaybackEvidence(playback) && playback?.isPlaying !== false && duration > 0) {
-                return `En línea · ${escapeHtml(getPlaybackDeviceName(playback))} ${playbackDeviceIconMarkup(getPlaybackDeviceType(playback))} · ${formatTrackTime(Number(playback.currentTime) || 0)} / ${formatTrackTime(duration)}`;
+            if (hasPlaybackEvidence(playback)) {
+                if (playback?.isPlaying === false) return 'Estaba escuchando';
+                const progress = duration > 0
+                    ? ` · ${formatTrackTime(Number(playback.currentTime) || 0)} / ${formatTrackTime(duration)}`
+                    : '';
+                return `Escuchando ${playbackDeviceIconMarkup(getPlaybackDeviceType(playback))}${progress}`;
             }
             return 'En línea';
         }
@@ -2897,7 +2899,7 @@ export function initMusicPlayer() {
                 const statusText = friend.isOnline
                     ? 'En línea'
                     : `${friend.lastActive ? '  ' + timeAgo(friend.lastActive) : ''}`;
-                const playbackLabel = `${escapeHtml(getPlaybackDeviceName(playback))} ${playbackDeviceIconMarkup(getPlaybackDeviceType(playback))}`;
+                const playbackLabel = `${friend.isOnline && playback?.isPlaying !== false ? 'Escuchando' : 'Estaba escuchando'} ${playbackDeviceIconMarkup(getPlaybackDeviceType(playback))}`;
                 return `
                     <li class="friend-sidebar-item" data-friend-id="${escapeHtml(friend._id)}" data-friend-name="${escapeHtml(friend.username)}">
                         <img class="friend-sidebar-avatar" src="${escapeHtml(friend.profilePhoto || '/img/perrocorasongif.gif')}" alt="" loading="lazy" />

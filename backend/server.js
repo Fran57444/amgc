@@ -3531,10 +3531,21 @@ if (isMainModule) {
           isConnected: true
         });
       }
-      return [...devices.values()].sort((first, second) => (
+      const sortedDevices = [...devices.values()].sort((first, second) => (
         Number(second.isConnected) - Number(first.isConnected)
         || Date.parse(second.lastSeenAt || '') - Date.parse(first.lastSeenAt || '')
       ));
+      const connectedMobileNames = new Set(sortedDevices
+        .filter(device => device.isConnected && device.deviceType === 'mobile' && device.deviceName)
+        .map(device => device.deviceName.toLocaleLowerCase()));
+      const seenDisconnectedMobileNames = new Set();
+      return sortedDevices.filter(device => {
+        if (device.deviceType !== 'mobile' || device.isConnected || !device.deviceName) return true;
+        const name = device.deviceName.toLocaleLowerCase();
+        if (connectedMobileNames.has(name) || seenDisconnectedMobileNames.has(name)) return false;
+        seenDisconnectedMobileNames.add(name);
+        return true;
+      });
     };
     const emitPlaybackDevicesChanged = async () => {
       try {

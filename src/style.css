@@ -295,7 +295,7 @@ input, textarea, select {
 .track-title-container { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; }
 #track-name { flex: 0 1 auto; font-size: 0.95rem; color: #fff; font-weight: 600; }
 #track-artist { font-weight: 400; color: rgba(255, 255, 255, 0.7); font-size: 0.8rem; }
-.shared-playback-status { display: flex; min-width: 0; align-items: center; gap: 9px; }
+.shared-playback-status { display: none !important; }
 .shared-playback-status[hidden] { display: none; }
 .shared-playback-status > img { width: 42px; height: 42px; flex: 0 0 42px; border-radius: 4px; object-fit: cover; }
 .shared-playback-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 2px; }
@@ -304,6 +304,7 @@ input, textarea, select {
 .playback-device-picker-trigger { display: inline-flex; width: 24px; height: 24px; flex: 0 0 24px; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: 4px; background: transparent; color: #ffbf78; cursor: pointer; }
 .playback-device-picker-trigger:hover, .playback-device-picker-trigger[aria-expanded="true"] { background: rgba(255,191,120,.14); }
 .playback-device-picker-trigger svg { width: 17px; height: 17px; }
+.playback-device-picker-trigger > .playback-device-trigger-icon { display: block !important; width: 17px !important; height: 17px !important; visibility: visible !important; }
 .playback-device-picker-trigger svg[hidden] { display: none; }
 .shared-playback-device-trigger { margin-left: 2px; }
 .playback-device-picker { position: absolute; z-index: 20; bottom: calc(100% + 10px); left: 0; width: 230px; max-height: 300px; overflow-y: auto; padding: 11px; border: 1px solid rgba(255,255,255,.16); border-radius: 8px; background: #171717; box-shadow: 0 10px 32px rgba(0,0,0,.5); }
@@ -322,10 +323,7 @@ input, textarea, select {
 .shared-playback-copy small { color: rgba(255,255,255,.65); }
 .shared-playback-progress { display: block; width: min(100%, 220px); height: 3px; overflow: hidden; border-radius: 3px; background: rgba(255,255,255,.18); }
 .shared-playback-progress span { display: block; width: 0; height: 100%; background: #ffbf78; }
-#bottom-bar.is-remote-playback #bottom-bar-cover,
-#bottom-bar.is-remote-playback .track-title-container,
-#bottom-bar.is-remote-playback #track-artist,
-#bottom-bar.is-remote-playback #track-duration { display: none; }
+#shared-playback-status { display: none !important; }
 #progress-container[aria-disabled="true"] { pointer-events: none; }
 
 .track-controls { justify-self: center; display: flex; gap: 12px; align-items: center; }
