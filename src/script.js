@@ -52,6 +52,9 @@ export function initMusicPlayer() {
     let sharedPlaybackClockTimer = null;
     let connectedPlaybackDevices = [];
     let playbackTransferPending = false;
+    let activePlaybackTransferId = null;
+    let activePlaybackTransferUserId = null;
+    let isActivatingPlaybackTransfer = false;
     const socket = io(import.meta.env.VITE_SOCKET_URL || window.location.origin, {
         autoConnect: false,
         transports: ['websocket', 'polling'],
@@ -2553,6 +2556,12 @@ export function initMusicPlayer() {
             acknowledgeResult({ success: false, error: 'La transferencia no contiene una canción válida.' });
             return;
         }
+        const transferId = request.transferId || playback.transferId || null;
+        if (transferId) {
+            activePlaybackTransferId = transferId;
+            activePlaybackTransferUserId = String(getStoredUser()?._id || '');
+        }
+        isActivatingPlaybackTransfer = true;
         playbackTransferPending = true;
         renderPlaybackDevicePicker();
         try {
@@ -2585,14 +2594,24 @@ export function initMusicPlayer() {
             audio.currentTime = Math.min(restoreTime, audio.duration || restoreTime);
             sharedPlaybackTime = Number(audio.currentTime) || 0;
             sharedPlaybackDuration = Number(audio.duration) || duration;
+            if (shouldResume && audio.paused) await audio.play();
+            isActivatingPlaybackTransfer = false;
             broadcastPlaybackState(true);
             void updateUserStatus(true);
             acknowledgeResult({ success: true });
         } catch (error) {
+            if (!audio.paused) audio.pause();
+            isActivatingPlaybackTransfer = false;
+            if (activePlaybackTransferId === transferId) {
+                activePlaybackTransferId = null;
+                activePlaybackTransferUserId = null;
+            }
+            if (transferId && socket.connected) socket.emit('playbackTransferRepairFailed', { transferId });
             sharedDevicePlayback = { ...playback, isPlaying: false };
             renderSharedPlaybackStatus();
             acknowledgeResult({ success: false, error: error.message || 'No se pudo iniciar la reproducción en esta PC.' });
         } finally {
+            isActivatingPlaybackTransfer = false;
             playbackTransferPending = false;
             renderPlaybackDevicePicker();
             renderSharedPlaybackStatus();
@@ -2680,11 +2699,11 @@ export function initMusicPlayer() {
             action,
             deviceId: playbackDeviceId,
             ...details
-        });
+        }, 12000);
         if (
             action === 'toggle'
             && !response.success
-            && (response.ownerDisconnected || response.playbackUnavailable)
+            && (response.ownerDisconnected || response.ownerUnresponsive || response.playbackUnavailable)
         ) {
             response = await requestPlaybackSocket('playbackTransferRequest', {
                 targetDeviceId: playbackDeviceId
@@ -2773,6 +2792,30 @@ export function initMusicPlayer() {
             !playback.deviceId
             || playback.deviceId === playbackDeviceId
         ) {
+            const localTrack = getCurrentTrack();
+            const expectedTime = getSharedPlaybackTime(playback);
+            if (
+                playback.transferId
+                && playback.isPlaying !== false
+                && !playbackTransferPending
+                && (
+                    !localTrack
+                    || getTrackStorageId(localTrack) !== String(playback.songId || '')
+                    || audio.paused
+                    || Math.abs((Number(audio.currentTime) || 0) - expectedTime) > 3
+                )
+            ) {
+                void activateTransferredPlayback({
+                    playback,
+                    transferId: playback.transferId,
+                    resumeAfterTransfer: true
+                });
+                return;
+            }
+            if (playback.transferId) {
+                activePlaybackTransferId = playback.transferId;
+                activePlaybackTransferUserId = ownUserId;
+            }
             const hadRemotePlayback = Boolean(sharedDevicePlayback);
             sharedDevicePlayback = null;
             if (sharedPlaybackClockTimer) clearInterval(sharedPlaybackClockTimer);
@@ -2908,12 +2951,15 @@ export function initMusicPlayer() {
             shuffle: isShuffle,
             deviceId: playbackDeviceId,
             deviceType: playbackDeviceType,
+            transferId: activePlaybackTransferUserId === String(getStoredUser()?._id || '')
+                ? activePlaybackTransferId || undefined
+                : undefined,
             updatedAt: new Date().toISOString()
         };
     }
 
     function broadcastPlaybackState(force = false) {
-        if (isRestoringInitialPlayback || suppressStartupPlaybackUpdates) return;
+        if (isRestoringInitialPlayback || suppressStartupPlaybackUpdates || isActivatingPlaybackTransfer) return;
         const user = getStoredUser();
         const track = getCurrentTrack();
         if (
@@ -3626,7 +3672,7 @@ export function initMusicPlayer() {
     }
 
     async function updateUserStatus(isOnline) {
-        if (isRestoringInitialPlayback || suppressStartupPlaybackUpdates) return;
+        if (isRestoringInitialPlayback || suppressStartupPlaybackUpdates || isActivatingPlaybackTransfer) return;
         const user = getStoredUser();
         if (!user) return;
         const track = getCurrentTrack();
