@@ -718,7 +718,6 @@ function App() {
                   <div id="shared-playback-status" className="shared-playback-status" hidden role="status" aria-live="polite">
                     <img id="shared-playback-cover" alt="" />
                     <span className="shared-playback-copy">
-                      <small id="shared-playback-device-name"></small>
                       <span id="shared-playback-title" className="shared-playback-title-row">
                         <span id="shared-playback-title-text"></span>
                         <button className="playback-device-picker-trigger shared-playback-device-trigger" type="button" data-playback-device-trigger aria-label="Elegir dispositivo de reproducción" aria-haspopup="dialog" aria-expanded="false">

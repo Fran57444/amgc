@@ -653,29 +653,31 @@ const playbackTransferTargetByUser = new Map();
 const listenTogetherQueueSessions = new Map();
 const listenTogetherQueueSessionByUser = new Map();
 
+function normalizePlaybackDeviceName(deviceName) {
+  return typeof deviceName === 'string'
+    ? deviceName
+      .replace(/\s*(?:·|[-–—])\s*(?:Microsoft Edge|Edge|Chrome|Chromium|Firefox|Safari|Opera|Brave|Samsung Internet|AMGC)\s*$/i, '')
+      .trim()
+      .slice(0, 80)
+    : '';
+}
+
 function inferPlaybackDeviceName(userAgent, deviceType) {
   const agent = typeof userAgent === 'string' ? userAgent : '';
   const androidModel = agent.match(/Android\s+[^;]+;\s*([^;)]+)/i)?.[1]
     ?.replace(/\s+Build.*$/i, '')
     .trim();
-  const browser = /Edg\//i.test(agent) ? 'Edge'
-    : /Firefox\//i.test(agent) ? 'Firefox'
-      : /Chrome\//i.test(agent) ? 'Chrome'
-        : /Safari\//i.test(agent) ? 'Safari'
-          : 'AMGC';
   if (deviceType === 'mobile') {
-    const model = androidModel
+    return normalizePlaybackDeviceName(androidModel
       || (/\biPad\b/i.test(agent) ? 'iPad'
         : /\biPhone\b/i.test(agent) ? 'iPhone'
           : /\bAndroid\b/i.test(agent) ? 'Android'
-            : 'Móvil');
-    return `${model} · ${browser}`.slice(0, 80);
+            : 'Móvil'));
   }
-  const platform = /Windows/i.test(agent) ? 'Windows'
+  return /Windows/i.test(agent) ? 'Windows'
     : /Macintosh|Mac OS/i.test(agent) ? 'macOS'
       : /Linux/i.test(agent) ? 'Linux'
         : 'Escritorio';
-  return `${platform} · ${browser}`.slice(0, 80);
 }
 
 function inferPlaybackDeviceType(deviceType, userAgent) {
@@ -1589,11 +1591,12 @@ app.post('/api/users/status', async (req, res) => {
           ? lastPlayed.deviceType
           : registeredSocket?.data.playbackDeviceType
             || (previousUser?.lastPlayed?.deviceId === incomingDeviceId ? previousUser.lastPlayed.deviceType : 'unknown');
-        const deviceName = typeof lastPlayed.deviceName === 'string' && lastPlayed.deviceName.trim()
-          ? lastPlayed.deviceName.trim().slice(0, 80)
-          : registeredSocket?.data.playbackDeviceName
-            || (previousUser?.lastPlayed?.deviceId === incomingDeviceId ? previousUser.lastPlayed.deviceName : '')
-            || inferPlaybackDeviceName('', deviceType);
+        const deviceName = normalizePlaybackDeviceName(lastPlayed.deviceName)
+          || registeredSocket?.data.playbackDeviceName
+          || (previousUser?.lastPlayed?.deviceId === incomingDeviceId
+            ? normalizePlaybackDeviceName(previousUser.lastPlayed.deviceName)
+            : '')
+          || inferPlaybackDeviceName('', deviceType);
         const isNewSong = String(previousUser?.lastPlayed?.songId || '') !== String(lastPlayed.songId || '');
         const playbackColor = typeof lastPlayed.color === 'string' && /^#[0-9a-f]{6}$/i.test(lastPlayed.color)
           ? lastPlayed.color
@@ -3502,7 +3505,7 @@ if (isMainModule) {
         if (typeof device.deviceId !== 'string' || !device.deviceId) continue;
         devices.set(device.deviceId, {
           deviceId: device.deviceId,
-          deviceName: device.deviceName,
+          deviceName: normalizePlaybackDeviceName(device.deviceName),
           deviceType: ['mobile', 'desktop'].includes(device.deviceType) ? device.deviceType : 'unknown',
           firstSeenAt: device.firstSeenAt || null,
           lastSeenAt: device.lastSeenAt || null,
@@ -3520,8 +3523,8 @@ if (isMainModule) {
         devices.set(playbackDeviceId, {
           ...existingDevice,
           deviceId: playbackDeviceId,
-          deviceName: playbackDeviceName || existingDevice?.deviceName
-            || inferPlaybackDeviceName(activeSocket.handshake.headers['user-agent'], playbackDeviceType),
+          deviceName: normalizePlaybackDeviceName(playbackDeviceName || existingDevice?.deviceName
+            || inferPlaybackDeviceName(activeSocket.handshake.headers['user-agent'], playbackDeviceType)),
           deviceType: ['mobile', 'desktop'].includes(playbackDeviceType)
             ? playbackDeviceType
             : existingDevice?.deviceType || 'unknown',
@@ -3631,7 +3634,7 @@ if (isMainModule) {
               deviceType: ['mobile', 'desktop'].includes(playback.deviceType)
                 ? playback.deviceType
                 : knownDevice?.deviceType || 'unknown',
-              deviceName: playback.deviceName || knownDevice?.deviceName || ''
+              deviceName: normalizePlaybackDeviceName(playback.deviceName || knownDevice?.deviceName)
             };
             playbackStateByUser.set(authenticatedUserId, playback);
           }
@@ -3847,7 +3850,7 @@ if (isMainModule) {
                 ...pausedPlayback,
                 deviceId: normalizedTargetDeviceId,
                 deviceType: targetSocket.data.playbackDeviceType,
-                deviceName: targetSocket.data.playbackDeviceName,
+                deviceName: normalizePlaybackDeviceName(targetSocket.data.playbackDeviceName),
                 isPlaying: Boolean(resumeAfterTransfer),
                 resumeAfterTransfer: false,
                 sourceUpdatedAt: transferredAt,
@@ -4149,7 +4152,7 @@ if (isMainModule) {
           ...playback,
           deviceId: sourceDeviceId,
           deviceType: socket.data.playbackDeviceType,
-          deviceName: socket.data.playbackDeviceName,
+          deviceName: normalizePlaybackDeviceName(socket.data.playbackDeviceName),
           sourceUpdatedAt: Date.parse(playback.updatedAt || '') || Date.now(),
           updatedAt: new Date().toISOString()
         };

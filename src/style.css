@@ -299,7 +299,6 @@ input, textarea, select {
 .shared-playback-status[hidden] { display: none; }
 .shared-playback-status > img { width: 42px; height: 42px; flex: 0 0 42px; border-radius: 4px; object-fit: cover; }
 .shared-playback-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 2px; }
-.shared-playback-copy > small:first-child { color: #ffbf78; font-size: .68rem; }
 .shared-playback-title-row { display: flex; min-width: 0; align-items: center; gap: 4px; }
 .shared-playback-title-row > span { min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .playback-device-picker-trigger { display: inline-flex; width: 24px; height: 24px; flex: 0 0 24px; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: 4px; background: transparent; color: #ffbf78; cursor: pointer; }

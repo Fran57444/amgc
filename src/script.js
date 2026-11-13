@@ -564,7 +564,6 @@ export function initMusicPlayer() {
     const progressContainer = document.getElementById("progress-container");
     const progressBar = document.getElementById("progress-bar");
     const sharedPlaybackStatus = document.getElementById('shared-playback-status');
-    const sharedPlaybackDeviceName = document.getElementById('shared-playback-device-name');
     const sharedPlaybackTitleText = document.getElementById('shared-playback-title-text');
     const sharedPlaybackArtist = document.getElementById('shared-playback-artist');
     const sharedPlaybackCover = document.getElementById('shared-playback-cover');
@@ -2201,7 +2200,7 @@ export function initMusicPlayer() {
             const listeningLabel = isLoadingTrack
                 ? 'Cargando'
                 : displayTrack
-                    ? getPlaybackDeviceName(profileDevicePlayback)
+                    ? isListening ? 'Escuchando' : 'Estaba escuchando'
                     : 'Sin actividad reciente';
             const statusLabel = isOfflineProfile ? 'Modo offline' : isOnline ? 'En línea' : 'Desconectado';
             const statusMeta = !isOfflineProfile && !isOnline && user?.lastActive ? ` · ${timeAgo(user.lastActive)}` : '';
@@ -2413,13 +2412,15 @@ export function initMusicPlayer() {
         const deviceName = `${playback?.deviceName || registeredDevice?.deviceName || ''}`;
         if (/android|iphone|ipad|móvil/i.test(deviceName)) return 'mobile';
         if (/windows|macos|linux|escritorio/i.test(deviceName)) return 'desktop';
-        return '';
+        return playback?.deviceId === playbackDeviceId ? playbackDeviceType : 'mobile';
     }
 
     function getPlaybackDeviceName(playback) {
         const registeredDevice = connectedPlaybackDevices.find(device => device.deviceId === playback?.deviceId);
         if (playback?.deviceName || registeredDevice?.deviceName) {
-            return playback.deviceName || registeredDevice.deviceName;
+            return (playback.deviceName || registeredDevice.deviceName)
+                .replace(/\s*(?:·|[-–—])\s*(?:Microsoft Edge|Edge|Chrome|Chromium|Firefox|Safari|Opera|Brave|Samsung Internet|AMGC)\s*$/i, '')
+                .trim();
         }
         const deviceType = getPlaybackDeviceType(playback);
         return deviceType === 'mobile' ? 'AMGC en Android'
@@ -2547,9 +2548,13 @@ export function initMusicPlayer() {
             sharedDevicePlayback = null;
             if (sharedPlaybackClockTimer) clearInterval(sharedPlaybackClockTimer);
             sharedPlaybackClockTimer = null;
-            const loaded = await loadAndPlayTrack(trackIndex, 'regular', shouldResume, restoreTime);
+            let loaded = false;
+            for (let attempt = 0; attempt < 2; attempt += 1) {
+                loaded = await loadAndPlayTrack(trackIndex, 'regular', shouldResume, restoreTime);
+                if (loaded || attempt > 0) break;
+                await new Promise(resolve => setTimeout(resolve, 300));
+            }
             if (!loaded) {
-                if (audio.error) await waitForAudioMetadata();
                 throw new Error('No se pudo iniciar la canción en esta PC.');
             }
             await waitForAudioMetadata();
@@ -2700,7 +2705,6 @@ export function initMusicPlayer() {
         const duration = Math.max(0, Number(playback.duration) || 0);
         const currentTime = getSharedPlaybackTime(playback);
         const progress = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
-        sharedPlaybackDeviceName.textContent = getPlaybackDeviceName(playback);
         updatePlaybackDevicePickerIcons();
         sharedPlaybackTitleText.textContent = playback.songName || '';
         sharedPlaybackArtist.textContent = playback.artist || '';
