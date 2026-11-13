@@ -14,6 +14,12 @@ import {
 import { createOfflineMediaManager } from './offlineMedia.js';
 import { createSongListRenderer } from './songList.js';
 import { fetchSpotifyLikedTracksPage } from './spotifyClient.js';
+import {
+    formatPlaybackRelativeTime,
+    getPlaybackElapsedSeconds,
+    getPlaybackLastHeardAt,
+    getPlaybackLastHeardLabel
+} from './playbackActivity.js';
 
 export function initMusicPlayer() {
     const API_URL = import.meta.env.VITE_API_URL || '/api';
@@ -256,6 +262,7 @@ export function initMusicPlayer() {
         connectRealtime();
     });
     socket.off('connect').on('connect', async () => {
+        accountQueueDeviceId = null;
         socket.emit('playbackStateRequest', { deviceId: playbackDeviceId, deviceType: playbackDeviceType });
         const isReconnect = realtimeConnectedBefore;
         realtimeConnectedBefore = true;
@@ -306,7 +313,10 @@ export function initMusicPlayer() {
     };
     window.addEventListener('online', refreshFriendsAfterForeground);
     document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') refreshFriendsAfterForeground();
+        if (document.visibilityState === 'visible') {
+            refreshFriendsAfterForeground();
+            syncProfileActivityTimer();
+        }
     });
     const apiFetch = async (url, options = {}) => {
         const isLoginRequest = String(url).includes('/auth/login');
@@ -881,6 +891,7 @@ export function initMusicPlayer() {
     const annoyedFriendIds = new Set();
     const friendRealtimeUpdates = new Map();
     let selectedProfileUser = null;
+    let profileActivityTimer = null;
     let listeningTogetherUserId = null;
     let sharedQueueSessionId = null;
     let sharedQueueRole = null;
@@ -889,6 +900,10 @@ export function initMusicPlayer() {
     let sharedQueueSnapshotRevision = 0;
     const pendingSharedQueueAdds = new Set();
     let lastSharedQueueSnapshot = null;
+    let accountQueueIds = [];
+    let accountQueueRevision = 0;
+    let accountQueueSnapshotSignature = null;
+    let accountQueueDeviceId = null;
     let listeningTogetherAwaitingFreshPlayback = false;
     let listeningTogetherNeedsUserGesture = false;
     let listeningTogetherMetadataWaitTrackId = null;
@@ -2225,7 +2240,20 @@ export function initMusicPlayer() {
                 : null;
             const track = isOwnProfile && currentTrackId !== null ? getCurrentTrack() : null;
             const recentTrack = hasPlaybackEvidence(user?.lastPlayed) ? user.lastPlayed : null;
-            const displayTrack = isOwnProfile ? (ownRemotePlayback || track || recentTrack) : recentTrack;
+            const localPlayback = isOwnProfile && track
+                ? {
+                    ...track,
+                    isPlaying: !audio.paused,
+                    currentTime: Number.isFinite(audio.currentTime) ? audio.currentTime : 0,
+                    duration: Number.isFinite(audio.duration) && audio.duration > 0
+                        ? audio.duration
+                        : Number(track.duration) || 0,
+                    updatedAt: new Date().toISOString(),
+                    deviceId: playbackDeviceId,
+                    deviceType: playbackDeviceType
+                }
+                : null;
+            const displayTrack = isOwnProfile ? (ownRemotePlayback || localPlayback || recentTrack) : recentTrack;
             const currentSourceMatchesTrack = Boolean(!ownRemotePlayback && track && isCurrentAudioSource(track));
             const isLoadingTrack = Boolean(isOwnProfile && track && !ownRemotePlayback && !currentSourceMatchesTrack);
             const isListening = isOwnProfile
@@ -2250,20 +2278,20 @@ export function initMusicPlayer() {
                 : displayTrack
                     ? isListening ? 'Escuchando' : 'Estaba escuchando'
                     : 'Sin actividad reciente';
+            const lastHeardAt = displayTrack
+                ? getPlaybackLastHeardAt(ownRemotePlayback || displayTrack, user?.lastPlayed)
+                : '';
             const lastHeardLabel = displayTrack && !isListening
                 ? getPlaybackLastHeardLabel(ownRemotePlayback || displayTrack, false, user?.lastPlayed)
                 : '';
             const playbackStatusLabel = `${listeningLabel}${lastHeardLabel ? ` · ${lastHeardLabel}` : ''}`;
             const statusLabel = isOfflineProfile ? 'Modo offline' : isOnline ? 'En línea' : 'Desconectado';
             const statusMeta = !isOfflineProfile && !isOnline && user?.lastActive ? ` · ${timeAgo(user.lastActive)}` : '';
-            const friendElapsedOffset = !isOwnProfile && isListening
-                ? getFriendPlaybackElapsed(user?._id)
-                : 0;
             const elapsed = isOwnProfile
                 ? (ownRemotePlayback
                     ? getSharedPlaybackTime(ownRemotePlayback)
                     : currentSourceMatchesTrack && Number.isFinite(audio.currentTime) ? audio.currentTime : 0)
-                : Math.min(Number(displayTrack?.duration) || 0, (Number(displayTrack?.currentTime) || 0) + friendElapsedOffset);
+                : getPlaybackElapsedSeconds(displayTrack, isListening);
             const total = isOwnProfile
                 ? (ownRemotePlayback
                     ? Number(ownRemotePlayback.duration) || 0
@@ -2303,7 +2331,12 @@ export function initMusicPlayer() {
                     >
                         <img src="${escapeHtml(currentCover)}" alt="Portada de la canción" class="profile-activity-cover" draggable="false" />
                         <div class="profile-activity-details">
-                            <span class="profile-activity-label">${escapeHtml(playbackStatusLabel)}${displayDeviceType ? playbackDeviceIconMarkup(displayDeviceType) : ''}</span>
+                            <span class="profile-activity-label"><span
+                                data-playback-status
+                                data-is-listening="${isListening}"
+                                data-last-heard-at="${escapeHtml(lastHeardAt)}"
+                                data-fixed="${isLoadingTrack || !displayTrack}"
+                            >${escapeHtml(playbackStatusLabel)}</span>${displayDeviceType ? playbackDeviceIconMarkup(displayDeviceType) : ''}</span>
                             <strong>${escapeHtml(displayTrack?.name || displayTrack?.songName || 'Sin actividad reciente')}</strong>
                             <small>${escapeHtml(displayTrack?.artist || 'Sin artista')}</small>
                             <div class="profile-activity-progress${displayTrack ? '' : ' is-hidden'}">
@@ -2364,6 +2397,7 @@ export function initMusicPlayer() {
         profilePlaylists?.querySelectorAll('li[data-playlist-id]').forEach((item) => {
             item.addEventListener('click', () => openPlaylistView(item.dataset.playlistId));
         });
+        syncProfileActivityTimer();
     }
 
     function timeAgo(dateValue) {
@@ -2379,34 +2413,9 @@ export function initMusicPlayer() {
         return `hace ${Math.floor(diffH / 24)} d`;
     }
 
-    function getPlaybackLastHeardLabel(playback, isListening, fallbackPlayback = null) {
-        if (isListening) return '';
-        const lastHeardAt = playback?.lastHeardAt
-            || fallbackPlayback?.lastHeardAt
-            || (playback?.isPlaying === false ? playback.updatedAt : '')
-            || (fallbackPlayback?.isPlaying === false ? fallbackPlayback.updatedAt : '')
-            || playback?.updatedAt
-            || fallbackPlayback?.updatedAt;
-        return lastHeardAt ? timeAgo(lastHeardAt) : '';
-    }
-
-    function getFriendPlaybackElapsed(friendId) {
-        const realtimeUpdate = friendRealtimeUpdates.get(String(friendId || ''));
-        const serverUpdatedAt = Date.parse(
-            realtimeUpdate?.lastPlayed?.updatedAt || realtimeUpdate?.updatedAt || ''
-        );
-        const serverAge = Date.now() - serverUpdatedAt;
-        if (Number.isFinite(serverUpdatedAt) && serverAge >= 0 && serverAge <= 10000) {
-            return serverAge / 1000;
-        }
-        const playbackReceivedAt = realtimeUpdate?.playbackReceivedAt;
-        return Number.isFinite(playbackReceivedAt)
-            ? Math.max(0, (performance.now() - playbackReceivedAt) / 1000)
-            : 0;
-    }
-
     function updateProfileActivityProgress() {
         if (!profileActivity || !isProfileMode) return;
+        updateProfileActivityStatusLabel();
         const profileUser = selectedProfileUser || getStoredUser();
         const ownRemotePlayback = String(profileUser?._id || '') === String(getStoredUser()?._id || '')
                 && sharedDevicePlayback?.deviceId !== playbackDeviceId
@@ -2419,13 +2428,9 @@ export function initMusicPlayer() {
             const isPlaying = Boolean(ownRemotePlayback
                 ? playback.isPlaying !== false
                 : selectedProfileUser?.isOnline && playback.isPlaying !== false);
-            const extraElapsed = isPlaying
-                && !ownRemotePlayback
-                ? getFriendPlaybackElapsed(selectedProfileUser._id)
-                : 0;
             const elapsed = ownRemotePlayback
                 ? getSharedPlaybackTime(playback)
-                : Math.min(duration, (Number(playback.currentTime) || 0) + extraElapsed);
+                : getPlaybackElapsedSeconds(playback, isPlaying);
             const progressFill = profileActivity.querySelector('.profile-activity-progress span');
             const timeLabel = profileActivity.querySelector('[data-profile-time]');
             if (progressFill) progressFill.style.width = `${Math.min(100, (elapsed / duration) * 100)}%`;
@@ -2450,6 +2455,41 @@ export function initMusicPlayer() {
 
         if (progressFill) progressFill.style.width = `${progress}%`;
         if (timeLabel) timeLabel.textContent = `${formatTrackTime(elapsed)} / ${formatTrackTime(total)}`;
+    }
+
+    function updateProfileActivityStatusLabel() {
+        const status = profileActivity?.querySelector('[data-playback-status]');
+        if (!status || status.dataset.fixed === 'true') return;
+        const isListening = status.dataset.isListening === 'true';
+        const lastHeard = formatPlaybackRelativeTime(status.dataset.lastHeardAt);
+        const label = isListening
+            ? 'Escuchando'
+            : `Estaba escuchando${lastHeard ? ` · ${lastHeard}` : ''}`;
+        if (status.textContent !== label) status.textContent = label;
+    }
+
+    function syncProfileActivityTimer() {
+        if (!isProfileMode || document.hidden || !profileActivity?.querySelector('[data-playback-status]')) {
+            if (profileActivityTimer) clearInterval(profileActivityTimer);
+            profileActivityTimer = null;
+            return;
+        }
+        if (profileActivityTimer) return;
+        updateProfileActivityProgress();
+        profileActivityTimer = window.setInterval(() => {
+            if (!isProfileMode || document.hidden) {
+                clearInterval(profileActivityTimer);
+                profileActivityTimer = null;
+                return;
+            }
+            updateProfileActivityProgress();
+        }, 1000);
+    }
+
+    function getFriendPlaybackElapsed(friendId) {
+        const playback = friendRealtimeUpdates.get(String(friendId || ''))?.lastPlayed;
+        const isOnline = friendRealtimeUpdates.get(String(friendId || ''))?.isOnline !== false;
+        return Math.max(0, getPlaybackElapsedSeconds(playback, isOnline) - (Number(playback?.currentTime) || 0));
     }
 
     function formatTrackTime(seconds = 0) {
@@ -2854,6 +2894,7 @@ export function initMusicPlayer() {
             }
             const hadRemotePlayback = Boolean(sharedDevicePlayback);
             sharedDevicePlayback = null;
+            syncAccountQueue();
             if (sharedPlaybackClockTimer) clearInterval(sharedPlaybackClockTimer);
             sharedPlaybackClockTimer = null;
             renderSharedPlaybackStatus();
@@ -2871,6 +2912,7 @@ export function initMusicPlayer() {
         const previousSongId = sharedDevicePlayback?.songId;
         const previousColor = sharedDevicePlayback?.color;
         sharedDevicePlayback = playback;
+        syncAccountQueue();
         playbackActivityUserId = null;
         sharedPlaybackPlaying = false;
         stopPlaybackStatusSync();
@@ -3799,6 +3841,7 @@ export function initMusicPlayer() {
             updatePlaybackDevicePickerIcons();
             renderPlaybackDevicePicker();
             renderSharedPlaybackStatus();
+            syncAccountQueue();
         });
         socket.off('playbackTransferCommand').on('playbackTransferCommand', activateTransferredPlayback);
         socket.off('playbackControlCommand').on('playbackControlCommand', async (command = {}, acknowledge = () => {}) => {
@@ -3961,12 +4004,110 @@ export function initMusicPlayer() {
                 ...(success ? {} : { error: 'No se pudo añadir la canción a la cola.' })
             });
         });
+        socket.off('accountQueueSnapshot').on('accountQueueSnapshot', ({ revision, songIds } = {}) => {
+            if (!Number.isInteger(revision) || revision <= accountQueueRevision || !Array.isArray(songIds)) return;
+            accountQueueRevision = revision;
+            accountQueueIds = songIds.map(String);
+            accountQueueSnapshotSignature = accountQueueIds.join(',');
+            accountQueueDeviceId = getRemotePlaybackSession()?.deviceId || null;
+            if (getRemotePlaybackSession()) renderQueue();
+        });
+        socket.off('accountQueuePublishRequest').on('accountQueuePublishRequest', () => {
+            if (!getRemotePlaybackSession() && !listeningTogetherUserId) publishAccountQueueSnapshot(true);
+        });
+        socket.off('accountQueueAddCommand').on('accountQueueAddCommand', ({ songId } = {}, acknowledge = () => {}) => {
+            if (getRemotePlaybackSession() || listeningTogetherUserId) {
+                acknowledge({ success: false, error: 'La reproducción cambió de dispositivo.' });
+                return;
+            }
+            const track = playlist.find(item => String(item._id || item.id) === String(songId || ''));
+            if (!track) {
+                acknowledge({ success: false, error: 'La canción no está disponible en esta biblioteca.' });
+                return;
+            }
+            const success = addTrackToQueue(track);
+            acknowledge(success
+                ? { success: true }
+                : { success: false, error: 'No se pudo añadir la canción a la cola.' });
+        });
+        socket.off('accountQueueReplaceCommand').on('accountQueueReplaceCommand', ({ revision, songIds } = {}, acknowledge = () => {}) => {
+            if (
+                getRemotePlaybackSession()
+                || listeningTogetherUserId
+                || revision !== accountQueueRevision
+                || !Array.isArray(songIds)
+                || songIds.length > 5000
+            ) {
+                acknowledge({ success: false, error: 'La cola cambió. Vuelve a intentarlo.' });
+                return;
+            }
+            const tracks = songIds.map(songId => playlist.find(track => (
+                String(track._id || track.id) === String(songId)
+            )));
+            if (tracks.some(track => !track)) {
+                acknowledge({ success: false, error: 'La cola contiene canciones que ya no están disponibles.' });
+                return;
+            }
+            const currentTrack = getCurrentTrack();
+            customQueue = tracks;
+            activeQueueTracks = currentTrack ? [currentTrack] : [];
+            generalQueueAnchorTrackId = currentTrack ? String(currentTrack._id) : null;
+            unplayedIndices = [];
+            renderQueue();
+            acknowledge({ success: true });
+        });
+        socket.off('accountQueuePlayCommand').on('accountQueuePlayCommand', async ({ songId, position, revision } = {}, acknowledge = () => {}) => {
+            if (getRemotePlaybackSession() || listeningTogetherUserId) {
+                acknowledge({ success: false, error: 'La reproducción cambió de dispositivo.' });
+                return;
+            }
+            const sourceIndices = isShuffle ? [...unplayedIndices] : getSequentialQueueIndices();
+            const explicitQueueLength = customQueue.length;
+            const queuedSongIds = [
+                ...customQueue.map(track => String(track?._id || track?.id || '')).filter(Boolean),
+                ...sourceIndices.map(index => String(playlist[index]?._id || playlist[index]?.id || '')).filter(Boolean)
+            ];
+            if (
+                revision !== accountQueueRevision
+                || !Number.isInteger(position)
+                || position < 0
+                || queuedSongIds[position] !== String(songId || '')
+            ) {
+                acknowledge({ success: false, error: 'La cola cambió. Vuelve a seleccionar la canción.' });
+                return;
+            }
+            const trackIndex = position < explicitQueueLength
+                ? playlist.findIndex(track => String(track._id || track.id) === String(songId || ''))
+                : sourceIndices[position - explicitQueueLength];
+            if (trackIndex < 0 || !playlist[trackIndex]) {
+                acknowledge({ success: false, error: 'La canción ya no está en la cola.' });
+                return;
+            }
+            let source = 'custom';
+            if (position < explicitQueueLength) {
+                customQueue.splice(0, position + 1);
+            } else {
+                customQueue.length = 0;
+                if (isShuffle) unplayedIndices.splice(0, position - explicitQueueLength + 1);
+                source = isShuffle ? 'shuffle' : 'regular';
+            }
+            playbackHistory.push({ index: currentTrackIndex, source: currentTrackSource });
+            try {
+                const loaded = await loadAndPlayTrack(trackIndex, source);
+                renderQueue();
+                acknowledge(loaded
+                    ? { success: true }
+                    : { success: false, error: 'No se pudo iniciar la canción en este dispositivo.' });
+            } catch (error) {
+                console.error('No se pudo reproducir una canción solicitada desde otro dispositivo.', error);
+                acknowledge({ success: false, error: error.message || 'No se pudo iniciar la canción.' });
+            }
+        });
         socket.off('listenTogetherQueueSessionEnded').on('listenTogetherQueueSessionEnded', ({ sessionId } = {}) => {
             if (String(sessionId || '') !== String(sharedQueueSessionId || '')) return;
             const wasFollower = sharedQueueRole === 'follower';
             sharedQueueSessionId = null;
             sharedQueueRole = null;
-            sharedQueueJoinPending = false;
             lastSharedQueueSnapshot = null;
             sharedQueueSnapshotRevision = 0;
             if (wasFollower && sharedQueueSavedLocalQueue) {
@@ -4074,6 +4215,10 @@ export function initMusicPlayer() {
         leaveListenTogetherQueue();
         socket.disconnect();
         sharedDevicePlayback = null;
+        accountQueueIds = [];
+        accountQueueRevision = 0;
+        accountQueueSnapshotSignature = null;
+        accountQueueDeviceId = null;
         if (sharedPlaybackClockTimer) clearInterval(sharedPlaybackClockTimer);
         sharedPlaybackClockTimer = null;
         renderSharedPlaybackStatus();
@@ -4123,10 +4268,7 @@ export function initMusicPlayer() {
             if (!friend || !playback) return;
 
             const isPlaying = Boolean(friend.isOnline && playback.songName && playback.isPlaying !== false);
-            const extraElapsed = isPlaying
-                ? getFriendPlaybackElapsed(friend._id)
-                : 0;
-            const elapsed = Math.min(duration, (Number(playback.currentTime) || 0) + extraElapsed);
+            const elapsed = getPlaybackElapsedSeconds(playback, isPlaying);
             const progress = duration > 0 ? Math.min(100, (elapsed / duration) * 100) : 0;
             const progressFill = item.querySelector('[data-friend-progress]');
             const timeLabel = item.querySelector('[data-friend-playback-time]');
@@ -6367,7 +6509,15 @@ export function initMusicPlayer() {
             || !sharedQueueSessionId
             || !socket.connected
         ) return;
-        const songIds = customQueue.map(track => String(track?._id || track?.id || '')).filter(Boolean);
+        const sourceIndices = isShuffle ? [...unplayedIndices] : getSequentialQueueIndices();
+        const sourceSongIds = sourceIndices
+            .map(index => playlist[index])
+            .map(track => String(track?._id || track?.id || ''))
+            .filter(Boolean);
+        const songIds = [
+            ...customQueue.map(track => String(track?._id || track?.id || '')).filter(Boolean),
+            ...sourceSongIds
+        ].slice(0, 5000);
         const signature = `${sharedQueueSessionId}:${songIds.join(',')}`;
         if (signature === lastSharedQueueSnapshot) return;
         lastSharedQueueSnapshot = signature;
@@ -6432,6 +6582,119 @@ export function initMusicPlayer() {
         });
     }
 
+    function getAccountQueueSongIds() {
+        const sourceIndices = isShuffle ? [...unplayedIndices] : getSequentialQueueIndices();
+        return [
+            ...customQueue.map(track => String(track?._id || track?.id || '')).filter(Boolean),
+            ...sourceIndices
+                .map(index => playlist[index])
+                .map(track => String(track?._id || track?.id || ''))
+                .filter(Boolean)
+        ].slice(0, 5000);
+    }
+
+    function publishAccountQueueSnapshot(force = false) {
+        if (getRemotePlaybackSession() || !socket.connected) return;
+        const songIds = getAccountQueueSongIds();
+        const signature = songIds.join(',');
+        if (!force && signature === accountQueueSnapshotSignature) return;
+        accountQueueSnapshotSignature = signature;
+        socket.emit('accountQueueSnapshot', { songIds }, response => {
+            if (response?.success) return;
+            if (accountQueueSnapshotSignature === signature) accountQueueSnapshotSignature = null;
+            showToast(response?.error || 'No se pudo sincronizar la cola de la cuenta.', true);
+        });
+    }
+
+    function requestAccountQueueSnapshot() {
+        if (!socket.connected) return;
+        socket.emit('accountQueueRequest', response => {
+            if (!response?.success) {
+                accountQueueDeviceId = null;
+                showToast(response?.error || 'No se pudo cargar la cola de la cuenta.', true);
+            }
+        });
+    }
+
+    function requestAccountQueueAdd(songId) {
+        if (!socket.connected) {
+            showToast('No hay conexión para actualizar la cola de la cuenta.', true);
+            return;
+        }
+        socket.emit('accountQueueAddRequest', { songId: String(songId || '') }, response => {
+            if (!response?.success) {
+                showToast(response?.error || 'No se pudo añadir la canción a la cola.', true);
+                return;
+            }
+            showToast('Canción añadida a la cola.');
+        });
+    }
+
+    function requestAccountQueuePlay(songId, position) {
+        if (!socket.connected || !accountQueueRevision) {
+            showToast('La cola compartida todavía se está cargando.', true);
+            return;
+        }
+        socket.emit('accountQueuePlayRequest', {
+            songId: String(songId || ''),
+            position,
+            revision: accountQueueRevision
+        }, response => {
+            if (!response?.success) {
+                showToast(response?.error || 'No se pudo reproducir la canción.', true);
+            }
+        });
+    }
+
+    function requestAccountQueueUpdate(songIds) {
+        if (!socket.connected || !accountQueueRevision) {
+            showToast('La cola compartida todavía se está cargando.', true);
+            return;
+        }
+        socket.emit('accountQueueUpdateRequest', {
+            revision: accountQueueRevision,
+            songIds
+        }, response => {
+            if (!response?.success) {
+                showToast(response?.error || 'No se pudo actualizar la cola.', true);
+            }
+        });
+    }
+
+    function removeAccountQueueTrack(position) {
+        if (!Number.isInteger(position) || position < 0 || position >= accountQueueIds.length) return;
+        const songIds = [...accountQueueIds];
+        songIds.splice(position, 1);
+        requestAccountQueueUpdate(songIds);
+    }
+
+    function reorderAccountQueue(fromPosition, toPosition) {
+        if (
+            fromPosition === toPosition
+            || fromPosition < 0
+            || toPosition < 0
+            || fromPosition >= accountQueueIds.length
+            || toPosition >= accountQueueIds.length
+        ) return;
+        const songIds = [...accountQueueIds];
+        const [movedSongId] = songIds.splice(fromPosition, 1);
+        songIds.splice(toPosition, 0, movedSongId);
+        requestAccountQueueUpdate(songIds);
+    }
+
+    function syncAccountQueue() {
+        const remotePlayback = getRemotePlaybackSession();
+        if (remotePlayback) {
+            if (accountQueueDeviceId !== remotePlayback.deviceId) {
+                accountQueueDeviceId = remotePlayback.deviceId;
+                requestAccountQueueSnapshot();
+            }
+            return;
+        }
+        accountQueueDeviceId = null;
+        if (getCurrentTrack() && !listeningTogetherUserId) publishAccountQueueSnapshot();
+    }
+
     function requestSharedQueueAdd(songId) {
         if (!sharedQueueSessionId || !socket.connected) {
             showToast('La cola compartida se desconectó antes de añadir la canción.', true);
@@ -6483,6 +6746,10 @@ export function initMusicPlayer() {
         if (!queuedTrack?._id) {
             showToast('No se pudo identificar la canción para añadirla a la cola.', true);
             return false;
+        }
+        if (getRemotePlaybackSession()) {
+            requestAccountQueueAdd(queuedTrack._id);
+            return true;
         }
         if (sharedQueueRole === 'host' && customQueue.length >= 5000) {
             showToast('La cola compartida alcanzó el máximo de 5000 canciones.', true);
@@ -9537,6 +9804,14 @@ export function initMusicPlayer() {
         const upcomingIndices = isShuffle ? [...unplayedIndices] : getSequentialQueueIndices();
         const remotePlayback = getRemotePlaybackSession();
         const currentTrack = remotePlayback ? getLyricsTrack() : getCurrentTrack();
+        const displayedQueue = remotePlayback
+            ? accountQueueIds
+                .map((songId, position) => ({
+                    track: playlist.find(track => String(track._id || track.id) === songId),
+                    position
+                }))
+                .filter(item => item.track)
+            : customQueue.map((track, position) => ({ track, position }));
 
         if (currentTrack) {
             const currentHeader = document.createElement('div');
@@ -9558,16 +9833,16 @@ export function initMusicPlayer() {
             queueList.appendChild(currentItem);
         }
 
-        if (customQueue.length > 0) {
+        if (displayedQueue.length > 0) {
             const header = document.createElement('div');
             header.className = 'queue-header';
-            header.textContent = sharedQueueSessionId
+            header.textContent = sharedQueueSessionId || remotePlayback
                 ? 'A continuación en la cola · compartida'
                 : 'A continuación en la cola';
             queueList.appendChild(header);
 
-            customQueue.forEach((track, idx) => {
-                const canManageQueue = !isFollowingPlayback();
+            displayedQueue.forEach(({ track, position }) => {
+                const canManageQueue = remotePlayback || (!isFollowingPlayback() && sharedQueueRole !== 'follower');
                 const li = document.createElement('li');
                 li.className = 'queue-item';
                 li.dataset.songId = String(track._id || track.id || '');
@@ -9584,21 +9859,32 @@ export function initMusicPlayer() {
                 `;
                 li.addEventListener('click', (e) => {
                     e.stopPropagation();
-                    if (isFollowingPlayback()) return;
                     if (li.dataset.wasDragged === 'true') {
                         delete li.dataset.wasDragged;
                         return;
                     }
                     if (e.target.closest('.remove-queue-btn')) {
-                        customQueue.splice(idx, 1);
-                        renderQueue();
+                        if (remotePlayback) {
+                            removeAccountQueueTrack(position);
+                        } else {
+                            customQueue.splice(position, 1);
+                            renderQueue();
+                        }
                         return;
                     }
+                    if (remotePlayback) {
+                        requestAccountQueuePlay(track, position);
+                        return;
+                    }
+                    if (sharedQueueRole === 'follower') {
+                        return;
+                    }
+                    if (isFollowingPlayback()) return;
                     const trackIndex = playlist.findIndex(item => (
                         getTrackStorageId(item) === getTrackStorageId(track)
                     ));
-                    const queuePosition = customQueue[idx] === track
-                        ? idx
+                    const queuePosition = customQueue[position] === track
+                        ? position
                         : customQueue.findIndex(item => item === track);
                     if (trackIndex !== -1 && queuePosition !== -1) {
                         customQueue.splice(0, queuePosition + 1);
@@ -9606,13 +9892,18 @@ export function initMusicPlayer() {
                         loadAndPlayTrack(trackIndex, 'custom');
                     }
                 });
-                if (canManageQueue) setupCustomQueueDrag(li, idx);
+                if (remotePlayback) {
+                    li.draggable = true;
+                    setupNativeReorderDrag(li, 'account-queue', position, reorderAccountQueue);
+                } else if (canManageQueue) {
+                    setupCustomQueueDrag(li, position);
+                }
                 queueList.appendChild(li);
             });
 
         }
 
-        if (upcomingIndices.length > 0) {
+        if (upcomingIndices.length > 0 && !remotePlayback && sharedQueueRole !== 'follower') {
             const activePlaylist = userPlaylists.find(playlistItem => playlistItem.id === activePlaylistId);
             const sourceHeader = document.createElement('div');
             sourceHeader.className = 'queue-header';
@@ -9639,13 +9930,14 @@ export function initMusicPlayer() {
                 setupQueueAddSwipe(li, track);
                 queueList.appendChild(li);
             });
-        } else if (customQueue.length === 0) {
+        } else if (displayedQueue.length === 0 && (remotePlayback || customQueue.length === 0)) {
             const emptyQueue = document.createElement('div');
             emptyQueue.className = 'queue-header';
             emptyQueue.textContent = 'NO HAY MÁS CANCIONES EN LA COLA';
             queueList.appendChild(emptyQueue);
         }
         publishSharedQueueSnapshot();
+        if (!remotePlayback && !listeningTogetherUserId && currentTrack) publishAccountQueueSnapshot();
     }
 
     function loadAndPlayTrack(index, source = 'regular', shouldPlay = true, restoreTime = 0) {
@@ -10282,6 +10574,7 @@ export function initMusicPlayer() {
 
     return () => {
         audio.pause();
+        if (profileActivityTimer) clearInterval(profileActivityTimer);
         if (offlineRecoveryTimer) clearInterval(offlineRecoveryTimer);
         if (offlineDownloadPopupTimer) clearTimeout(offlineDownloadPopupTimer);
         if (friendCacheSaveTimer) clearTimeout(friendCacheSaveTimer);

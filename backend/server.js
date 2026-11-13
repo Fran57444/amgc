@@ -686,6 +686,8 @@ const playbackStateByUser = new Map();
 const playbackSocketByUser = new Map();
 const playbackTransferTargetByUser = new Map();
 const playbackTransferInProgressByUser = new Map();
+const accountQueueByUser = new Map();
+const accountQueueUpdateSequenceByUser = new Map();
 const listenTogetherQueueSessions = new Map();
 const listenTogetherQueueSessionByUser = new Map();
 
@@ -735,8 +737,12 @@ function removeListenTogetherQueueSession(sessionId, notify = true) {
   const session = listenTogetherQueueSessions.get(sessionId);
   if (!session) return;
   listenTogetherQueueSessions.delete(sessionId);
-  listenTogetherQueueSessionByUser.delete(session.hostId);
-  listenTogetherQueueSessionByUser.delete(session.followerId);
+  if (listenTogetherQueueSessionByUser.get(session.hostId) === sessionId) {
+    listenTogetherQueueSessionByUser.delete(session.hostId);
+  }
+  if (listenTogetherQueueSessionByUser.get(session.followerId) === sessionId) {
+    listenTogetherQueueSessionByUser.delete(session.followerId);
+  }
   if (notify) {
     realtimeIo?.to(session.room).emit('listenTogetherQueueSessionEnded', { sessionId });
   }
@@ -4125,6 +4131,181 @@ if (isMainModule) {
       });
     });
 
+    socket.on('accountQueueRequest', (acknowledge = () => {}) => {
+      const queue = accountQueueByUser.get(authenticatedUserId);
+      if (queue) {
+        socket.emit('accountQueueSnapshot', queue);
+      }
+      const playback = playbackStateByUser.get(authenticatedUserId);
+      const ownerSocket = playback?.deviceId ? getPlaybackOwnerSocket(playback) : null;
+      if (ownerSocket) ownerSocket.emit('accountQueuePublishRequest');
+      if (queue || ownerSocket) {
+        acknowledge({ success: true });
+        return;
+      }
+      acknowledge({ success: false, error: 'No hay una reproducción activa en esta cuenta.' });
+    });
+
+    socket.on('accountQueueSnapshot', async ({ songIds } = {}, acknowledge = () => {}) => {
+      const playback = playbackStateByUser.get(authenticatedUserId);
+      if (
+        !playback?.deviceId
+        || playback.deviceId !== socket.data.playbackDeviceId
+        || playbackSocketByUser.get(authenticatedUserId) !== socket.id
+      ) {
+        acknowledge({ success: false, error: 'Solo el dispositivo que reproduce puede sincronizar la cola.' });
+        return;
+      }
+      if (
+        !Array.isArray(songIds)
+        || songIds.length > 5000
+        || songIds.some(id => !isValidObjectId(String(id)))
+      ) {
+        acknowledge({ success: false, error: 'La cola compartida contiene canciones no válidas.' });
+        return;
+      }
+      const updateSequence = (accountQueueUpdateSequenceByUser.get(authenticatedUserId) || 0) + 1;
+      accountQueueUpdateSequenceByUser.set(authenticatedUserId, updateSequence);
+      try {
+        const normalizedSongIds = songIds.map(id => String(id).toLowerCase());
+        const existingSongIds = new Set((await Song.find({ _id: { $in: normalizedSongIds } })
+          .select('_id')
+          .lean()).map(song => String(song._id)));
+        if (normalizedSongIds.some(id => !existingSongIds.has(id))) {
+          acknowledge({ success: false, error: 'La cola contiene canciones que ya no están disponibles.' });
+          return;
+        }
+        if (accountQueueUpdateSequenceByUser.get(authenticatedUserId) !== updateSequence) {
+          acknowledge({ success: true, stale: true });
+          return;
+        }
+        const queue = {
+          revision: (accountQueueByUser.get(authenticatedUserId)?.revision || 0) + 1,
+          songIds: normalizedSongIds
+        };
+        accountQueueByUser.set(authenticatedUserId, queue);
+        io.to(`user:${authenticatedUserId}`).emit('accountQueueSnapshot', queue);
+        acknowledge({ success: true, revision: queue.revision });
+      } catch (error) {
+        console.error('No se pudo validar la cola de la cuenta.', error);
+        acknowledge({ success: false, error: 'No se pudo sincronizar la cola de la cuenta.' });
+      }
+    });
+
+    socket.on('accountQueueAddRequest', async ({ songId } = {}, acknowledge = () => {}) => {
+      const normalizedSongId = String(songId || '');
+      const playback = playbackStateByUser.get(authenticatedUserId);
+      const ownerSocket = playback?.deviceId ? getPlaybackOwnerSocket(playback) : null;
+      if (!isValidObjectId(normalizedSongId)) {
+        acknowledge({ success: false, error: 'La canción solicitada no es válida.' });
+        return;
+      }
+      if (!ownerSocket) {
+        acknowledge({ success: false, error: 'El dispositivo que reproduce no está conectado.' });
+        return;
+      }
+      try {
+        if (!(await Song.exists({ _id: normalizedSongId }))) {
+          acknowledge({ success: false, error: 'La canción ya no está disponible.' });
+          return;
+        }
+        ownerSocket.timeout(5000).emit(
+          'accountQueueAddCommand',
+          { songId: normalizedSongId },
+          (deliveryError, response) => {
+            if (deliveryError) {
+              acknowledge({ success: false, error: 'No se pudo actualizar la cola en el otro dispositivo.' });
+              return;
+            }
+            acknowledge(response || { success: false, error: 'No se pudo añadir la canción a la cola.' });
+          }
+        );
+      } catch (error) {
+        console.error('No se pudo añadir una canción a la cola de la cuenta.', error);
+        acknowledge({ success: false, error: 'No se pudo añadir la canción a la cola.' });
+      }
+    });
+
+    socket.on('accountQueueUpdateRequest', async ({ revision, songIds } = {}, acknowledge = () => {}) => {
+      const queue = accountQueueByUser.get(authenticatedUserId);
+      if (
+        !queue
+        || queue.revision !== revision
+        || !Array.isArray(songIds)
+        || songIds.length > 5000
+        || songIds.some(id => !isValidObjectId(String(id)))
+      ) {
+        acknowledge({ success: false, error: 'La cola cambió. Vuelve a intentarlo.' });
+        return;
+      }
+      const playback = playbackStateByUser.get(authenticatedUserId);
+      const ownerSocket = playback?.deviceId ? getPlaybackOwnerSocket(playback) : null;
+      if (!ownerSocket) {
+        acknowledge({ success: false, error: 'El dispositivo que reproduce no está conectado.' });
+        return;
+      }
+      try {
+        const normalizedSongIds = songIds.map(id => String(id).toLowerCase());
+        const existingSongIds = new Set((await Song.find({ _id: { $in: normalizedSongIds } })
+          .select('_id')
+          .lean()).map(song => String(song._id)));
+        if (normalizedSongIds.some(id => !existingSongIds.has(id))) {
+          acknowledge({ success: false, error: 'La cola contiene canciones que ya no están disponibles.' });
+          return;
+        }
+        if (accountQueueByUser.get(authenticatedUserId)?.revision !== revision) {
+          acknowledge({ success: false, error: 'La cola cambió. Vuelve a intentarlo.' });
+          return;
+        }
+        ownerSocket.timeout(7000).emit(
+          'accountQueueReplaceCommand',
+          { revision, songIds: normalizedSongIds },
+          (deliveryError, response) => {
+            if (deliveryError) {
+              acknowledge({ success: false, error: 'El dispositivo que reproduce no respondió.' });
+              return;
+            }
+            acknowledge(response || { success: false, error: 'No se pudo actualizar la cola.' });
+          }
+        );
+      } catch (error) {
+        console.error('No se pudo actualizar la cola de la cuenta.', error);
+        acknowledge({ success: false, error: 'No se pudo actualizar la cola de la cuenta.' });
+      }
+    });
+
+    socket.on('accountQueuePlayRequest', ({ songId, position, revision } = {}, acknowledge = () => {}) => {
+      const queue = accountQueueByUser.get(authenticatedUserId);
+      const normalizedSongId = String(songId || '');
+      if (
+        !queue
+        || queue.revision !== revision
+        || !Number.isInteger(position)
+        || position < 0
+        || queue.songIds[position] !== normalizedSongId
+      ) {
+        acknowledge({ success: false, error: 'La cola cambió. Vuelve a seleccionar la canción.' });
+        return;
+      }
+      const playback = playbackStateByUser.get(authenticatedUserId);
+      const ownerSocket = playback?.deviceId ? getPlaybackOwnerSocket(playback) : null;
+      if (!ownerSocket) {
+        acknowledge({ success: false, error: 'El dispositivo que reproduce no está conectado.' });
+        return;
+      }
+      ownerSocket.timeout(12000).emit(
+        'accountQueuePlayCommand',
+        { songId: normalizedSongId, position, revision },
+        (deliveryError, response) => {
+          if (deliveryError) {
+            acknowledge({ success: false, error: 'El otro dispositivo no pudo reproducir la canción.' });
+            return;
+          }
+          acknowledge(response || { success: false, error: 'No se pudo reproducir la canción.' });
+        }
+      );
+    });
+
     socket.on('playbackTakeoverRequest', (payload = {}, acknowledge = () => {}) => {
       const acknowledgeResult = typeof acknowledge === 'function' ? acknowledge : () => {};
       const deviceId = payload && typeof payload === 'object' && !Array.isArray(payload)
@@ -4635,8 +4816,12 @@ if (isMainModule) {
     socket.on('listenTogetherQueueSessionJoin', async ({ hostId } = {}, acknowledge = () => {}) => {
       const followerId = authenticatedUserId;
       const normalizedHostId = normalizeUserId(hostId);
-      if (!normalizedHostId || !isValidObjectId(normalizedHostId) || normalizedHostId === followerId) {
+      if (!normalizedHostId || !isValidObjectId(normalizedHostId)) {
         acknowledge({ success: false, error: 'El anfitrión no es válido.' });
+        return;
+      }
+      if (normalizedHostId === followerId) {
+        acknowledge({ success: false, error: 'La cola entre dispositivos se sincroniza automáticamente.' });
         return;
       }
       try {
@@ -4797,7 +4982,8 @@ if (isMainModule) {
 
     socket.on('listenTogetherQueueSessionLeave', ({ sessionId } = {}) => {
       const session = listenTogetherQueueSessions.get(String(sessionId || ''));
-      if (!session || ![session.hostId, session.followerId].includes(authenticatedUserId)) return;
+      if (!session) return;
+      if (![session.hostId, session.followerId].includes(authenticatedUserId)) return;
       if (
         (session.hostId === authenticatedUserId && session.hostSocketId !== socket.id)
         || (session.followerId === authenticatedUserId && session.followerSocketId !== socket.id)
