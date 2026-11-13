@@ -3680,7 +3680,11 @@ if (isMainModule) {
 
       const playback = playbackStateByUser.get(authenticatedUserId);
       if (!playback?.songId || !playback.deviceId) {
-        acknowledgeResult({ success: false, error: 'No hay una sesión de reproducción disponible.' });
+        acknowledgeResult({
+          success: false,
+          error: 'No hay una sesión de reproducción disponible.',
+          playbackUnavailable: true
+        });
         return;
       }
       if (playback.deviceId === deviceId) {
@@ -3692,7 +3696,11 @@ if (isMainModule) {
         !ownerSocket
         || !ownerSocket.connected
       ) {
-        acknowledgeResult({ success: false, error: 'El dispositivo que reproduce no está conectado.' });
+        acknowledgeResult({
+          success: false,
+          error: 'El dispositivo que reproduce no está conectado.',
+          ownerDisconnected: true
+        });
         return;
       }
       if (action === 'seek' && (!Number.isFinite(Number(position)) || Number(position) < 0)) {
@@ -3895,7 +3903,7 @@ if (isMainModule) {
 
       const ownerSocket = getPlaybackOwnerSocket(playback);
       if (playback.isPlaying === false) {
-        sendToTarget(playback, playback.resumeAfterTransfer === true);
+        sendToTarget(playback, true);
         return;
       }
       if (!ownerSocket?.connected) {

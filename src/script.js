@@ -946,6 +946,24 @@ export function initMusicPlayer() {
         return playlist[currentTrackIndex] || null;
     }
 
+    function getLyricsTrack() {
+        const playback = getRemotePlaybackSession();
+        if (!playback) return getCurrentTrack();
+        const songId = String(playback.songId || '');
+        const track = playlist.find(song => String(song._id || song.id || '') === songId);
+        const playbackColor = typeof playback.color === 'string' && CSS.supports('color', playback.color)
+            ? playback.color
+            : track?.color;
+        return {
+            ...(track || {}),
+            _id: songId || track?._id,
+            name: playback.songName || track?.name || '',
+            artist: playback.artist || track?.artist || '',
+            cover: playback.cover || track?.cover || '',
+            color: playbackColor || '#151515'
+        };
+    }
+
     try {
         const storedLyrics = localStorage.getItem(timedLyricsStorageKey);
         if (storedLyrics) {
@@ -1246,7 +1264,7 @@ export function initMusicPlayer() {
     function renderSyncedLyrics(track, time, list, lyricsOverride, scrollActiveLyric = true) {
         if (!list) return;
         const lyrics = lyricsOverride || getTrackLyrics(track);
-        const renderKey = `${getTrackStorageId(track)}:${JSON.stringify(lyrics)}:${JSON.stringify(
+        const renderKey = `${getTrackStorageId(track)}:${track?.color || ''}:${JSON.stringify(lyrics)}:${JSON.stringify(
             list === editLyricsPreview
                 ? { colors: editingLyricColors, assignments: editingLyricColorAssignments }
                 : track?.lyricColorAssignments || {}
@@ -2344,17 +2362,18 @@ export function initMusicPlayer() {
 
     function updateProfileActivityProgress() {
         if (!profileActivity || !isProfileMode) return;
-        if (selectedProfileUser) {
-            const ownRemotePlayback = String(selectedProfileUser._id || '') === String(getStoredUser()?._id || '')
+        const profileUser = selectedProfileUser || getStoredUser();
+        const ownRemotePlayback = String(profileUser?._id || '') === String(getStoredUser()?._id || '')
                 && sharedDevicePlayback?.deviceId !== playbackDeviceId
                 ? sharedDevicePlayback
                 : null;
+        if (selectedProfileUser || ownRemotePlayback) {
             const playback = ownRemotePlayback || selectedProfileUser.lastPlayed;
             const duration = Number(playback?.duration) || 0;
             if (!playback || !playback.songName || duration <= 0) return;
             const isPlaying = Boolean(ownRemotePlayback
                 ? playback.isPlaying !== false
-                : selectedProfileUser.isOnline && playback.isPlaying !== false);
+                : selectedProfileUser?.isOnline && playback.isPlaying !== false);
             const extraElapsed = isPlaying
                 && !ownRemotePlayback
                 ? getFriendPlaybackElapsed(selectedProfileUser._id)
@@ -2650,11 +2669,20 @@ export function initMusicPlayer() {
     async function requestRemotePlaybackControl(action, details = {}, notifyError = true) {
         const playback = getRemotePlaybackSession();
         if (!playback) return false;
-        const response = await requestPlaybackSocket('playbackControlRequest', {
+        let response = await requestPlaybackSocket('playbackControlRequest', {
             action,
             deviceId: playbackDeviceId,
             ...details
         });
+        if (
+            action === 'toggle'
+            && !response.success
+            && (response.ownerDisconnected || response.playbackUnavailable)
+        ) {
+            response = await requestPlaybackSocket('playbackTransferRequest', {
+                targetDeviceId: playbackDeviceId
+            }, 40000);
+        }
         if (!response.success && notifyError) showToast(response.error || 'No se pudo controlar la reproducción remota.', true);
         return Boolean(response.success);
     }
@@ -2739,12 +2767,15 @@ export function initMusicPlayer() {
             if (sharedPlaybackClockTimer) clearInterval(sharedPlaybackClockTimer);
             sharedPlaybackClockTimer = null;
             renderSharedPlaybackStatus();
-            if (hadRemotePlayback && isProfileMode && String(selectedProfileUser?._id || '') === ownUserId) {
+            if (isLyricsMode) updateLyricsView();
+            const profileUser = selectedProfileUser || getStoredUser();
+            if (hadRemotePlayback && isProfileMode && String(profileUser?._id || '') === ownUserId) {
                 renderProfile();
             }
             return;
         }
         const previousSongId = sharedDevicePlayback?.songId;
+        const previousColor = sharedDevicePlayback?.color;
         sharedDevicePlayback = playback;
         playbackActivityUserId = null;
         sharedPlaybackPlaying = false;
@@ -2752,8 +2783,23 @@ export function initMusicPlayer() {
         pauseForRemotePlayback();
         renderSharedPlaybackStatus();
         if (sharedPlaybackClockTimer) clearInterval(sharedPlaybackClockTimer);
-        if (playback.isPlaying !== false) sharedPlaybackClockTimer = setInterval(renderSharedPlaybackStatus, 1000);
-        if (isProfileMode && String(selectedProfileUser?._id || '') === ownUserId) {
+        if (playback.isPlaying !== false) {
+            sharedPlaybackClockTimer = setInterval(() => {
+                renderSharedPlaybackStatus();
+                if (isLyricsMode) updateLyricsPlaybackProgress();
+                if (isProfileMode) updateProfileActivityProgress();
+            }, 1000);
+        }
+        if (
+            isLyricsMode
+            && (
+                String(previousSongId || '') !== String(playback.songId || '')
+                || previousColor !== playback.color
+            )
+        ) updateLyricsView();
+        else if (isLyricsMode) updateLyricsPlaybackProgress();
+        const profileUser = selectedProfileUser || getStoredUser();
+        if (isProfileMode && String(profileUser?._id || '') === ownUserId) {
             if (String(previousSongId || '') !== String(playback.songId || '')) renderProfile();
             else updateProfileActivityProgress();
         }
@@ -8993,7 +9039,7 @@ export function initMusicPlayer() {
 
     function updateLyricsView() {
         if (!lyricsPanel) return;
-        const track = getCurrentTrack();
+        const track = getLyricsTrack();
         lyricsPanel.style.backgroundColor = '#000';
         lyricsPanel.replaceChildren();
 
@@ -9009,7 +9055,7 @@ export function initMusicPlayer() {
             const lyricText = event.target.closest('.timed-lyric-content');
             const seekButton = lyricText?.closest('[data-lyric-time]');
             const time = Number(seekButton?.dataset.lyricTime);
-            if (!lyricText || !track || getTrackStorageId(getCurrentTrack()) !== getTrackStorageId(track) || !Number.isFinite(time)) return;
+            if (!lyricText || !track || getTrackStorageId(getLyricsTrack()) !== getTrackStorageId(track) || !Number.isFinite(time)) return;
             const selection = window.getSelection();
             if (
                 selection
@@ -9044,6 +9090,10 @@ export function initMusicPlayer() {
                 ));
             });
             if (!hitLyricGlyph) return;
+            if (getRemotePlaybackSession()) {
+                void requestRemotePlaybackControl('seek', { position: time });
+                return;
+            }
             seekAudioToTime(audio, time, () => {
                 updateCurrentLyric(track, audio.currentTime);
                 renderSyncedLyrics(track, audio.currentTime, list);
@@ -9051,7 +9101,16 @@ export function initMusicPlayer() {
         });
         container.appendChild(list);
         lyricsPanel.appendChild(container);
-        renderSyncedLyrics(track, Number.isFinite(audio.currentTime) ? audio.currentTime : 0, list);
+        updateLyricsPlaybackProgress(list);
+    }
+
+    function updateLyricsPlaybackProgress(list = lyricsPanel?.querySelector('.full-lyrics-list')) {
+        const playback = getRemotePlaybackSession();
+        const track = getLyricsTrack();
+        const time = playback
+            ? getSharedPlaybackTime(playback)
+            : Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+        renderSyncedLyrics(track, time, list);
     }
 
     function updateBackgroundAndViews() {
