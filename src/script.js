@@ -669,11 +669,8 @@ export function initMusicPlayer() {
     const inputSettingsYt = document.getElementById("settings-yt-link");
     const inputSettingsYtName = document.getElementById("settings-yt-name");
     const statusSettingsYt = document.getElementById("settings-yt-status");
-    const ytDownloadPopup = document.getElementById("yt-download-popup");
-    const ytDownloadPopupTitle = document.getElementById("yt-download-popup-title");
-    const ytDownloadPopupMessage = document.getElementById("yt-download-popup-message");
-    const ytDownloadProgressFill = document.getElementById("yt-download-progress-fill");
-    const ytDownloadProgressLabel = document.getElementById("yt-download-progress-label");
+    const ytDownloadPopupTemplate = document.getElementById("yt-download-popup");
+    const downloadNotificationStack = document.getElementById("download-notification-stack");
     let spotifyLikedTracks = [];
     let spotifySelectedTrackIds = new Set();
     let spotifyIsConnected = false;
@@ -962,9 +959,24 @@ export function initMusicPlayer() {
             _id: songId || track?._id,
             name: playback.songName || track?.name || '',
             artist: playback.artist || track?.artist || '',
-            cover: playback.cover || track?.cover || '',
+            cover: getPlaybackCover(playback, track),
             color: playbackColor || '#151515'
         };
+    }
+
+    function getPlaybackCover(playback, fallbackTrack = null) {
+        const cover = typeof playback?.cover === 'string' ? playback.cover.trim() : '';
+        if (cover && cover !== '/img/vinculo.png' && !/^(?:blob|file|filesystem|capacitor|content):/i.test(cover)) {
+            return cover;
+        }
+        const songId = String(playback?.songId || '');
+        const track = fallbackTrack || playlist.find(item => String(item._id || item.id || '') === songId);
+        const libraryCover = typeof track?.cover === 'string' ? track.cover.trim() : '';
+        if (libraryCover && libraryCover !== '/img/vinculo.png'
+            && !/^(?:blob|file|filesystem|capacitor|content):/i.test(libraryCover)) {
+            return libraryCover;
+        }
+        return getSongCover(track) || '/img/vinculo.png';
     }
 
     function findRemotePlaybackTrack() {
@@ -2222,14 +2234,21 @@ export function initMusicPlayer() {
                 ? { deviceId: playbackDeviceId, deviceType: playbackDeviceType }
                 : displayTrack);
             const displayDeviceType = getPlaybackDeviceType(profileDevicePlayback);
-            const currentCover = ownRemotePlayback?.cover
-                || (track && !ownRemotePlayback ? getSongCover(track) : (displayTrack?.cover || '/img/vinculo.png'));
+            const currentCover = ownRemotePlayback
+                ? getPlaybackCover(ownRemotePlayback)
+                : track
+                    ? getSongCover(track)
+                    : getPlaybackCover(displayTrack);
             const activityColor = displayTrack?.color || '#ff8a00';
             const listeningLabel = isLoadingTrack
                 ? 'Cargando'
                 : displayTrack
                     ? isListening ? 'Escuchando' : 'Estaba escuchando'
                     : 'Sin actividad reciente';
+            const lastHeardLabel = displayTrack && !isListening
+                ? getPlaybackLastHeardLabel(ownRemotePlayback || displayTrack, false, user?.lastPlayed)
+                : '';
+            const playbackStatusLabel = `${listeningLabel}${lastHeardLabel ? ` · ${lastHeardLabel}` : ''}`;
             const statusLabel = isOfflineProfile ? 'Modo offline' : isOnline ? 'En línea' : 'Desconectado';
             const statusMeta = !isOfflineProfile && !isOnline && user?.lastActive ? ` · ${timeAgo(user.lastActive)}` : '';
             const friendElapsedOffset = !isOwnProfile && isListening
@@ -2279,7 +2298,7 @@ export function initMusicPlayer() {
                     >
                         <img src="${escapeHtml(currentCover)}" alt="Portada de la canción" class="profile-activity-cover" draggable="false" />
                         <div class="profile-activity-details">
-                            <span class="profile-activity-label">${escapeHtml(listeningLabel)}${displayDeviceType ? playbackDeviceIconMarkup(displayDeviceType) : ''}</span>
+                            <span class="profile-activity-label">${escapeHtml(playbackStatusLabel)}${displayDeviceType ? playbackDeviceIconMarkup(displayDeviceType) : ''}</span>
                             <strong>${escapeHtml(displayTrack?.name || displayTrack?.songName || 'Sin actividad reciente')}</strong>
                             <small>${escapeHtml(displayTrack?.artist || 'Sin artista')}</small>
                             <div class="profile-activity-progress${displayTrack ? '' : ' is-hidden'}">
@@ -2353,6 +2372,17 @@ export function initMusicPlayer() {
         const diffH = Math.floor(diffMin / 60);
         if (diffH < 24) return `hace ${diffH} h`;
         return `hace ${Math.floor(diffH / 24)} d`;
+    }
+
+    function getPlaybackLastHeardLabel(playback, isListening, fallbackPlayback = null) {
+        if (isListening) return '';
+        const lastHeardAt = playback?.lastHeardAt
+            || fallbackPlayback?.lastHeardAt
+            || (playback?.isPlaying === false ? playback.updatedAt : '')
+            || (fallbackPlayback?.isPlaying === false ? fallbackPlayback.updatedAt : '')
+            || playback?.updatedAt
+            || fallbackPlayback?.updatedAt;
+        return lastHeardAt ? timeAgo(lastHeardAt) : '';
     }
 
     function getFriendPlaybackElapsed(friendId) {
@@ -2762,14 +2792,15 @@ export function initMusicPlayer() {
         updatePlaybackDevicePickerIcons();
         sharedPlaybackTitleText.textContent = playback.songName || '';
         sharedPlaybackArtist.textContent = playback.artist || '';
-        sharedPlaybackCover.src = playback.cover || '/img/vinculo.png';
+        const playbackCover = getPlaybackCover(playback);
+        sharedPlaybackCover.src = playbackCover;
         bottomBar.style.setProperty('--track-color', safeColor(playback.color));
         updateVolumeSliderUI(currentVolume);
         sharedPlaybackProgressFill.style.width = `${progress}%`;
         sharedPlaybackTimeLabel.textContent = `${formatTrackTime(currentTime)} / ${formatTrackTime(duration)}`;
         trackNameEl.textContent = playback.songName || '';
         trackArtistEl.textContent = playback.artist || '';
-        bottomBarCover.src = playback.cover || '/img/vinculo.png';
+        bottomBarCover.src = playbackCover;
         trackDurationEl.textContent = formatTrackTime(duration);
         if (progressBar) progressBar.style.width = `${progress}%`;
         updateTrackDurationLabel(currentTime, duration);
@@ -2941,7 +2972,7 @@ export function initMusicPlayer() {
             songId: track._id,
             songName: track.name,
             artist: track.artist || '',
-            cover: getSongCover(track) || '',
+            cover: track.cover || '',
             color: track.color || '#ff8a00',
             currentTime: Number.isFinite(audio.currentTime) ? audio.currentTime : sharedPlaybackTime,
             duration: Number.isFinite(audio.duration) && audio.duration > 0
@@ -2982,19 +3013,21 @@ export function initMusicPlayer() {
     }
 
     function friendStatusLabel(friend) {
-        if (friend.isOnline) {
-            const playback = friend.lastPlayed;
-            const duration = Number(playback?.duration) || 0;
-            if (hasPlaybackEvidence(playback)) {
-                if (playback?.isPlaying === false) return 'Estaba escuchando';
-                const progress = duration > 0
-                    ? ` · ${formatTrackTime(Number(playback.currentTime) || 0)} / ${formatTrackTime(duration)}`
-                    : '';
-                return `Escuchando ${playbackDeviceIconMarkup(getPlaybackDeviceType(playback))}${progress}`;
+        const playback = friend.lastPlayed;
+        if (hasPlaybackEvidence(playback)) {
+            const isListening = Boolean(friend.isOnline && playback?.isPlaying !== false);
+            if (!isListening) {
+                const lastHeard = getPlaybackLastHeardLabel(playback, false);
+                return `Estaba escuchando${lastHeard ? ` · ${lastHeard}` : ''}`;
             }
-            return 'En línea';
+            const duration = Number(playback?.duration) || 0;
+            const progress = duration > 0
+                ? ` · ${formatTrackTime(Number(playback.currentTime) || 0)} / ${formatTrackTime(duration)}`
+                : '';
+            return `Escuchando ${playbackDeviceIconMarkup(getPlaybackDeviceType(playback))}${progress}`;
         }
-        return `${friend.lastActive ? ' · ' + timeAgo(friend.lastActive) : ''}`;
+        if (friend.isOnline) return 'En línea';
+        return `${friend.lastActive ? 'Desconectado · ' + timeAgo(friend.lastActive) : 'Desconectado'}`;
     }
 
     function renderFriendsSidebar() {
@@ -3009,7 +3042,9 @@ export function initMusicPlayer() {
                 const statusText = friend.isOnline
                     ? 'En línea'
                     : `${friend.lastActive ? '  ' + timeAgo(friend.lastActive) : ''}`;
-                const playbackLabel = `${friend.isOnline && playback?.isPlaying !== false ? 'Escuchando' : 'Estaba escuchando'} ${playbackDeviceIconMarkup(getPlaybackDeviceType(playback))}`;
+                const isListening = Boolean(friend.isOnline && playback?.isPlaying !== false);
+                const lastHeard = getPlaybackLastHeardLabel(playback, isListening);
+                const playbackLabel = `${isListening ? 'Escuchando' : 'Estaba escuchando'}${lastHeard ? ` · ${lastHeard}` : ''} ${playbackDeviceIconMarkup(getPlaybackDeviceType(playback))}`;
                 return `
                     <li class="friend-sidebar-item" data-friend-id="${escapeHtml(friend._id)}" data-friend-name="${escapeHtml(friend.username)}">
                         <img class="friend-sidebar-avatar" src="${escapeHtml(friend.profilePhoto || '/img/perrocorasongif.gif')}" alt="" loading="lazy" />
@@ -5368,12 +5403,13 @@ export function initMusicPlayer() {
         if (offlineDownloadProgressFill) offlineDownloadProgressFill.style.width = `${percent}%`;
         if (offlineDownloadProgressLabel) offlineDownloadProgressLabel.textContent = `${Math.round(percent)}%`;
         offlineDownloadPopup.classList.toggle('error', isError);
-        offlineDownloadPopup.classList.toggle('concurrent', ytDownloadPopup?.classList.contains('active') || false);
+        offlineDownloadPopup.hidden = false;
         offlineDownloadPopup.classList.add('active');
         if (offlineDownloadPopupTimer) clearTimeout(offlineDownloadPopupTimer);
         if (isComplete || isError) {
             offlineDownloadPopupTimer = setTimeout(() => {
                 offlineDownloadPopup.classList.remove('active');
+                offlineDownloadPopup.hidden = true;
             }, isComplete ? 2200 : 4500);
         }
     }
@@ -5545,10 +5581,6 @@ export function initMusicPlayer() {
         }
     }
 
-    let ytDownloadProgressTimer = null;
-    let ytLongWaitTimer = null;
-    let ytDownloadPopupHideTimer = null;
-
     function isSlowYoutubeStatusMessage(message = '') {
         return /(tardó demasiado|tardó|sigue en curso|procesando|demora|demor|espere|puede tardar)/i.test(message);
     }
@@ -5565,31 +5597,40 @@ export function initMusicPlayer() {
         }
     }
 
-    function updateYtDownloadPopup({ title = 'Descargando canción', message = 'Preparando audio...', percent = 0, isError = false, visible = true }) {
-        if (!ytDownloadPopup || !ytDownloadPopupTitle || !ytDownloadPopupMessage || !ytDownloadProgressFill || !ytDownloadProgressLabel) return;
-
-        ytDownloadPopupTitle.textContent = title;
-        ytDownloadPopupMessage.textContent = message;
-        ytDownloadProgressFill.style.width = `${Math.min(100, Math.max(0, percent))}%`;
-        ytDownloadProgressLabel.textContent = `${Math.round(percent)}%`;
-        ytDownloadPopup.classList.toggle('error', isError);
-        ytDownloadPopup.classList.toggle('active', visible);
-        offlineDownloadPopup?.classList.toggle(
-            'concurrent',
-            visible && offlineDownloadPopup.classList.contains('active')
-        );
+    function updateYtDownloadPopup(progress, { title = 'Descargando canción', message = 'Preparando audio...', percent = 0, isError = false, visible = true } = {}) {
+        if (!progress?.popup) return;
+        progress.title.textContent = title;
+        progress.message.textContent = message;
+        progress.fill.style.width = `${Math.min(100, Math.max(0, percent))}%`;
+        progress.label.textContent = `${Math.round(percent)}%`;
+        progress.popup.classList.toggle('error', isError);
+        progress.popup.classList.toggle('active', visible);
+        if (!visible) progress.popup.remove();
     }
 
     function startYtDownloadProgress(title = 'Descargando canción') {
-        if (ytDownloadProgressTimer) clearInterval(ytDownloadProgressTimer);
-        if (ytLongWaitTimer) clearTimeout(ytLongWaitTimer);
-        if (ytDownloadPopupHideTimer) clearTimeout(ytDownloadPopupHideTimer);
-        ytDownloadPopupHideTimer = null;
-
+        if (!ytDownloadPopupTemplate || !downloadNotificationStack) return null;
+        const popup = ytDownloadPopupTemplate.cloneNode(true);
+        popup.removeAttribute('id');
+        popup.removeAttribute('hidden');
+        popup.style.removeProperty('display');
+        popup.querySelectorAll('[id]').forEach(element => element.removeAttribute('id'));
+        const progress = {
+            popup,
+            title: popup.querySelector('.yt-download-popup-header strong'),
+            message: popup.querySelector('.yt-download-popup-header small'),
+            fill: popup.querySelector('.yt-download-progress-fill'),
+            label: popup.querySelector('.yt-download-progress-text span'),
+            progressTimer: null,
+            longWaitTimer: null,
+            hideTimer: null
+        };
+        if (!progress.title || !progress.message || !progress.fill || !progress.label) return null;
+        downloadNotificationStack.append(popup);
         let current = 8;
-        updateYtDownloadPopup({ title, message: 'Conectando con YouTube...', percent: current, visible: true, isError: false });
+        updateYtDownloadPopup(progress, { title, message: 'Conectando con YouTube...', percent: current, visible: true, isError: false });
 
-        ytDownloadProgressTimer = setInterval(() => {
+        progress.progressTimer = setInterval(() => {
             current = Math.min(current + Math.random() * 8 + 3, 90);
             const progressText = current < 25
                 ? 'Solicitando audio a YouTube...'
@@ -5598,37 +5639,29 @@ export function initMusicPlayer() {
                     : current < 85
                         ? 'Convirtiendo a MP3...'
                         : 'Guardando el MP3 localmente...';
-            updateYtDownloadPopup({ title, message: progressText, percent: current, visible: true, isError: false });
+            updateYtDownloadPopup(progress, { title, message: progressText, percent: current, visible: true, isError: false });
         }, 800);
 
-        ytLongWaitTimer = setTimeout(() => {
+        progress.longWaitTimer = setTimeout(() => {
             showYoutubeLinkStatus('La descarga sigue en curso. Esto puede tardar unos segundos más...', false);
         }, 15000);
+        return progress;
     }
 
-    function stopYtDownloadProgress({ success = false, message = 'Descarga finalizada', error = false } = {}) {
-        if (ytDownloadProgressTimer) {
-            clearInterval(ytDownloadProgressTimer);
-            ytDownloadProgressTimer = null;
-        }
-        if (ytLongWaitTimer) {
-            clearTimeout(ytLongWaitTimer);
-            ytLongWaitTimer = null;
-        }
-        if (ytDownloadPopupHideTimer) clearTimeout(ytDownloadPopupHideTimer);
-
-        if (!ytDownloadPopup) return;
+    function stopYtDownloadProgress(progress, { success = false, message = 'Descarga finalizada', error = false } = {}) {
+        if (!progress?.popup) return;
+        if (progress.progressTimer) clearInterval(progress.progressTimer);
+        if (progress.longWaitTimer) clearTimeout(progress.longWaitTimer);
+        if (progress.hideTimer) clearTimeout(progress.hideTimer);
         if (success) {
-            updateYtDownloadPopup({ title: 'Canción añadida', message, percent: 100, visible: true, isError: false });
-            ytDownloadPopupHideTimer = setTimeout(() => {
-                ytDownloadPopupHideTimer = null;
-                updateYtDownloadPopup({ visible: false });
+            updateYtDownloadPopup(progress, { title: 'Canción añadida', message, percent: 100, visible: true, isError: false });
+            progress.hideTimer = setTimeout(() => {
+                    updateYtDownloadPopup(progress, { visible: false });
             }, 1200);
         } else {
-            updateYtDownloadPopup({ title: error ? 'No se pudo descargar' : 'Descarga detenida', message, percent: 100, visible: true, isError: true });
-            ytDownloadPopupHideTimer = setTimeout(() => {
-                ytDownloadPopupHideTimer = null;
-                updateYtDownloadPopup({ visible: false });
+            updateYtDownloadPopup(progress, { title: error ? 'No se pudo descargar' : 'Descarga detenida', message, percent: 100, visible: true, isError: true });
+            progress.hideTimer = setTimeout(() => {
+                    updateYtDownloadPopup(progress, { visible: false });
             }, 2500);
         }
     }
@@ -7547,6 +7580,7 @@ export function initMusicPlayer() {
                 }
 
                 saveButton.disabled = true;
+                let ytProgress = null;
                 try {
                     if (suggestion.coverUrl && !imageInput.files?.[0]) {
                         uploadStatus.textContent = 'Preparando carátula de Spotify...';
@@ -7571,7 +7605,7 @@ export function initMusicPlayer() {
                     if (coverFile) formData.append('cover', coverFile);
                     if (youtubeLink) {
                         uploadStatus.textContent = 'Descargando audio...';
-                        startYtDownloadProgress(`Descargando: ${name} - ${songArtist}`);
+                        ytProgress = startYtDownloadProgress(`Descargando: ${name} - ${songArtist}`);
                     }
                     if (youtubeLink && desktopYoutubeDownloader) {
                         const downloadedAudio = await desktopYoutubeDownloader(youtubeLink);
@@ -7592,7 +7626,7 @@ export function initMusicPlayer() {
                     if (!socket.connected) await fetchMusicData();
 
                     if (youtubeLink) {
-                        stopYtDownloadProgress({ success: true, message: `${name} - ${songArtist} descargada y agregada.` });
+                        stopYtDownloadProgress(ytProgress, { success: true, message: `${name} - ${songArtist} descargada y agregada.` });
                     }
                     try {
                         uploadStatus.textContent = 'Completando sugerencia...';
@@ -7614,7 +7648,7 @@ export function initMusicPlayer() {
                     }
                 } catch (error) {
                     if (youtubeLink) {
-                        stopYtDownloadProgress({
+                        stopYtDownloadProgress(ytProgress, {
                             success: false,
                             message: error.message || 'No se pudo agregar la canción sugerida.',
                             error: true
@@ -8300,6 +8334,7 @@ export function initMusicPlayer() {
         }
         
         const ytLinkVal = editInputYt ? editInputYt.value.trim() : "";
+        let ytProgress = null;
         if (ytLinkVal) {
             if (!isValidYoutubeLink(ytLinkVal)) {
                 showYoutubeLinkStatus("El enlace de YouTube no es válido.", true);
@@ -8309,7 +8344,7 @@ export function initMusicPlayer() {
                 if (btnDeleteSong) btnDeleteSong.disabled = false;
                 return;
             }
-            startYtDownloadProgress(editingTrackId !== null ? 'Actualizando canción' : 'Añadiendo canción');
+            ytProgress = startYtDownloadProgress(editingTrackId !== null ? 'Actualizando canción' : 'Añadiendo canción');
             if (desktopYoutubeDownloader) {
                 showYoutubeLinkStatus('Descargando el audio en este equipo antes de subirlo...', false);
             } else {
@@ -8377,7 +8412,7 @@ export function initMusicPlayer() {
             }
 
             if (ytLinkVal) {
-                stopYtDownloadProgress({ success: true, message: 'MP3 convertido, subido a Drive y guardado en MongoDB' });
+                stopYtDownloadProgress(ytProgress, { success: true, message: 'MP3 convertido, subido a Drive y guardado en MongoDB' });
             }
             
             isEditSongMode = false;
@@ -8397,7 +8432,7 @@ export function initMusicPlayer() {
                 : message;
 
             if (isYoutubeFailure) {
-                stopYtDownloadProgress({ success: false, message, error: true });
+                stopYtDownloadProgress(ytProgress, { success: false, message, error: true });
             }
 
             showYoutubeLinkStatus(visibleMessage, true);
@@ -9963,14 +9998,14 @@ export function initMusicPlayer() {
 
             btnSettingsYt.textContent = "Descargando...";
             btnSettingsYt.disabled = true;
-            startYtDownloadProgress('Descargando canción');
+            const ytProgress = startYtDownloadProgress('Descargando canción');
             showYoutubeLinkStatus('Descargando el audio en este equipo...', false);
 
             const requestedFileName = inputSettingsYtName?.value.trim() || '';
 
             try {
                 const result = await desktopYoutubeLocalSaver(link, requestedFileName);
-                stopYtDownloadProgress({
+                stopYtDownloadProgress(ytProgress, {
                     success: true,
                     message: `MP3 guardado en este equipo: ${result.fileName}`
                 });
@@ -9980,7 +10015,7 @@ export function initMusicPlayer() {
             } catch (e) {
                 console.error(e);
                 const message = e?.message || 'El enlace de YouTube fue rechazado o no es válido.';
-                stopYtDownloadProgress({ success: false, message, error: true });
+                stopYtDownloadProgress(ytProgress, { success: false, message, error: true });
                 showYoutubeLinkStatus(message, true);
             } finally {
                 btnSettingsYt.textContent = "Descargar Audio";

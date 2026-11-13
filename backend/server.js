@@ -167,6 +167,7 @@ const userSchema = new mongoose.Schema({
     deviceId: String,
     deviceType: String,
     sourceUpdatedAt: Number,
+    lastHeardAt: Date,
     updatedAt: Date
   },
   lastPlayedHistory: [{
@@ -664,6 +665,14 @@ function normalizePlaybackDeviceName(deviceName) {
       .trim()
       .slice(0, 80)
     : '';
+}
+
+function normalizeSharedPlaybackCover(cover) {
+  if (typeof cover !== 'string') return '';
+  const normalized = cover.trim();
+  if (!normalized || normalized === '/img/vinculo.png' || normalized.length > 4096) return '';
+  if (/^(?:https?:\/\/|\/)/i.test(normalized)) return normalized;
+  return /^[a-z][a-z\d+.-]*:/i.test(normalized) ? '' : normalized;
 }
 
 function inferPlaybackDeviceName(userAgent, deviceType) {
@@ -1619,12 +1628,28 @@ app.post('/api/users/status', async (req, res) => {
             ? normalizePlaybackDeviceName(previousUser.lastPlayed.deviceName)
             : '')
           || inferPlaybackDeviceName('', deviceType);
+        const sameSong = String(previousUser?.lastPlayed?.songId || '') === String(lastPlayed.songId || '');
+        const stoppedPlayback = lastPlayed.isPlaying === false;
+        const lastHeardAt = stoppedPlayback
+          ? lastPlayed.lastHeardAt
+            || (sameSong && (
+              currentPlayback?.isPlaying === true
+              || previousUser?.lastPlayed?.isPlaying === true
+            ) ? new Date() : null)
+            || (sameSong
+              ? currentPlayback?.lastHeardAt || previousUser?.lastPlayed?.lastHeardAt || previousUser?.lastPlayed?.updatedAt
+              : lastPlayed.updatedAt)
+          : sameSong
+            ? currentPlayback?.lastHeardAt || previousUser?.lastPlayed?.lastHeardAt
+            : undefined;
         const isNewSong = String(previousUser?.lastPlayed?.songId || '') !== String(lastPlayed.songId || '');
         const playbackColor = typeof lastPlayed.color === 'string' && /^#[0-9a-f]{6}$/i.test(lastPlayed.color)
           ? lastPlayed.color
           : '#ff8a00';
         updateData.lastPlayed = {
           ...lastPlayed,
+          cover: normalizeSharedPlaybackCover(lastPlayed.cover)
+            || (sameSong ? normalizeSharedPlaybackCover(previousUser?.lastPlayed?.cover) : ''),
           deviceName,
           deviceType,
           transferId: transferAllowsIncoming ? currentPlayback.transferId : lastPlayed.transferId,
@@ -1632,6 +1657,7 @@ app.post('/api/users/status', async (req, res) => {
           transferPending: false,
           resumeAfterTransfer: false,
           sourceUpdatedAt: Number.isFinite(incomingUpdatedAt) ? incomingUpdatedAt : Date.now(),
+          lastHeardAt,
           color: playbackColor,
           updatedAt: new Date()
         };
@@ -1645,7 +1671,7 @@ app.post('/api/users/status', async (req, res) => {
                 songId: lastPlayed.songId,
                 songName: lastPlayed.songName,
                 artist: lastPlayed.artist,
-                cover: lastPlayed.cover,
+                cover: updateData.lastPlayed.cover,
                 color: playbackColor,
                 playedAt: new Date()
               }],
@@ -3472,8 +3498,8 @@ app.post(['/api/yt-download', '/api/yt-download/upload'], (_req, res) => {
 });
 
 app.get('/api/media/:fileId', async (req, res) => {
+  const { fileId } = req.params;
   try {
-    const { fileId } = req.params;
     if (!oauthClient) {
       console.error('Drive no disponible: cliente OAuth no inicializado.');
       return res.status(503).json({ error: 'Google Drive no está configurado en el servidor.' });
@@ -3489,13 +3515,28 @@ app.get('/api/media/:fileId', async (req, res) => {
     const headers = { Authorization: `Bearer ${cachedDriveAccessToken}` };
     if (req.headers.range) headers.Range = req.headers.range;
 
-    const response = await axios({
-      method: 'get',
-      url: `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
-      headers: headers,
-      responseType: 'stream',
-      validateStatus: (status) => status >= 200 && status < 400 
-    });
+    let response;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        response = await axios({
+          method: 'get',
+          url: `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
+          headers,
+          responseType: 'stream',
+          validateStatus: status => status >= 200 && status < 400
+        });
+        break;
+      } catch (error) {
+        if (typeof error.response?.data?.destroy === 'function') {
+          error.response.data.destroy();
+        }
+        const status = error.response?.status;
+        const retryable = status === 429 || status >= 500
+          || ['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN'].includes(error.code);
+        if (!retryable || attempt === 2) throw error;
+        await new Promise(resolve => setTimeout(resolve, 500 * (2 ** attempt)));
+      }
+    }
 
     if (response.headers['content-type']) res.setHeader('Content-Type', response.headers['content-type']);
     if (response.headers['content-length']) res.setHeader('Content-Length', response.headers['content-length']);
@@ -3513,7 +3554,10 @@ app.get('/api/media/:fileId', async (req, res) => {
       || status === 403
       || error.code === 'invalid_grant'
       || error.message?.includes('invalid_grant');
-    const responseStatus = status === 404 ? 404 : isAuthError ? 502 : 500;
+    const responseStatus = status === 404 ? 404
+      : status === 429 ? 503
+        : status >= 500 || isAuthError ? 502
+          : status ? 502 : 500;
 
     console.error('Error obteniendo archivo multimedia desde Google Drive:', {
       fileId,
@@ -4295,6 +4339,7 @@ if (isMainModule) {
         playbackTransferInProgressByUser.set(authenticatedUserId, transferLockId);
         const transferIntent = {
           ...pausedPlayback,
+          cover: normalizeSharedPlaybackCover(pausedPlayback.cover),
           isPlaying: false,
           resumeAfterTransfer: true,
           transferId,
@@ -4611,6 +4656,14 @@ if (isMainModule) {
           && transferTarget?.deviceId === sourceDeviceId
           && transferTarget.transferId === playback.transferId;
         const incomingSourceUpdatedAt = Date.parse(playback.updatedAt || '') || Date.now();
+        const sameSong = String(currentPlayback?.songId || '') === String(playback.songId || '');
+        const lastHeardAt = playback.isPlaying === false
+          ? playback.lastHeardAt
+            || (sameSong && currentPlayback?.isPlaying === true ? new Date() : null)
+            || (sameSong ? currentPlayback?.lastHeardAt || currentPlayback?.updatedAt : playback.updatedAt)
+          : sameSong
+            ? currentPlayback?.lastHeardAt
+            : undefined;
         const staleOwnerUpdate = !isAuthorizedTransferUpdate
           && currentPlayback?.deviceId === sourceDeviceId
           && Number(currentPlayback.sourceUpdatedAt) > incomingSourceUpdatedAt;
@@ -4634,6 +4687,13 @@ if (isMainModule) {
           deviceId: sourceDeviceId,
           deviceType: socket.data.playbackDeviceType,
           deviceName: normalizePlaybackDeviceName(socket.data.playbackDeviceName),
+          cover: normalizeSharedPlaybackCover(playback.cover)
+            || (
+              sameSong
+                ? normalizeSharedPlaybackCover(currentPlayback?.cover)
+                : ''
+            ),
+          lastHeardAt,
           transferTargetDeviceId: '',
           transferPending: false,
           resumeAfterTransfer: false,
@@ -4671,6 +4731,9 @@ if (isMainModule) {
         }
         const playbackIdentityChanged = currentPlayback?.deviceId !== sharedPlayback.deviceId
           || currentPlayback?.songId !== sharedPlayback.songId;
+        const playbackStateChanged = currentPlayback?.isPlaying !== sharedPlayback.isPlaying;
+        const playbackCoverChanged = normalizeSharedPlaybackCover(currentPlayback?.cover)
+          !== normalizeSharedPlaybackCover(sharedPlayback.cover);
         playbackStateByUser.set(normalizedId, sharedPlayback);
         playbackSocketByUser.set(normalizedId, socket.id);
         if (
@@ -4686,7 +4749,7 @@ if (isMainModule) {
           userId: normalizedId,
           playback: sharedPlayback
         });
-        if (playbackIdentityChanged && !isAuthorizedTransferUpdate) {
+        if ((playbackIdentityChanged || playbackStateChanged || playbackCoverChanged) && !isAuthorizedTransferUpdate) {
           void User.findOneAndUpdate(
             {
               _id: normalizedId,
@@ -4766,6 +4829,7 @@ if (isMainModule) {
               currentTime,
               isPlaying: false,
               resumeAfterTransfer: true,
+              lastHeardAt: new Date(pausedAt),
               sourceUpdatedAt: pausedAt,
               updatedAt: new Date(pausedAt).toISOString()
             };

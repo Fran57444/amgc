@@ -45,35 +45,37 @@ function App() {
 
       <div id="main-content">
       <button id="unread-message-indicator" className="unread-message-indicator" type="button" aria-label="Mensajes no leídos" hidden>!</button>
-        <div id="yt-download-popup" className="yt-download-popup" aria-live="polite">
-          <div className="yt-download-popup-header">
-            <span className="yt-download-popup-icon">♪</span>
-            <div>
-              <strong id="yt-download-popup-title">Descargando canción</strong>
-              <small id="yt-download-popup-message">Preparando audio...</small>
+        <div id="download-notification-stack">
+          <div id="yt-download-popup" className="yt-download-popup" aria-live="polite" hidden>
+            <div className="yt-download-popup-header">
+              <span className="yt-download-popup-icon">♪</span>
+              <div>
+                <strong id="yt-download-popup-title">Descargando canción</strong>
+                <small id="yt-download-popup-message">Preparando audio...</small>
+              </div>
+            </div>
+            <div className="yt-download-progress-bar">
+              <div id="yt-download-progress-fill" className="yt-download-progress-fill"></div>
+            </div>
+            <div className="yt-download-progress-text">
+              <span id="yt-download-progress-label">0%</span>
             </div>
           </div>
-          <div className="yt-download-progress-bar">
-            <div id="yt-download-progress-fill" className="yt-download-progress-fill"></div>
-          </div>
-          <div className="yt-download-progress-text">
-            <span id="yt-download-progress-label">0%</span>
-          </div>
-        </div>
 
-        <div id="offline-download-popup" className="yt-download-popup offline-download-popup" aria-live="polite">
-          <div className="yt-download-popup-header">
-            <span className="yt-download-popup-icon" aria-hidden="true">↓</span>
-            <div>
-              <strong id="offline-download-popup-title">Descargas offline</strong>
-              <small id="offline-download-popup-message">Preparando recursos...</small>
+          <div id="offline-download-popup" className="yt-download-popup offline-download-popup" aria-live="polite" hidden>
+            <div className="yt-download-popup-header">
+              <span className="yt-download-popup-icon" aria-hidden="true">↓</span>
+              <div>
+                <strong id="offline-download-popup-title">Descargas offline</strong>
+                <small id="offline-download-popup-message">Preparando recursos...</small>
+              </div>
             </div>
-          </div>
-          <div className="yt-download-progress-bar">
-            <div id="offline-download-progress-fill" className="yt-download-progress-fill"></div>
-          </div>
-          <div className="yt-download-progress-text">
-            <span id="offline-download-progress-label">0%</span>
+            <div className="yt-download-progress-bar">
+              <div id="offline-download-progress-fill" className="yt-download-progress-fill"></div>
+            </div>
+            <div className="yt-download-progress-text">
+              <span id="offline-download-progress-label">0%</span>
+            </div>
           </div>
         </div>
 

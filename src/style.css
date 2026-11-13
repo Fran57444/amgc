@@ -238,7 +238,7 @@ input, textarea, select {
 
 #bottom-bar-wrapper {
     position: fixed; bottom: 0; left: 0; width: 100%; height: 85px; 
-    z-index: 9000; overflow: visible;
+    z-index: 10000; overflow: visible;
 }
 
 .listening-together-status {
@@ -1102,11 +1102,16 @@ img.no-image { font-size: 0.65rem; object-fit: none; }
 .playlist-saver-item img { width: 34px; height: 34px; flex: 0 0 34px; border-radius: 50%; object-fit: cover; background: #252525; }
 .playlist-saver-item img[hidden] { display: none; }
 
+#download-notification-stack {
+    position: fixed; top: 20px; right: 20px; z-index: 80000;
+    display: flex; flex-direction: column; align-items: flex-end; gap: 10px;
+    width: min(360px, calc(100vw - 32px)); pointer-events: none;
+}
 .yt-download-popup {
-    position: fixed; top: 20px; right: 20px; width: min(360px, calc(100vw - 32px));
+    position: relative; top: auto; right: auto; width: 100%;
     background: rgba(18, 18, 18, 0.96); border: 1px solid rgba(255,255,255,0.08);
     border-left: 4px solid #7c3aed; border-radius: 12px; box-shadow: 0 20px 40px rgba(0,0,0,0.45);
-    padding: 14px 16px 12px; z-index: 80000; opacity: 0; transform: translateY(-8px);
+    padding: 14px 16px 12px; opacity: 0; transform: translateY(-8px);
     pointer-events: none; transition: opacity 0.25s ease, transform 0.25s ease;
 }
 .yt-download-popup.active { opacity: 1; transform: translateY(0); }
@@ -1121,7 +1126,6 @@ img.no-image { font-size: 0.65rem; object-fit: none; }
 .yt-download-popup.error .yt-download-progress-fill { background: linear-gradient(90deg, #ff4d4d, #ff8c8c); }
 .yt-download-progress-text { margin-top: 8px; text-align: right; color: rgba(255,255,255,0.8); font-size: 0.72rem; }
 .offline-download-popup { border-left-color: #f97316; }
-.offline-download-popup.concurrent { top: 150px; }
 .offline-download-popup .yt-download-popup-icon { background: rgba(249,115,22,0.15); color: #fb923c; }
 .offline-download-popup .yt-download-progress-fill { background: linear-gradient(90deg, #ea580c, #fb923c); }
 .offline-download-popup.error .yt-download-popup-icon { background: rgba(255,77,77,0.12); color: #ff4d4d; }
