@@ -564,8 +564,7 @@ export function initMusicPlayer() {
     const progressContainer = document.getElementById("progress-container");
     const progressBar = document.getElementById("progress-bar");
     const sharedPlaybackStatus = document.getElementById('shared-playback-status');
-    const sharedPlaybackSource = document.getElementById('shared-playback-source');
-    const sharedPlaybackSourceLabel = document.getElementById('shared-playback-source-label');
+    const sharedPlaybackDeviceName = document.getElementById('shared-playback-device-name');
     const sharedPlaybackTitleText = document.getElementById('shared-playback-title-text');
     const sharedPlaybackArtist = document.getElementById('shared-playback-artist');
     const sharedPlaybackCover = document.getElementById('shared-playback-cover');
@@ -921,7 +920,6 @@ export function initMusicPlayer() {
     let playbackUiTrackId = null;
     let playbackUiTime = 0;
     let playbackUiFrame = null;
-    let localPlaybackActivity = null;
     let lastPlaybackBroadcastAt = 0;
     let lastPlaybackPersistenceAt = 0;
     let publicProfilePlaylists = null;
@@ -2193,32 +2191,17 @@ export function initMusicPlayer() {
                 : Boolean(user?.isOnline && displayTrack && displayTrack.isPlaying !== false);
             const isOnline = Boolean(user) && (isListening || user.isOnline !== false);
             const isOfflineProfile = isOwnProfile && offlineOnly;
-            const displayDeviceType = ownRemotePlayback
-                ? ownRemotePlayback.deviceType
-                : isOwnProfile && track
-                    ? playbackDeviceType
-                    : displayTrack?.deviceType;
+            const profileDevicePlayback = ownRemotePlayback || (isOwnProfile && track
+                ? { deviceId: playbackDeviceId, deviceType: playbackDeviceType }
+                : displayTrack);
+            const displayDeviceType = getPlaybackDeviceType(profileDevicePlayback);
             const currentCover = ownRemotePlayback?.cover
                 || (track && !ownRemotePlayback ? getSongCover(track) : (displayTrack?.cover || '/img/vinculo.png'));
             const activityColor = displayTrack?.color || '#ff8a00';
-            const currentProfileTrackId = track?._id ? String(track._id) : null;
-            const localPlaybackUpdatedAt = isOwnProfile && currentProfileTrackId
-                && localPlaybackActivity?.userId === String(user?._id || '')
-                && localPlaybackActivity?.trackId === currentProfileTrackId
-                ? localPlaybackActivity.updatedAt
-                : null;
-            const lastPlayedAt = displayTrack?.updatedAt
-                || localPlaybackUpdatedAt
-                || recentTrack?.updatedAt
-                || user?.lastPlayed?.updatedAt
-                || user?.lastActive;
-            const lastPlayedLabel = lastPlayedAt ? ` · ${timeAgo(lastPlayedAt)}` : '';
             const listeningLabel = isLoadingTrack
                 ? 'Cargando'
-                : isListening
-                    ? 'Escuchando'
                 : displayTrack
-                    ? `${displayDeviceType ? 'Pausado' : 'Estaba escuchando'}${lastPlayedLabel}`
+                    ? getPlaybackDeviceName(profileDevicePlayback)
                     : 'Sin actividad reciente';
             const statusLabel = isOfflineProfile ? 'Modo offline' : isOnline ? 'En línea' : 'Desconectado';
             const statusMeta = !isOfflineProfile && !isOnline && user?.lastActive ? ` · ${timeAgo(user.lastActive)}` : '';
@@ -2423,8 +2406,37 @@ export function initMusicPlayer() {
         return `<svg class="playback-device-inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${iconContents}</svg>`;
     }
 
+    function getPlaybackDeviceType(playback) {
+        if (['mobile', 'desktop'].includes(playback?.deviceType)) return playback.deviceType;
+        const registeredDevice = connectedPlaybackDevices.find(device => device.deviceId === playback?.deviceId);
+        if (['mobile', 'desktop'].includes(registeredDevice?.deviceType)) return registeredDevice.deviceType;
+        const deviceName = `${playback?.deviceName || registeredDevice?.deviceName || ''}`;
+        if (/android|iphone|ipad|móvil/i.test(deviceName)) return 'mobile';
+        if (/windows|macos|linux|escritorio/i.test(deviceName)) return 'desktop';
+        return '';
+    }
+
+    function getPlaybackDeviceName(playback) {
+        const registeredDevice = connectedPlaybackDevices.find(device => device.deviceId === playback?.deviceId);
+        if (playback?.deviceName || registeredDevice?.deviceName) {
+            return playback.deviceName || registeredDevice.deviceName;
+        }
+        const deviceType = getPlaybackDeviceType(playback);
+        return deviceType === 'mobile' ? 'AMGC en Android'
+            : deviceType === 'desktop' ? 'AMGC en escritorio'
+                : playback?.deviceId === playbackDeviceId
+                    ? 'Este equipo'
+                    : playback?.deviceId
+                        ? `Dispositivo · ${String(playback.deviceId).slice(-4).toUpperCase()}`
+                        : 'Dispositivo';
+    }
+
     function updatePlaybackDevicePickerIcons() {
-        const deviceType = getRemotePlaybackSession()?.deviceType || playbackDeviceType;
+        const playback = getRemotePlaybackSession() || {
+            deviceId: playbackDeviceId,
+            deviceType: playbackDeviceType
+        };
+        const deviceType = getPlaybackDeviceType(playback);
         playbackDeviceTriggers.forEach(trigger => {
             const phoneIcon = trigger.querySelector('[data-playback-device-phone]');
             const pcIcon = trigger.querySelector('[data-playback-device-pc]');
@@ -2437,47 +2449,44 @@ export function initMusicPlayer() {
         if (!playbackDeviceList) return;
         const devices = connectedPlaybackDevices.length
             ? [...connectedPlaybackDevices]
-            : [{ deviceId: playbackDeviceId, deviceType: playbackDeviceType }];
+            : [{
+                deviceId: playbackDeviceId,
+                deviceName: getPlaybackDeviceName({ deviceId: playbackDeviceId, deviceType: playbackDeviceType }),
+                deviceType: playbackDeviceType,
+                isConnected: true
+            }];
         if (!devices.some(device => device.deviceId === playbackDeviceId)) {
-            devices.unshift({ deviceId: playbackDeviceId, deviceType: playbackDeviceType });
+            devices.unshift({
+                deviceId: playbackDeviceId,
+                deviceName: 'Este equipo',
+                deviceType: playbackDeviceType,
+                isConnected: true
+            });
         }
         const activeDeviceId = sharedDevicePlayback?.deviceId
             || (getCurrentTrack() ? playbackDeviceId : '');
-        const typeCounts = new Map();
-        devices.forEach(device => {
-            if (device.deviceId !== playbackDeviceId) {
-                typeCounts.set(device.deviceType, (typeCounts.get(device.deviceType) || 0) + 1);
-            }
-        });
-        const typeIndexes = new Map();
         playbackDeviceList.replaceChildren();
         devices.sort((first, second) => Number(second.deviceId === playbackDeviceId) - Number(first.deviceId === playbackDeviceId));
         devices.forEach(device => {
             const isCurrentDevice = device.deviceId === playbackDeviceId;
             const isCurrentPlaybackDevice = device.deviceId === activeDeviceId;
-            const deviceTypeLabel = device.deviceType === 'mobile'
-                ? 'Celular'
-                : device.deviceType === 'desktop' ? 'PC' : 'Dispositivo';
-            let label = isCurrentDevice ? 'Este equipo' : deviceTypeLabel;
-            if (!isCurrentDevice && (typeCounts.get(device.deviceType) || 0) > 1) {
-                const index = (typeIndexes.get(device.deviceType) || 0) + 1;
-                typeIndexes.set(device.deviceType, index);
-                label += ` ${index}`;
-            }
+            const label = isCurrentDevice ? 'Este equipo' : device.deviceName || 'Dispositivo';
             const option = document.createElement('button');
             option.type = 'button';
             option.className = 'playback-device-option';
+            option.classList.toggle('is-current-playback', isCurrentPlaybackDevice);
+            option.setAttribute('aria-current', String(isCurrentPlaybackDevice));
             option.setAttribute('aria-label', isCurrentDevice ? label : `Transferir reproducción a ${label}`);
-            option.disabled = playbackTransferPending || isCurrentPlaybackDevice;
+            option.disabled = playbackTransferPending || isCurrentPlaybackDevice || device.isConnected === false;
             const icon = document.createElement('span');
             icon.className = 'playback-device-option-icon';
-            icon.innerHTML = playbackDeviceIconMarkup(device.deviceType);
+            icon.innerHTML = playbackDeviceIconMarkup(getPlaybackDeviceType(device) || device.deviceType);
             const name = document.createElement('span');
             name.className = 'playback-device-option-name';
             name.textContent = label;
             const status = document.createElement('small');
             status.className = 'playback-device-option-status';
-            status.textContent = isCurrentPlaybackDevice ? 'Reproduciendo aquí' : '';
+            status.textContent = device.isConnected === false ? 'Desconectado' : '';
             option.append(icon, name, status);
             option.addEventListener('click', () => void transferPlaybackToDevice(device.deviceId));
             playbackDeviceList.append(option);
@@ -2522,8 +2531,15 @@ export function initMusicPlayer() {
         playbackTransferPending = true;
         renderPlaybackDevicePicker();
         try {
-            const trackIndex = playlist.findIndex(track => String(track._id) === String(playback.songId));
-            if (trackIndex < 0) throw new Error('La canción actual no está disponible en esta biblioteca.');
+            let trackIndex = playlist.findIndex(track => String(track._id || track.id) === String(playback.songId));
+            if (trackIndex < 0 && !offlineOnly && navigator.onLine) {
+                const refreshedLibrary = await fetchJsonWithRetry(`${API_URL}/songs`);
+                playlist = Array.isArray(refreshedLibrary?.songs) ? refreshedLibrary.songs : [];
+                trackIndex = playlist.findIndex(track => String(track._id || track.id) === String(playback.songId));
+            }
+            if (trackIndex < 0) {
+                throw new Error('La canción transferida no está disponible en la biblioteca de este dispositivo.');
+            }
             const duration = Math.max(0, Number(playback.duration) || 0);
             let restoreTime = getSharedPlaybackTime(playback);
             if (duration > 0 && restoreTime >= duration - 1) restoreTime = 0;
@@ -2531,17 +2547,17 @@ export function initMusicPlayer() {
             sharedDevicePlayback = null;
             if (sharedPlaybackClockTimer) clearInterval(sharedPlaybackClockTimer);
             sharedPlaybackClockTimer = null;
-            renderSharedPlaybackStatus();
             const loaded = await loadAndPlayTrack(trackIndex, 'regular', shouldResume, restoreTime);
-            if (!loaded) throw new Error('No se pudo iniciar la canción en esta PC.');
-            if (!shouldResume) {
-                await waitForAudioMetadata();
-                audio.currentTime = Math.min(restoreTime, audio.duration || restoreTime);
-                sharedPlaybackTime = Number(audio.currentTime) || 0;
-                sharedPlaybackDuration = Number(audio.duration) || duration;
-                broadcastPlaybackState(true);
-                void updateUserStatus(true);
+            if (!loaded) {
+                if (audio.error) await waitForAudioMetadata();
+                throw new Error('No se pudo iniciar la canción en esta PC.');
             }
+            await waitForAudioMetadata();
+            audio.currentTime = Math.min(restoreTime, audio.duration || restoreTime);
+            sharedPlaybackTime = Number(audio.currentTime) || 0;
+            sharedPlaybackDuration = Number(audio.duration) || duration;
+            broadcastPlaybackState(true);
+            void updateUserStatus(true);
             acknowledgeResult({ success: true });
         } catch (error) {
             sharedDevicePlayback = { ...playback, isPlaying: false };
@@ -2595,6 +2611,7 @@ export function initMusicPlayer() {
 
     function waitForAudioMetadata() {
         if (audio.readyState >= 1) return Promise.resolve();
+        if (audio.error) return Promise.reject(new Error(getTransferAudioErrorMessage()));
         return new Promise((resolve, reject) => {
             const timeout = window.setTimeout(() => {
                 cleanup();
@@ -2611,11 +2628,20 @@ export function initMusicPlayer() {
             };
             const onError = () => {
                 cleanup();
-                reject(new Error('No se pudo cargar la canción en esta PC.'));
+                reject(new Error(getTransferAudioErrorMessage()));
             };
             audio.addEventListener('loadedmetadata', onLoaded, { once: true });
             audio.addEventListener('error', onError, { once: true });
         });
+    }
+
+    function getTransferAudioErrorMessage() {
+        const messages = {
+            2: 'Error de red al cargar la canción en esta PC.',
+            3: 'El formato de audio de esta canción no se pudo decodificar.',
+            4: 'El servidor no ofrece un formato de audio compatible con esta PC.'
+        };
+        return messages[audio.error?.code] || 'No se pudo cargar la canción en esta PC.';
     }
 
     async function requestRemotePlaybackControl(action, details = {}, notifyError = true) {
@@ -2674,10 +2700,7 @@ export function initMusicPlayer() {
         const duration = Math.max(0, Number(playback.duration) || 0);
         const currentTime = getSharedPlaybackTime(playback);
         const progress = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
-        const sourceLabel = playback.isPlaying === false ? 'En pausa' : 'Reproduciendo';
-        sharedPlaybackSourceLabel.textContent = sourceLabel;
-        sharedPlaybackSource.setAttribute('aria-label', sourceLabel);
-        sharedPlaybackSource.title = sourceLabel;
+        sharedPlaybackDeviceName.textContent = getPlaybackDeviceName(playback);
         updatePlaybackDevicePickerIcons();
         sharedPlaybackTitleText.textContent = playback.songName || '';
         sharedPlaybackArtist.textContent = playback.artist || '';
@@ -2776,17 +2799,6 @@ export function initMusicPlayer() {
         }));
     }
 
-    function rememberLocalPlaybackActivity() {
-        const trackId = getCurrentTrack()?._id;
-        const userId = getStoredUser()?._id;
-        if (!trackId || !userId) return;
-        localPlaybackActivity = {
-            userId: String(userId),
-            trackId: String(trackId),
-            updatedAt: new Date().toISOString()
-        };
-    }
-
     function recordOfflineListeningProgress(track, currentTime, includePaused = false) {
         if ((!offlineOnly && navigator.onLine) || (!includePaused && audio.paused) || !track) {
             offlineListeningLastSample = null;
@@ -2862,7 +2874,7 @@ export function initMusicPlayer() {
             const playback = friend.lastPlayed;
             const duration = Number(playback?.duration) || 0;
             if (hasPlaybackEvidence(playback) && playback?.isPlaying !== false && duration > 0) {
-                return `En línea · Escuchando ${playbackDeviceIconMarkup(playback.deviceType)} · ${formatTrackTime(Number(playback.currentTime) || 0)} / ${formatTrackTime(duration)}`;
+                return `En línea · ${escapeHtml(getPlaybackDeviceName(playback))} ${playbackDeviceIconMarkup(getPlaybackDeviceType(playback))} · ${formatTrackTime(Number(playback.currentTime) || 0)} / ${formatTrackTime(duration)}`;
             }
             return 'En línea';
         }
@@ -2878,15 +2890,10 @@ export function initMusicPlayer() {
                 const duration = Number(playback?.duration) || 0;
                 const elapsed = Number(playback?.currentTime) || 0;
                 const progress = duration > 0 ? Math.min(100, (elapsed / duration) * 100) : 0;
-                const isPlaying = Boolean(friend.isOnline && hasActivity && playback?.isPlaying !== false);
                 const statusText = friend.isOnline
                     ? 'En línea'
                     : `${friend.lastActive ? '  ' + timeAgo(friend.lastActive) : ''}`;
-                const lastPlayedAt = playback?.updatedAt || friend.lastActive;
-                const lastPlayedLabel = lastPlayedAt ? ` · ${timeAgo(lastPlayedAt)}` : '';
-                const playbackLabel = isPlaying
-                    ? `Escuchando ${playbackDeviceIconMarkup(playback.deviceType)}`
-                    : escapeHtml(`Escuchó por última vez${lastPlayedLabel}`);
+                const playbackLabel = `${escapeHtml(getPlaybackDeviceName(playback))} ${playbackDeviceIconMarkup(getPlaybackDeviceType(playback))}`;
                 return `
                     <li class="friend-sidebar-item" data-friend-id="${escapeHtml(friend._id)}" data-friend-name="${escapeHtml(friend.username)}">
                         <img class="friend-sidebar-avatar" src="${escapeHtml(friend.profilePhoto || '/img/perrocorasongif.gif')}" alt="" loading="lazy" />
@@ -3635,6 +3642,7 @@ export function initMusicPlayer() {
             ));
             updatePlaybackDevicePickerIcons();
             renderPlaybackDevicePicker();
+            renderSharedPlaybackStatus();
         });
         socket.off('playbackTransferCommand').on('playbackTransferCommand', activateTransferredPlayback);
         socket.off('playbackControlCommand').on('playbackControlCommand', async (command = {}, acknowledge = () => {}) => {
@@ -9111,7 +9119,6 @@ export function initMusicPlayer() {
         renderSharedPlaybackStatus();
         desktopSetTaskbarPlaybackState?.(true);
         updateDiscordPresence();
-        rememberLocalPlaybackActivity();
         suppressStartupPlaybackUpdates = false;
         const activeUser = getStoredUser();
         if (currentTrackSource === 'together') {
@@ -9154,7 +9161,6 @@ export function initMusicPlayer() {
         }
         desktopSetTaskbarPlaybackState?.(false);
         updateDiscordPresence();
-        rememberLocalPlaybackActivity();
         recordOfflineListeningProgress(
             getCurrentTrack(),
             Number.isFinite(audio.currentTime) ? audio.currentTime : 0,
@@ -9951,7 +9957,6 @@ export function initMusicPlayer() {
     audio.addEventListener('seeked', () => {
         if (!isCurrentAudioSource(getCurrentTrack())) return;
         updateDiscordPresence();
-        rememberLocalPlaybackActivity();
         persistPlaybackPosition(true);
         broadcastPlaybackState(true);
         if (isEditSongMode) updateEditLyricsPreview();

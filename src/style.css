@@ -299,7 +299,7 @@ input, textarea, select {
 .shared-playback-status[hidden] { display: none; }
 .shared-playback-status > img { width: 42px; height: 42px; flex: 0 0 42px; border-radius: 4px; object-fit: cover; }
 .shared-playback-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 2px; }
-.shared-playback-copy strong { color: #ffbf78; font-size: .68rem; }
+.shared-playback-copy > small:first-child { color: #ffbf78; font-size: .68rem; }
 .shared-playback-title-row { display: flex; min-width: 0; align-items: center; gap: 4px; }
 .shared-playback-title-row > span { min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .playback-device-picker-trigger { display: inline-flex; width: 24px; height: 24px; flex: 0 0 24px; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: 4px; background: transparent; color: #ffbf78; cursor: pointer; }
@@ -314,6 +314,7 @@ input, textarea, select {
 .playback-device-option { display: flex; min-width: 0; align-items: center; gap: 9px; padding: 8px; border: 0; border-radius: 5px; background: transparent; color: #fff; text-align: left; cursor: pointer; }
 .playback-device-option:hover:not(:disabled) { background: rgba(255,255,255,.09); }
 .playback-device-option:disabled { opacity: .62; cursor: default; }
+.playback-device-option.is-current-playback { background: rgba(255,191,120,.1); }
 .playback-device-option-icon { display: inline-flex; width: 18px; height: 18px; flex: 0 0 18px; color: #ffbf78; }
 .playback-device-option-icon svg { width: 100%; height: 100%; }
 .playback-device-option-name { min-width: 0; flex: 1; overflow: hidden; font-size: .78rem; text-overflow: ellipsis; white-space: nowrap; }

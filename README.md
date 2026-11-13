@@ -15,3 +15,7 @@ YOUTUBE_COOKIES_FILE=
 ```
 
 `YOUTUBE_COOKIES_FILE` es opcional y debe apuntar al archivo de cookies de YouTube. No compartas ni subas el `.env`, ya que puede contener credenciales.
+
+## Dispositivos de reproducción
+
+Los dispositivos que se conectan quedan asociados a la cuenta en MongoDB y aparecen en el selector de transferencia, incluidos los que estén desconectados. El nombre mostrado se detecta a partir del navegador y la plataforma; la transferencia solo está disponible hacia dispositivos conectados. Estos cambios de historial requieren desplegar la versión actualizada del backend.

@@ -156,12 +156,14 @@ const userSchema = new mongoose.Schema({
     artist: String,
     cover: String,
     color: String,
+    deviceName: String,
     currentTime: Number,
     duration: Number,
     isPlaying: Boolean,
     resumeAfterTransfer: Boolean,
     deviceId: String,
     deviceType: String,
+    sourceUpdatedAt: Number,
     updatedAt: Date
   },
   lastPlayedHistory: [{
@@ -199,6 +201,17 @@ const userSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 const User = mongoose.model('User', userSchema);
+
+const playbackDeviceSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  deviceId: { type: String, required: true },
+  deviceName: { type: String, required: true },
+  deviceType: { type: String, enum: ['mobile', 'desktop'], required: true },
+  firstSeenAt: { type: Date, default: Date.now },
+  lastSeenAt: { type: Date, default: Date.now }
+});
+playbackDeviceSchema.index({ userId: 1, deviceId: 1 }, { unique: true });
+const PlaybackDevice = mongoose.model('PlaybackDevice', playbackDeviceSchema);
 
 const globalSettingsSchema = new mongoose.Schema({
   _id: { type: String, required: true },
@@ -636,8 +649,41 @@ const Message = mongoose.model('Message', messageSchema);
 let realtimeIo = null;
 const playbackStateByUser = new Map();
 const playbackSocketByUser = new Map();
+const playbackTransferTargetByUser = new Map();
 const listenTogetherQueueSessions = new Map();
 const listenTogetherQueueSessionByUser = new Map();
+
+function inferPlaybackDeviceName(userAgent, deviceType) {
+  const agent = typeof userAgent === 'string' ? userAgent : '';
+  const androidModel = agent.match(/Android\s+[^;]+;\s*([^;)]+)/i)?.[1]
+    ?.replace(/\s+Build.*$/i, '')
+    .trim();
+  const browser = /Edg\//i.test(agent) ? 'Edge'
+    : /Firefox\//i.test(agent) ? 'Firefox'
+      : /Chrome\//i.test(agent) ? 'Chrome'
+        : /Safari\//i.test(agent) ? 'Safari'
+          : 'AMGC';
+  if (deviceType === 'mobile') {
+    const model = androidModel
+      || (/\biPad\b/i.test(agent) ? 'iPad'
+        : /\biPhone\b/i.test(agent) ? 'iPhone'
+          : /\bAndroid\b/i.test(agent) ? 'Android'
+            : 'Móvil');
+    return `${model} · ${browser}`.slice(0, 80);
+  }
+  const platform = /Windows/i.test(agent) ? 'Windows'
+    : /Macintosh|Mac OS/i.test(agent) ? 'macOS'
+      : /Linux/i.test(agent) ? 'Linux'
+        : 'Escritorio';
+  return `${platform} · ${browser}`.slice(0, 80);
+}
+
+function inferPlaybackDeviceType(deviceType, userAgent) {
+  if (['mobile', 'desktop'].includes(deviceType)) return deviceType;
+  return /android|iphone|ipad|ipod|mobile/i.test(typeof userAgent === 'string' ? userAgent : '')
+    ? 'mobile'
+    : 'desktop';
+}
 
 function removeListenTogetherQueueSession(sessionId, notify = true) {
   const session = listenTogetherQueueSessions.get(sessionId);
@@ -1480,7 +1526,8 @@ app.delete('/api/users/:id', async (req, res) => {
     await User.findByIdAndDelete(user._id);
     await Promise.all([
       User.updateMany({ friends: user._id }, { $pull: { friends: user._id } }),
-      Playlist.updateMany({ sharedWith: user._id }, { $pull: { sharedWith: user._id } })
+      Playlist.updateMany({ sharedWith: user._id }, { $pull: { sharedWith: user._id } }),
+      PlaybackDevice.deleteMany({ userId: user._id })
     ]);
     realtimeIo?.to(`user:${user._id}`).emit('accountRemoved');
     for (const friend of affectedFriends) {
@@ -1517,48 +1564,93 @@ app.post('/api/users/status', async (req, res) => {
     let shouldRecordHistory = false;
     if (lastPlayed) {
       previousUser = await User.findById(userId).select('lastPlayed lastPlayedHistory');
-      const isNewSong = String(previousUser?.lastPlayed?.songId || '') !== String(lastPlayed.songId || '');
-      const playbackColor = typeof lastPlayed.color === 'string' && /^#[0-9a-f]{6}$/i.test(lastPlayed.color)
-        ? lastPlayed.color
-        : '#ff8a00';
-      updateData.lastPlayed = {
-        ...lastPlayed,
-        resumeAfterTransfer: lastPlayed.resumeAfterTransfer === true,
-        color: playbackColor,
-        updatedAt: new Date()
-      };
-      const latestHistorySongId = previousUser?.lastPlayedHistory?.at(-1)?.songId;
-      shouldRecordHistory = String(latestHistorySongId || '') !== String(lastPlayed.songId || '');
-      if (shouldRecordHistory || !previousUser?.lastPlayedHistory?.length) {
-        shouldRecordHistory = true;
-        updateData.$push = {
-          lastPlayedHistory: {
-            $each: [{
-              songId: lastPlayed.songId,
-              songName: lastPlayed.songName,
-              artist: lastPlayed.artist,
-              cover: lastPlayed.cover,
-              color: playbackColor,
-              playedAt: new Date()
-            }],
-            $slice: -20
-          }
+      const userKey = String(userId);
+      const currentPlayback = playbackStateByUser.get(userKey) || previousUser?.lastPlayed;
+      const incomingDeviceId = typeof lastPlayed.deviceId === 'string' ? lastPlayed.deviceId : '';
+      const transferAllowsIncoming = playbackTransferTargetByUser.get(userKey) === incomingDeviceId;
+      const incomingUpdatedAt = Date.parse(lastPlayed.updatedAt || '');
+      const staleOwnerUpdate = Boolean(
+        currentPlayback?.sourceUpdatedAt
+        && incomingDeviceId === currentPlayback.deviceId
+        && Number.isFinite(incomingUpdatedAt)
+        && incomingUpdatedAt < currentPlayback.sourceUpdatedAt
+      );
+      const shouldAcceptPlaybackUpdate = (
+        !currentPlayback?.deviceId
+        || incomingDeviceId === currentPlayback?.deviceId
+        || transferAllowsIncoming
+      ) && !(staleOwnerUpdate && !transferAllowsIncoming);
+      if (shouldAcceptPlaybackUpdate) {
+        const registeredSocket = [...(realtimeIo?.sockets?.sockets?.values() || [])].find(activeSocket => (
+          activeSocket.data.userId === userKey
+          && activeSocket.data.playbackDeviceId === incomingDeviceId
+        ));
+        const deviceType = ['mobile', 'desktop'].includes(lastPlayed.deviceType)
+          ? lastPlayed.deviceType
+          : registeredSocket?.data.playbackDeviceType
+            || (previousUser?.lastPlayed?.deviceId === incomingDeviceId ? previousUser.lastPlayed.deviceType : 'unknown');
+        const deviceName = typeof lastPlayed.deviceName === 'string' && lastPlayed.deviceName.trim()
+          ? lastPlayed.deviceName.trim().slice(0, 80)
+          : registeredSocket?.data.playbackDeviceName
+            || (previousUser?.lastPlayed?.deviceId === incomingDeviceId ? previousUser.lastPlayed.deviceName : '')
+            || inferPlaybackDeviceName('', deviceType);
+        const isNewSong = String(previousUser?.lastPlayed?.songId || '') !== String(lastPlayed.songId || '');
+        const playbackColor = typeof lastPlayed.color === 'string' && /^#[0-9a-f]{6}$/i.test(lastPlayed.color)
+          ? lastPlayed.color
+          : '#ff8a00';
+        updateData.lastPlayed = {
+          ...lastPlayed,
+          deviceName,
+          deviceType,
+          sourceUpdatedAt: Number.isFinite(incomingUpdatedAt) ? incomingUpdatedAt : Date.now(),
+          resumeAfterTransfer: lastPlayed.resumeAfterTransfer === true,
+          color: playbackColor,
+          updatedAt: new Date()
         };
+        const latestHistorySongId = previousUser?.lastPlayedHistory?.at(-1)?.songId;
+        shouldRecordHistory = String(latestHistorySongId || '') !== String(lastPlayed.songId || '');
+        if (shouldRecordHistory || !previousUser?.lastPlayedHistory?.length) {
+          shouldRecordHistory = true;
+          updateData.$push = {
+            lastPlayedHistory: {
+              $each: [{
+                songId: lastPlayed.songId,
+                songName: lastPlayed.songName,
+                artist: lastPlayed.artist,
+                cover: lastPlayed.cover,
+                color: playbackColor,
+                playedAt: new Date()
+              }],
+              $slice: -20
+            }
+          };
+        }
+        if (lastPlayed.countListeningDelta !== false) {
+          updateData.$inc = {
+            'stats.listeningSeconds': lastPlayed.isPlaying
+              ? Math.max(0, Number(lastPlayed.currentTime || 0) - Number(previousUser?.lastPlayed?.currentTime || 0))
+              : 0
+          };
+          if (isNewSong) updateData.$inc['stats.songsPlayed'] = 1;
+        }
+        updateData['stats.lastPlayedAt'] = new Date();
       }
-      if (lastPlayed.countListeningDelta !== false) {
-        updateData.$inc = {
-          'stats.listeningSeconds': lastPlayed.isPlaying
-            ? Math.max(0, Number(lastPlayed.currentTime || 0) - Number(previousUser?.lastPlayed?.currentTime || 0))
-            : 0
-        };
-        if (isNewSong) updateData.$inc['stats.songsPlayed'] = 1;
-      }
-      updateData['stats.lastPlayedAt'] = new Date();
     }
     const updatedUser = await User.findByIdAndUpdate(userId, updateData, {
       returnDocument: 'after'
     }).select('friends isOnline lastActive lastPlayedHistory').lean();
-    if (lastPlayed && updatedUser) playbackStateByUser.set(String(updatedUser._id), updateData.lastPlayed);
+    if (updateData.lastPlayed && updatedUser) {
+      const currentPlayback = playbackStateByUser.get(String(updatedUser._id));
+      playbackStateByUser.set(String(updatedUser._id), {
+        ...updateData.lastPlayed,
+        sourceUpdatedAt: Math.max(
+          Number(currentPlayback?.deviceId === updateData.lastPlayed.deviceId
+            ? currentPlayback.sourceUpdatedAt
+            : 0) || 0,
+          Number(updateData.lastPlayed.sourceUpdatedAt) || 0
+        )
+      });
+    }
     if (lastPlayed) emitUserStatsChanged(userId);
     if (shouldRecordHistory) emitUserHistoryChanged(updatedUser);
     if (updatedUser && (typeof isOnline === 'boolean' || lastPlayed)) {
@@ -3401,27 +3493,80 @@ if (isMainModule) {
       if (ownerSocket) playbackSocketByUser.set(authenticatedUserId, ownerSocket.id);
       return ownerSocket;
     };
-    const getConnectedPlaybackDevices = () => {
+    const getConnectedPlaybackDevices = async () => {
       const devices = new Map();
+      const history = await PlaybackDevice.find({ userId: authenticatedUserId })
+        .sort({ lastSeenAt: -1 })
+        .lean();
+      for (const device of history) {
+        if (typeof device.deviceId !== 'string' || !device.deviceId) continue;
+        devices.set(device.deviceId, {
+          deviceId: device.deviceId,
+          deviceName: device.deviceName,
+          deviceType: ['mobile', 'desktop'].includes(device.deviceType) ? device.deviceType : 'unknown',
+          firstSeenAt: device.firstSeenAt || null,
+          lastSeenAt: device.lastSeenAt || null,
+          isConnected: false
+        });
+      }
       for (const activeSocket of io.sockets.sockets.values()) {
-        const { playbackDeviceId, playbackDeviceType } = activeSocket.data;
+        const { playbackDeviceId, playbackDeviceName, playbackDeviceType } = activeSocket.data;
         if (
           activeSocket.data.userId !== authenticatedUserId
           || typeof playbackDeviceId !== 'string'
           || !playbackDeviceId
         ) continue;
+        const existingDevice = devices.get(playbackDeviceId);
         devices.set(playbackDeviceId, {
+          ...existingDevice,
           deviceId: playbackDeviceId,
-          deviceType: ['mobile', 'desktop'].includes(playbackDeviceType) ? playbackDeviceType : 'unknown'
+          deviceName: playbackDeviceName || existingDevice?.deviceName
+            || inferPlaybackDeviceName(activeSocket.handshake.headers['user-agent'], playbackDeviceType),
+          deviceType: ['mobile', 'desktop'].includes(playbackDeviceType)
+            ? playbackDeviceType
+            : existingDevice?.deviceType || 'unknown',
+          isConnected: true
         });
       }
-      return [...devices.values()];
+      return [...devices.values()].sort((first, second) => (
+        Number(second.isConnected) - Number(first.isConnected)
+        || Date.parse(second.lastSeenAt || '') - Date.parse(first.lastSeenAt || '')
+      ));
     };
-    const emitPlaybackDevicesChanged = () => {
-      io.to(`user:${authenticatedUserId}`).emit('playbackDevicesChanged', {
+    const emitPlaybackDevicesChanged = async () => {
+      try {
+        const devices = await getConnectedPlaybackDevices();
+        io.to(`user:${authenticatedUserId}`).emit('playbackDevicesChanged', {
+          userId: authenticatedUserId,
+          devices
+        });
+      } catch (error) {
+        console.error('No se pudo consultar el historial de dispositivos de reproducción.', error);
+      }
+    };
+    const registerPlaybackDevice = async () => {
+      const now = new Date();
+      const filter = {
         userId: authenticatedUserId,
-        devices: getConnectedPlaybackDevices()
-      });
+        deviceId: socket.data.playbackDeviceId
+      };
+      const update = {
+        $set: {
+          deviceName: socket.data.playbackDeviceName,
+          deviceType: socket.data.playbackDeviceType,
+          lastSeenAt: now
+        },
+        $setOnInsert: { firstSeenAt: now }
+      };
+      try {
+        await PlaybackDevice.findOneAndUpdate(filter, update, { upsert: true, returnDocument: 'after' });
+      } catch (error) {
+        if (error.code !== 11000) throw error;
+        await PlaybackDevice.findOneAndUpdate(filter, update, { returnDocument: 'after' });
+      }
+      return PlaybackDevice.find({ userId: authenticatedUserId })
+        .sort({ lastSeenAt: -1 })
+        .lean();
     };
     const publishPlaybackState = (playback, friendIds = socket.data.friendIds || []) => {
       playbackStateByUser.set(authenticatedUserId, playback);
@@ -3456,12 +3601,19 @@ if (isMainModule) {
         const deviceId = payload && typeof payload === 'object' && !Array.isArray(payload)
           ? payload.deviceId
           : null;
+        let playbackDevices = [];
         if (typeof deviceId === 'string' && deviceId.trim() && deviceId.length <= 128) {
           socket.data.playbackDeviceId = deviceId.trim();
-          socket.data.playbackDeviceType = payload && ['mobile', 'desktop'].includes(payload.deviceType)
-            ? payload.deviceType
-            : 'unknown';
-          emitPlaybackDevicesChanged();
+          socket.data.playbackDeviceType = inferPlaybackDeviceType(
+            payload?.deviceType,
+            socket.handshake.headers['user-agent']
+          );
+          socket.data.playbackDeviceName = inferPlaybackDeviceName(
+            socket.handshake.headers['user-agent'],
+            socket.data.playbackDeviceType
+          );
+          playbackDevices = await registerPlaybackDevice();
+          await emitPlaybackDevicesChanged();
         }
         let playback = playbackStateByUser.get(authenticatedUserId);
         if (!playback) {
@@ -3469,6 +3621,20 @@ if (isMainModule) {
           if (playback?.songId) playbackStateByUser.set(authenticatedUserId, playback);
         }
         if (playback?.songId) {
+          const knownDevice = playbackDevices.find(device => device.deviceId === playback.deviceId);
+          if (
+            !['mobile', 'desktop'].includes(playback.deviceType)
+            || !playback.deviceName
+          ) {
+            playback = {
+              ...playback,
+              deviceType: ['mobile', 'desktop'].includes(playback.deviceType)
+                ? playback.deviceType
+                : knownDevice?.deviceType || 'unknown',
+              deviceName: playback.deviceName || knownDevice?.deviceName || ''
+            };
+            playbackStateByUser.set(authenticatedUserId, playback);
+          }
           if (playback.deviceId && socket.data.playbackDeviceId === playback.deviceId) {
             playbackSocketByUser.set(authenticatedUserId, socket.id);
           }
@@ -3584,13 +3750,15 @@ if (isMainModule) {
 
           let pausedPlayback = playbackStateByUser.get(authenticatedUserId);
           if (pausedPlayback?.deviceId !== playback.deviceId || pausedPlayback.isPlaying !== false) {
+            const pausedAt = Date.now();
             pausedPlayback = {
               ...playback,
               ...result.playback,
               deviceId: playback.deviceId,
               deviceType: playback.deviceType,
               isPlaying: false,
-              updatedAt: new Date().toISOString()
+              sourceUpdatedAt: pausedAt,
+              updatedAt: new Date(pausedAt).toISOString()
             };
             playbackStateByUser.set(authenticatedUserId, pausedPlayback);
             io.to(`user:${authenticatedUserId}`).except(ownerSocket.id).emit('playbackOwnerChanged', {
@@ -3650,26 +3818,60 @@ if (isMainModule) {
       }
 
       const sendToTarget = (pausedPlayback, resumeAfterTransfer) => {
+        playbackTransferTargetByUser.set(authenticatedUserId, normalizedTargetDeviceId);
         targetSocket.timeout(25000).emit(
           'playbackTransferCommand',
           { playback: pausedPlayback, resumeAfterTransfer },
           (deliveryError, result) => {
             if (deliveryError) {
+              if (playbackTransferTargetByUser.get(authenticatedUserId) === normalizedTargetDeviceId) {
+                playbackTransferTargetByUser.delete(authenticatedUserId);
+              }
               acknowledgeResult({ success: false, error: 'El dispositivo de destino no respondió a la transferencia.' });
               return;
             }
-            acknowledgeResult(result?.success
-              ? { success: true }
-              : { success: false, error: result?.error || 'No se pudo iniciar la reproducción en el dispositivo de destino.' });
+            if (!result?.success) {
+              if (playbackTransferTargetByUser.get(authenticatedUserId) === normalizedTargetDeviceId) {
+                playbackTransferTargetByUser.delete(authenticatedUserId);
+              }
+              acknowledgeResult({
+                success: false,
+                error: result?.error || 'No se pudo iniciar la reproducción en el dispositivo de destino.'
+              });
+              return;
+            }
+            const currentPlayback = playbackStateByUser.get(authenticatedUserId);
+            if (currentPlayback?.deviceId !== normalizedTargetDeviceId) {
+              const transferredAt = Date.now();
+              const transferredPlayback = {
+                ...pausedPlayback,
+                deviceId: normalizedTargetDeviceId,
+                deviceType: targetSocket.data.playbackDeviceType,
+                deviceName: targetSocket.data.playbackDeviceName,
+                isPlaying: Boolean(resumeAfterTransfer),
+                resumeAfterTransfer: false,
+                sourceUpdatedAt: transferredAt,
+                updatedAt: new Date(transferredAt).toISOString()
+              };
+              publishPlaybackState(transferredPlayback);
+              void User.findByIdAndUpdate(authenticatedUserId, { $set: { lastPlayed: transferredPlayback } })
+                .catch(error => console.error('No se pudo guardar el dispositivo que recibió la reproducción.', error));
+            }
+            if (playbackTransferTargetByUser.get(authenticatedUserId) === normalizedTargetDeviceId) {
+              playbackTransferTargetByUser.delete(authenticatedUserId);
+            }
+            acknowledgeResult({ success: true });
           }
         );
       };
       const transferPausedPlayback = (pausedPlayback, resumeAfterTransfer) => {
+        const pausedAt = Date.now();
         const normalizedPlayback = {
           ...pausedPlayback,
           isPlaying: false,
           resumeAfterTransfer: Boolean(resumeAfterTransfer),
-          updatedAt: new Date().toISOString()
+          sourceUpdatedAt: pausedAt,
+          updatedAt: new Date(pausedAt).toISOString()
         };
         publishPlaybackState(normalizedPlayback);
         void User.findByIdAndUpdate(authenticatedUserId, { $set: { lastPlayed: normalizedPlayback } })
@@ -3684,11 +3886,6 @@ if (isMainModule) {
       }
       if (!ownerSocket?.connected) {
         transferPausedPlayback(playback, true);
-        void User.findByIdAndUpdate(authenticatedUserId, { $set: { lastPlayed: {
-          ...playback,
-          isPlaying: false,
-          resumeAfterTransfer: true
-        } } }).catch(error => console.error('No se pudo guardar la reproducción pausada tras una desconexión.', error));
         return;
       }
 
@@ -3938,20 +4135,37 @@ if (isMainModule) {
     socket.on('songChanged', async ({ excludeUserId, playback } = {}) => {
       const normalizedId = authenticatedUserId;
       if (!playback || typeof playback !== 'object' || Array.isArray(playback)) return;
+      const sourceDeviceId = socket.data.playbackDeviceId;
+      if (!sourceDeviceId || playback.deviceId !== sourceDeviceId) return;
       try {
+        const currentPlayback = playbackStateByUser.get(normalizedId);
+        const transferTarget = playbackTransferTargetByUser.get(normalizedId);
+        if (
+          currentPlayback?.deviceId
+          && currentPlayback.deviceId !== sourceDeviceId
+          && transferTarget !== sourceDeviceId
+        ) return;
         const sharedPlayback = {
           ...playback,
-          deviceId: typeof playback.deviceId === 'string' ? playback.deviceId.slice(0, 128) : '',
-          deviceType: ['mobile', 'desktop'].includes(playback.deviceType) ? playback.deviceType : 'unknown',
+          deviceId: sourceDeviceId,
+          deviceType: socket.data.playbackDeviceType,
+          deviceName: socket.data.playbackDeviceName,
+          sourceUpdatedAt: Date.parse(playback.updatedAt || '') || Date.now(),
           updatedAt: new Date().toISOString()
         };
+        const playbackIdentityChanged = currentPlayback?.deviceId !== sharedPlayback.deviceId
+          || currentPlayback?.songId !== sharedPlayback.songId;
         playbackStateByUser.set(normalizedId, sharedPlayback);
-        socket.data.playbackDeviceId = sharedPlayback.deviceId;
         playbackSocketByUser.set(normalizedId, socket.id);
+        if (transferTarget === sourceDeviceId) playbackTransferTargetByUser.delete(normalizedId);
         io.to(`user:${normalizedId}`).except(socket.id).emit('playbackOwnerChanged', {
           userId: normalizedId,
           playback: sharedPlayback
         });
+        if (playbackIdentityChanged) {
+          void User.findByIdAndUpdate(normalizedId, { $set: { lastPlayed: sharedPlayback } })
+            .catch(error => console.error('No se pudo guardar el cambio de dispositivo o canción.', error));
+        }
         const friendIds = Array.isArray(socket.data.friendIds)
           ? socket.data.friendIds
           : await refreshFriendIds();
@@ -4003,12 +4217,14 @@ if (isMainModule) {
             const currentTime = duration > 0
               ? Math.min(duration, baseTime + elapsed)
               : baseTime + elapsed;
+            const pausedAt = Date.now();
             const pausedPlayback = {
               ...playback,
               currentTime,
               isPlaying: false,
               resumeAfterTransfer: true,
-              updatedAt: new Date().toISOString()
+              sourceUpdatedAt: pausedAt,
+              updatedAt: new Date(pausedAt).toISOString()
             };
             let friendIds = socket.data.friendIds;
             if (!Array.isArray(friendIds)) {

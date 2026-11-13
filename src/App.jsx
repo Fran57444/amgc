@@ -718,9 +718,7 @@ function App() {
                   <div id="shared-playback-status" className="shared-playback-status" hidden role="status" aria-live="polite">
                     <img id="shared-playback-cover" alt="" />
                     <span className="shared-playback-copy">
-                      <strong id="shared-playback-source" aria-label="">
-                        <span id="shared-playback-source-label"></span>
-                      </strong>
+                      <small id="shared-playback-device-name"></small>
                       <span id="shared-playback-title" className="shared-playback-title-row">
                         <span id="shared-playback-title-text"></span>
                         <button className="playback-device-picker-trigger shared-playback-device-trigger" type="button" data-playback-device-trigger aria-label="Elegir dispositivo de reproducción" aria-haspopup="dialog" aria-expanded="false">
@@ -740,8 +738,8 @@ function App() {
                     </span>
                   </div>
                 </div>
-                <div id="playback-device-picker" className="playback-device-picker" hidden role="dialog" aria-label="Dispositivos conectados">
-                  <strong>Dispositivos conectados</strong>
+                <div id="playback-device-picker" className="playback-device-picker" hidden role="dialog" aria-label="Dispositivos de la cuenta">
+                  <strong>Dispositivos de la cuenta</strong>
                   <div id="playback-device-list"></div>
                 </div>
               </div>
