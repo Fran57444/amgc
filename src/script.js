@@ -275,11 +275,12 @@ export function initMusicPlayer() {
             }
         }
         if (listeningTogetherUserId) joinListenTogetherQueue(listeningTogetherUserId, true);
-        broadcastPlaybackState(true);
+        if (!audio.paused) broadcastPlaybackState(true);
         if (activeChatFriendId) loadChatMessages(false);
         refreshChatNotifications();
     });
     socket.off('disconnect').on('disconnect', () => {
+        renderSharedPlaybackStatus();
         leaveListenTogetherQueue();
         if (!listeningTogetherUserId) return;
         listeningTogetherAwaitingFreshPlayback = true;
@@ -560,11 +561,15 @@ export function initMusicPlayer() {
     const progressBar = document.getElementById("progress-bar");
     const sharedPlaybackStatus = document.getElementById('shared-playback-status');
     const sharedPlaybackSource = document.getElementById('shared-playback-source');
-    const sharedPlaybackTitle = document.getElementById('shared-playback-title');
+    const sharedPlaybackSourceLabel = document.getElementById('shared-playback-source-label');
+    const sharedPlaybackPhoneIcon = document.getElementById('shared-playback-device-phone');
+    const sharedPlaybackPcIcon = document.getElementById('shared-playback-device-pc');
+    const sharedPlaybackTitleText = document.getElementById('shared-playback-title-text');
     const sharedPlaybackArtist = document.getElementById('shared-playback-artist');
     const sharedPlaybackCover = document.getElementById('shared-playback-cover');
     const sharedPlaybackProgressFill = document.getElementById('shared-playback-progress-fill');
     const sharedPlaybackTimeLabel = document.getElementById('shared-playback-time');
+    const sharedPlaybackTakeover = document.getElementById('shared-playback-takeover');
     const bottomBarCover = document.getElementById("bottom-bar-cover");
     const btnShuffle = document.getElementById("btn-shuffle");
     const btnQueue = document.getElementById("btn-queue");
@@ -2260,7 +2265,7 @@ export function initMusicPlayer() {
                     >
                         <img src="${escapeHtml(currentCover)}" alt="Portada de la canción" class="profile-activity-cover" draggable="false" />
                         <div class="profile-activity-details">
-                            <span class="profile-activity-label">${escapeHtml(listeningLabel)}</span>
+                            <span class="profile-activity-label">${escapeHtml(listeningLabel)}${displayDeviceType ? playbackDeviceIconMarkup(displayDeviceType) : ''}</span>
                             <strong>${escapeHtml(displayTrack?.name || displayTrack?.songName || 'Sin actividad reciente')}</strong>
                             <small>${escapeHtml(displayTrack?.artist || 'Sin artista')}</small>
                             <div class="profile-activity-progress${displayTrack ? '' : ' is-hidden'}">
@@ -2408,6 +2413,16 @@ export function initMusicPlayer() {
         return deviceType === 'mobile' ? 'el celular' : deviceType === 'desktop' ? 'la PC' : 'otro dispositivo';
     }
 
+    function playbackDeviceIconMarkup(deviceType) {
+        const iconContents = deviceType === 'mobile'
+            ? '<rect x="6.5" y="2.5" width="11" height="19" rx="2.2"></rect><path d="M10 5.5h4M11 18.5h2"></path>'
+            : deviceType === 'desktop'
+                ? '<rect x="3" y="3" width="18" height="13" rx="1.5"></rect><path d="M8 21h8M12 16v5M5 21h14"></path>'
+                : '';
+        if (!iconContents) return '';
+        return `<svg class="playback-device-inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${iconContents}</svg>`;
+    }
+
     function getSharedPlaybackTime(playback) {
         const duration = Math.max(0, Number(playback?.duration) || 0);
         const baseTime = Math.max(0, Number(playback?.currentTime) || 0);
@@ -2427,12 +2442,138 @@ export function initMusicPlayer() {
         );
     }
 
-    function updatePlaybackControlLock() {
-        const locked = isRemotePlaybackLocked();
-        [btnPrev, btnPlayPause, btnNext, btnRewind, btnForward].forEach(button => {
-            if (button) button.disabled = locked;
+    function getRemotePlaybackSession() {
+        return sharedDevicePlayback?.deviceId && sharedDevicePlayback.deviceId !== playbackDeviceId
+            ? sharedDevicePlayback
+            : null;
+    }
+
+    function requestPlaybackSocket(eventName, payload) {
+        return new Promise(resolve => {
+            if (!socket?.connected) {
+                resolve({ success: false, error: 'No hay conexión en tiempo real.' });
+                return;
+            }
+            socket.timeout(8000).emit(eventName, payload, (timeoutError, response) => {
+                resolve(timeoutError
+                    ? { success: false, error: 'El servidor no confirmó la acción a tiempo.' }
+                    : response || { success: false, error: 'El servidor devolvió una respuesta vacía.' });
+            });
         });
-        if (progressContainer) progressContainer.setAttribute('aria-disabled', String(locked));
+    }
+
+    function waitForAudioMetadata() {
+        if (audio.readyState >= 1) return Promise.resolve();
+        return new Promise((resolve, reject) => {
+            const timeout = window.setTimeout(() => {
+                cleanup();
+                reject(new Error('La canción no terminó de cargar en esta PC.'));
+            }, 12000);
+            const cleanup = () => {
+                window.clearTimeout(timeout);
+                audio.removeEventListener('loadedmetadata', onLoaded);
+                audio.removeEventListener('error', onError);
+            };
+            const onLoaded = () => {
+                cleanup();
+                resolve();
+            };
+            const onError = () => {
+                cleanup();
+                reject(new Error('No se pudo cargar la canción en esta PC.'));
+            };
+            audio.addEventListener('loadedmetadata', onLoaded, { once: true });
+            audio.addEventListener('error', onError, { once: true });
+        });
+    }
+
+    async function requestRemotePlaybackControl(action, details = {}, notifyError = true) {
+        const playback = getRemotePlaybackSession();
+        if (!playback) return false;
+        const response = await requestPlaybackSocket('playbackControlRequest', {
+            action,
+            deviceId: playbackDeviceId,
+            ...details
+        });
+        if (!response.success && notifyError) showToast(response.error || 'No se pudo controlar la reproducción remota.', true);
+        return Boolean(response.success);
+    }
+
+    let playbackTakeoverPending = false;
+    let remoteSeekTimer = null;
+    let queuedRemoteSeekPosition = 0;
+    function queueRemotePlaybackSeek(position) {
+        queuedRemoteSeekPosition = Math.max(0, Number(position) || 0);
+        if (remoteSeekTimer) clearTimeout(remoteSeekTimer);
+        remoteSeekTimer = window.setTimeout(() => {
+            remoteSeekTimer = null;
+            void requestRemotePlaybackControl('seek', { position: queuedRemoteSeekPosition });
+        }, 120);
+    }
+
+    function flushRemotePlaybackSeek() {
+        if (!remoteSeekTimer) return Promise.resolve(true);
+        clearTimeout(remoteSeekTimer);
+        remoteSeekTimer = null;
+        return requestRemotePlaybackControl('seek', { position: queuedRemoteSeekPosition }, false);
+    }
+
+    async function takePlaybackControlHere() {
+        const remotePlayback = getRemotePlaybackSession();
+        if (!remotePlayback || playbackTakeoverPending) return;
+        let shouldResume = remotePlayback.isPlaying !== false;
+        let fallbackPosition = getSharedPlaybackTime(remotePlayback);
+        let playbackAfterPause = null;
+        playbackTakeoverPending = true;
+        sharedPlaybackTakeover.disabled = true;
+        sharedPlaybackTakeover.textContent = 'Recuperando control…';
+        try {
+            if (!await flushRemotePlaybackSeek()) throw new Error('No se pudo aplicar la posición de reproducción solicitada.');
+            const latestPlayback = getRemotePlaybackSession() || remotePlayback;
+            shouldResume = latestPlayback.isPlaying !== false;
+            fallbackPosition = getSharedPlaybackTime(latestPlayback);
+            const response = await requestPlaybackSocket('playbackTakeoverRequest', {
+                deviceId: playbackDeviceId
+            });
+            if (!response.success) throw new Error(response.error || 'No se pudo transferir la reproducción.');
+            if (typeof response.resumeAfterTransfer === 'boolean') shouldResume = response.resumeAfterTransfer;
+            const playback = response.playback || remotePlayback;
+            playbackAfterPause = playback;
+            const trackIndex = playlist.findIndex(track => String(track._id) === String(playback.songId));
+            if (trackIndex < 0) throw new Error('La canción actual no está disponible en esta biblioteca.');
+            const restoreTime = Number.isFinite(Number(playback.currentTime))
+                ? getSharedPlaybackTime(playback)
+                : fallbackPosition;
+            sharedDevicePlayback = null;
+            if (sharedPlaybackClockTimer) clearInterval(sharedPlaybackClockTimer);
+            sharedPlaybackClockTimer = null;
+            renderSharedPlaybackStatus();
+            const loaded = await loadAndPlayTrack(trackIndex, 'regular', shouldResume, restoreTime);
+            if (!loaded) throw new Error('No se pudo iniciar la canción en esta PC.');
+            if (!shouldResume) {
+                await waitForAudioMetadata();
+                audio.currentTime = Math.min(restoreTime, audio.duration || restoreTime);
+                sharedPlaybackTime = Number(audio.currentTime) || 0;
+                sharedPlaybackDuration = Number(audio.duration) || Number(playback.duration) || 0;
+                broadcastPlaybackState(true);
+                void updateUserStatus(true);
+            }
+        } catch (error) {
+            if (playbackAfterPause) {
+                sharedDevicePlayback = playbackAfterPause;
+                renderSharedPlaybackStatus();
+            }
+            showToast(error.message || 'No se pudo recuperar el control de reproducción.', true);
+        } finally {
+            playbackTakeoverPending = false;
+            sharedPlaybackTakeover.disabled = false;
+            sharedPlaybackTakeover.textContent = 'Recuperar control en esta PC';
+            renderSharedPlaybackStatus();
+        }
+    }
+
+    function updatePlaybackControlLock() {
+        if (progressContainer) progressContainer.setAttribute('aria-disabled', 'false');
         bottomBar?.classList.toggle('is-remote-playback', Boolean(sharedDevicePlayback?.songName));
     }
 
@@ -2442,20 +2583,52 @@ export function initMusicPlayer() {
         const visible = Boolean(playback?.songName && playback.deviceId !== playbackDeviceId);
         sharedPlaybackStatus.hidden = !visible;
         if (!visible) {
+            const localTrack = getCurrentTrack();
+            if (localTrack) {
+                trackNameEl.textContent = localTrack.name || '';
+                trackArtistEl.textContent = localTrack.artist || '';
+                bottomBarCover.src = getSongCover(localTrack);
+                trackDurationEl.textContent = formatTrackTime(Number(audio.duration) || Number(localTrack.duration) || 0);
+                if (progressBar) {
+                    const duration = Number(audio.duration) || 0;
+                    progressBar.style.width = `${duration > 0 ? Math.min(100, audio.currentTime / duration * 100) : 0}%`;
+                }
+                updateTrackDurationLabel(audio.currentTime || 0, Number(audio.duration) || Number(localTrack.duration) || 0);
+                btnShuffle.classList.toggle('active', isShuffle);
+            }
+            const playPauseIcon = btnPlayPause.querySelector('img');
+            if (playPauseIcon) playPauseIcon.src = audio.paused ? '/img/play.png' : '/img/pause.png';
             updatePlaybackControlLock();
             return;
         }
+        sharedPlaybackTakeover.disabled = playbackTakeoverPending || !socket?.connected;
         const duration = Math.max(0, Number(playback.duration) || 0);
         const currentTime = getSharedPlaybackTime(playback);
         const progress = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
-        sharedPlaybackSource.textContent = playback.isPlaying === false
+        const sourceLabel = playback.isPlaying === false
             ? `En pausa en ${playbackDeviceLabel(playback.deviceType)}`
             : `Reproduciendo desde ${playbackDeviceLabel(playback.deviceType)}`;
-        sharedPlaybackTitle.textContent = playback.songName || '';
+        const playbackIsMobile = playback.deviceType === 'mobile';
+        const playbackIsDesktop = playback.deviceType === 'desktop';
+        sharedPlaybackSourceLabel.textContent = sourceLabel;
+        sharedPlaybackSource.setAttribute('aria-label', sourceLabel);
+        sharedPlaybackSource.title = sourceLabel;
+        sharedPlaybackPhoneIcon.hidden = !playbackIsMobile;
+        sharedPlaybackPcIcon.hidden = !playbackIsDesktop;
+        sharedPlaybackTitleText.textContent = playback.songName || '';
         sharedPlaybackArtist.textContent = playback.artist || '';
         sharedPlaybackCover.src = playback.cover || '/img/vinculo.png';
         sharedPlaybackProgressFill.style.width = `${progress}%`;
         sharedPlaybackTimeLabel.textContent = `${formatTrackTime(currentTime)} / ${formatTrackTime(duration)}`;
+        trackNameEl.textContent = playback.songName || '';
+        trackArtistEl.textContent = playback.artist || '';
+        bottomBarCover.src = playback.cover || '/img/vinculo.png';
+        trackDurationEl.textContent = formatTrackTime(duration);
+        if (progressBar) progressBar.style.width = `${progress}%`;
+        updateTrackDurationLabel(currentTime, duration);
+        const playPauseIcon = btnPlayPause.querySelector('img');
+        if (playPauseIcon) playPauseIcon.src = playback.isPlaying === false ? '/img/play.png' : '/img/pause.png';
+        btnShuffle.classList.toggle('active', playback.shuffle === true);
         updatePlaybackControlLock();
     }
 
@@ -2471,7 +2644,6 @@ export function initMusicPlayer() {
         if (
             !playback.deviceId
             || playback.deviceId === playbackDeviceId
-            || playback.isPlaying === false
         ) {
             const hadRemotePlayback = Boolean(sharedDevicePlayback);
             sharedDevicePlayback = null;
@@ -2488,10 +2660,10 @@ export function initMusicPlayer() {
         playbackActivityUserId = null;
         sharedPlaybackPlaying = false;
         stopPlaybackStatusSync();
-        if (playback.isPlaying !== false) pauseForRemotePlayback();
+        pauseForRemotePlayback();
         renderSharedPlaybackStatus();
         if (sharedPlaybackClockTimer) clearInterval(sharedPlaybackClockTimer);
-        sharedPlaybackClockTimer = setInterval(renderSharedPlaybackStatus, 1000);
+        if (playback.isPlaying !== false) sharedPlaybackClockTimer = setInterval(renderSharedPlaybackStatus, 1000);
         if (isProfileMode && String(selectedProfileUser?._id || '') === ownUserId) {
             if (String(previousSongId || '') !== String(playback.songId || '')) renderProfile();
             else updateProfileActivityProgress();
@@ -2577,6 +2749,27 @@ export function initMusicPlayer() {
         updateProfileActivityProgress();
     }
 
+    function createCurrentPlaybackSnapshot(isPlaying = !audio.paused) {
+        const track = getCurrentTrack();
+        if (!track) return null;
+        return {
+            songId: track._id,
+            songName: track.name,
+            artist: track.artist || '',
+            cover: getSongCover(track) || '',
+            color: track.color || '#ff8a00',
+            currentTime: Number.isFinite(audio.currentTime) ? audio.currentTime : sharedPlaybackTime,
+            duration: Number.isFinite(audio.duration) && audio.duration > 0
+                ? audio.duration
+                : Number(track.duration) || 0,
+            isPlaying,
+            shuffle: isShuffle,
+            deviceId: playbackDeviceId,
+            deviceType: playbackDeviceType,
+            updatedAt: new Date().toISOString()
+        };
+    }
+
     function broadcastPlaybackState(force = false) {
         if (isRestoringInitialPlayback || suppressStartupPlaybackUpdates) return;
         const user = getStoredUser();
@@ -2596,21 +2789,7 @@ export function initMusicPlayer() {
         socket.emit('songChanged', {
             userId: user._id,
             excludeUserId: listeningTogetherUserId,
-            playback: {
-                songId: track._id,
-                songName: track.name,
-                artist: track.artist || '',
-                cover: getSongCover(track) || '',
-                color: track.color || '#ff8a00',
-                currentTime: Number.isFinite(audio.currentTime) ? audio.currentTime : 0,
-                duration: Number.isFinite(audio.duration) && audio.duration > 0
-                    ? audio.duration
-                    : Number(track.duration) || 0,
-                isPlaying: !audio.paused,
-                deviceId: playbackDeviceId,
-                deviceType: playbackDeviceType,
-                updatedAt: new Date().toISOString()
-            }
+            playback: createCurrentPlaybackSnapshot()
         });
     }
 
@@ -2619,7 +2798,7 @@ export function initMusicPlayer() {
             const playback = friend.lastPlayed;
             const duration = Number(playback?.duration) || 0;
             if (hasPlaybackEvidence(playback) && playback?.isPlaying !== false && duration > 0) {
-                return `En línea · Escuchando desde ${playbackDeviceLabel(playback.deviceType)} · ${formatTrackTime(Number(playback.currentTime) || 0)} / ${formatTrackTime(duration)}`;
+                return `En línea · Escuchando desde ${playbackDeviceLabel(playback.deviceType)} ${playbackDeviceIconMarkup(playback.deviceType)} · ${formatTrackTime(Number(playback.currentTime) || 0)} / ${formatTrackTime(duration)}`;
             }
             return 'En línea';
         }
@@ -2641,6 +2820,9 @@ export function initMusicPlayer() {
                     : `${friend.lastActive ? '  ' + timeAgo(friend.lastActive) : ''}`;
                 const lastPlayedAt = playback?.updatedAt || friend.lastActive;
                 const lastPlayedLabel = lastPlayedAt ? ` · ${timeAgo(lastPlayedAt)}` : '';
+                const playbackLabel = isPlaying
+                    ? `${escapeHtml(`Escuchando desde ${playbackDeviceLabel(playback.deviceType)}`)} ${playbackDeviceIconMarkup(playback.deviceType)}`
+                    : escapeHtml(`Escuchó por última vez${lastPlayedLabel}`);
                 return `
                     <li class="friend-sidebar-item" data-friend-id="${escapeHtml(friend._id)}" data-friend-name="${escapeHtml(friend.username)}">
                         <img class="friend-sidebar-avatar" src="${escapeHtml(friend.profilePhoto || '/img/perrocorasongif.gif')}" alt="" loading="lazy" />
@@ -2653,9 +2835,7 @@ export function initMusicPlayer() {
                         </div>
                         ${hasActivity ? `
                             <div class="friend-sidebar-song" style="--profile-track-color: ${safeColor(playback.color)}">
-                                <small>${escapeHtml(isPlaying
-                                    ? `Escuchando desde ${playbackDeviceLabel(playback.deviceType)}`
-                                    : `Escuchó por última vez${lastPlayedLabel}`)}</small>
+                                <small>${playbackLabel}</small>
                                 <strong>${escapeHtml(playback.songName)}</strong>
                                 <small>${escapeHtml(playback.artist || '')}</small>
                                 <div class="friend-sidebar-progress${duration > 0 ? '' : ' is-hidden'}">
@@ -3319,16 +3499,7 @@ export function initMusicPlayer() {
             )
         ) {
             payload.lastPlayed = {
-                songId: track._id,
-                songName: track.name,
-                artist: track.artist || '',
-                cover: getSongCover(track) || '',
-                color: track.color || '#ff8a00',
-                currentTime: sharedPlaybackTime,
-                duration: sharedPlaybackDuration || Number(track.duration) || 0,
-                isPlaying: sharedPlaybackPlaying,
-                deviceId: playbackDeviceId,
-                deviceType: playbackDeviceType,
+                ...createCurrentPlaybackSnapshot(sharedPlaybackPlaying),
                 countListeningDelta: isFollowingPlayback() || !suppressNextListeningDelta
             };
         }
@@ -3389,6 +3560,63 @@ export function initMusicPlayer() {
             }
         };
         socket.off('playbackOwnerChanged').on('playbackOwnerChanged', handleOwnPlaybackUpdate);
+        socket.off('playbackControlCommand').on('playbackControlCommand', async (command = {}, acknowledge = () => {}) => {
+            const acknowledgeResult = typeof acknowledge === 'function' ? acknowledge : () => {};
+            if (!getCurrentTrack()) {
+                acknowledgeResult({ success: false, error: 'No hay una canción cargada en este dispositivo.' });
+                return;
+            }
+            if (command.action === 'toggle') {
+                btnPlayPause.click();
+            } else if (command.action === 'next') {
+                btnNext.click();
+            } else if (command.action === 'previous') {
+                btnPrev.click();
+            } else if (command.action === 'seek' && Number.isFinite(Number(command.position))) {
+                const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : Number.MAX_SAFE_INTEGER;
+                audio.currentTime = Math.min(duration, Math.max(0, Number(command.position)));
+                sharedPlaybackTime = audio.currentTime;
+                broadcastPlaybackState(true);
+                void updateUserStatus(true);
+            } else if (command.action === 'shuffle') {
+                btnShuffle.click();
+            } else if (command.action === 'playTrack') {
+                const trackIndex = playlist.findIndex(track => String(track._id) === String(command.songId));
+                if (trackIndex < 0) {
+                    acknowledgeResult({ success: false, error: 'La canción solicitada no está disponible en esta biblioteca.' });
+                    return;
+                }
+                const loaded = await loadAndPlayTrack(trackIndex);
+                if (!loaded) {
+                    acknowledgeResult({ success: false, error: 'No se pudo iniciar la canción solicitada.' });
+                    return;
+                }
+            } else {
+                acknowledgeResult({ success: false, error: 'El control remoto solicitado no es válido.' });
+                return;
+            }
+            acknowledgeResult({ success: true });
+        });
+        socket.off('playbackHandoffRequest').on('playbackHandoffRequest', (request = {}, acknowledge = () => {}) => {
+            const acknowledgeResult = typeof acknowledge === 'function' ? acknowledge : () => {};
+            if (!getCurrentTrack()) {
+                acknowledgeResult({ success: false, error: 'No hay una canción cargada para transferir.' });
+                return;
+            }
+            const wasPlaying = !audio.paused;
+            if (wasPlaying) {
+                suppressRemotePlaybackPause = true;
+                audio.pause();
+            }
+            sharedPlaybackTime = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+            sharedPlaybackDuration = Number.isFinite(audio.duration) ? audio.duration : 0;
+            sharedPlaybackPlaying = false;
+            stopPlaybackStatusSync();
+            const playback = createCurrentPlaybackSnapshot(false);
+            broadcastPlaybackState(true);
+            void updateUserStatus(true);
+            acknowledgeResult({ success: true, playback, requesterDeviceId: request.requesterDeviceId });
+        });
         socket.off('songChanged').on('songChanged', handleFriendPlayback);
         socket.off('playbackStatusChanged').on('playbackStatusChanged', handleFriendPlayback);
         if (socket.connected) socket.emit('playbackStateRequest');
@@ -8794,7 +9022,7 @@ export function initMusicPlayer() {
     }
 
     audio.addEventListener('play', () => { 
-        if (isRemotePlaybackLocked()) {
+        if (getRemotePlaybackSession()) {
             pauseForRemotePlayback();
             return;
         }
@@ -8839,6 +9067,10 @@ export function initMusicPlayer() {
             btnPlayPause.querySelector('img').src = '/img/play.png';
             stopSpin();
             if (isProfileMode) renderProfile();
+            return;
+        }
+        if (getRemotePlaybackSession()) {
+            updatePlaybackControlLock();
             return;
         }
         desktopSetTaskbarPlaybackState?.(false);
@@ -9092,12 +9324,14 @@ export function initMusicPlayer() {
         publishSharedQueueSnapshot();
     }
 
-    function loadAndPlayTrack(index, source = 'regular', shouldPlay = true) {
-        if (shouldPlay && isRemotePlaybackLocked()) {
-            showToast(`La reproducción está activa en ${playbackDeviceLabel(sharedDevicePlayback.deviceType)}.`, true);
-            return;
+    function loadAndPlayTrack(index, source = 'regular', shouldPlay = true, restoreTime = 0) {
+        if (shouldPlay && getRemotePlaybackSession()) {
+            const remoteTrack = playlist[index];
+            if (remoteTrack) return requestRemotePlaybackControl('playTrack', { songId: String(remoteTrack._id) });
+            return Promise.resolve(false);
         }
-        if (isFollowingPlayback() && source !== 'together') return;
+        if (shouldPlay && isRemotePlaybackLocked()) return Promise.resolve(false);
+        if (isFollowingPlayback() && source !== 'together') return Promise.resolve(false);
         if (index >= playlist.length) index = 0;
         if (index < 0) index = playlist.length - 1;
 
@@ -9121,6 +9355,7 @@ export function initMusicPlayer() {
         updateTrackDurationLabel(0, Number(track.duration) || 0);
         audio.pause();
         const sourceLoadToken = ++audioSourceLoadToken;
+        let playbackPromise = Promise.resolve(true);
         const setAudioSource = async () => {
             const mediaKey = `song:${track._id}:audio`;
             let localUrl = null;
@@ -9152,6 +9387,12 @@ export function initMusicPlayer() {
                 activeAudioObjectUrl = source;
                 activeAudioObjectUrlKey = mediaKey;
             }
+            if (Number.isFinite(restoreTime) && restoreTime > 0) {
+                audio.addEventListener('loadedmetadata', () => {
+                    if (sourceLoadToken !== audioSourceLoadToken) return;
+                    audio.currentTime = Math.min(restoreTime, audio.duration || restoreTime);
+                }, { once: true });
+            }
             audio.src = source || '';
             audio.currentTime = 0;
             if (shouldPlay) {
@@ -9161,22 +9402,30 @@ export function initMusicPlayer() {
             }
         };
         if (offlineModeEnabled || offlineOnly) {
-            setAudioSource().catch(error => {
-                if (sourceLoadToken !== audioSourceLoadToken) return;
+            playbackPromise = setAudioSource().then(() => sourceLoadToken === audioSourceLoadToken).catch(error => {
+                if (sourceLoadToken !== audioSourceLoadToken) return false;
                 if (source === 'together') {
                     stopFollowingUnavailablePlayback(error.message || 'No se pudo cargar la canción de tu amigo.');
-                    return;
+                    return false;
                 }
-                if (isExpectedAudioPlayInterruption(error)) return;
+                if (isExpectedAudioPlayInterruption(error)) return false;
                 showToast(error.message || 'No se pudo abrir la canción guardada.', true);
+                return false;
             });
         } else {
+            if (Number.isFinite(restoreTime) && restoreTime > 0) {
+                audio.addEventListener('loadedmetadata', () => {
+                    if (sourceLoadToken !== audioSourceLoadToken) return;
+                    audio.currentTime = Math.min(restoreTime, audio.duration || restoreTime);
+                }, { once: true });
+            }
             audio.src = track.path;
             audio.currentTime = 0;
             if (shouldPlay) {
-                audio.play().catch(error => {
-                    if (sourceLoadToken !== audioSourceLoadToken || isExpectedAudioPlayInterruption(error)) return;
+                playbackPromise = audio.play().then(() => sourceLoadToken === audioSourceLoadToken).catch(error => {
+                    if (sourceLoadToken !== audioSourceLoadToken || isExpectedAudioPlayInterruption(error)) return false;
                     console.warn('No se pudo iniciar la reproducción.', error);
+                    return false;
                 });
             }
         }
@@ -9203,6 +9452,7 @@ export function initMusicPlayer() {
         if (isProfileMode) renderProfile();
 
         updateBackgroundAndViews();
+        return playbackPromise;
     }
 
     function showPlayerPopup(track) {
@@ -9225,6 +9475,10 @@ export function initMusicPlayer() {
     }
 
     function playNextTrack() {
+        if (getRemotePlaybackSession()) {
+            void requestRemotePlaybackControl('next');
+            return;
+        }
         if (isFollowingPlayback() || isRemotePlaybackLocked()) return;
         if (customQueue.length > 0) {
             const nextTrack = customQueue.shift();
@@ -9259,6 +9513,14 @@ export function initMusicPlayer() {
     }
 
     function rewindTrack() {
+        const remotePlayback = getRemotePlaybackSession();
+        if (remotePlayback) {
+            const duration = Math.max(0, Number(remotePlayback.duration) || 0);
+            const currentPosition = remoteSeekTimer ? queuedRemoteSeekPosition : getSharedPlaybackTime(remotePlayback);
+            const position = Math.max(0, currentPosition - seekSeconds);
+            queueRemotePlaybackSeek(duration ? Math.min(duration, position) : position);
+            return;
+        }
         if (!isFollowingPlayback() && !isRemotePlaybackLocked() && audio.duration) {
             if (playbackUiFrame) {
                 cancelAnimationFrame(playbackUiFrame);
@@ -9272,6 +9534,14 @@ export function initMusicPlayer() {
     }
 
     function forwardTrack() {
+        const remotePlayback = getRemotePlaybackSession();
+        if (remotePlayback) {
+            const duration = Math.max(0, Number(remotePlayback.duration) || 0);
+            const currentPosition = remoteSeekTimer ? queuedRemoteSeekPosition : getSharedPlaybackTime(remotePlayback);
+            const position = currentPosition + seekSeconds;
+            queueRemotePlaybackSeek(duration ? Math.min(duration, position) : position);
+            return;
+        }
         if (!isFollowingPlayback() && !isRemotePlaybackLocked() && audio.duration) {
             if (playbackUiFrame) {
                 cancelAnimationFrame(playbackUiFrame);
@@ -9318,6 +9588,10 @@ export function initMusicPlayer() {
         playNextTrack();
     });
     btnPrev.addEventListener('click', () => {
+        if (getRemotePlaybackSession()) {
+            void requestRemotePlaybackControl('previous');
+            return;
+        }
         if (isFollowingPlayback()) return;
         const previous = playbackHistory.pop();
         if (!previous) {
@@ -9340,6 +9614,10 @@ export function initMusicPlayer() {
     });
 
     btnShuffle.addEventListener('click', () => {
+        if (getRemotePlaybackSession()) {
+            void requestRemotePlaybackControl('shuffle');
+            return;
+        }
         isShuffle = !isShuffle;
         btnShuffle.classList.toggle('active', isShuffle);
         if (isShuffle) {
@@ -9349,7 +9627,10 @@ export function initMusicPlayer() {
         }
         playbackHistory = [];
         renderQueue();
+        broadcastPlaybackState(true);
+        void updateUserStatus(true);
     });
+    sharedPlaybackTakeover?.addEventListener('click', () => void takePlaybackControlHere());
 
     if (btnAllSongs) {
         btnAllSongs.addEventListener('click', (e) => {
@@ -9487,6 +9768,10 @@ export function initMusicPlayer() {
     });
 
     btnPlayPause.addEventListener('click', () => {
+        if (getRemotePlaybackSession()) {
+            void requestRemotePlaybackControl('toggle');
+            return;
+        }
         if (isRemotePlaybackLocked()) return;
         if (isFollowingPlayback()) {
             if (listeningTogetherNeedsUserGesture) {
@@ -9519,6 +9804,15 @@ export function initMusicPlayer() {
     desktopSetTaskbarPlaybackState?.(!audio.paused);
 
     progressContainer.addEventListener('click', (e) => {
+        const remotePlayback = getRemotePlaybackSession();
+        if (remotePlayback) {
+            const duration = Math.max(0, Number(remotePlayback.duration) || 0);
+            if (!duration) return;
+            const bounds = progressContainer.getBoundingClientRect();
+            const ratio = Math.min(1, Math.max(0, (e.clientX - bounds.left) / bounds.width));
+            queueRemotePlaybackSeek(ratio * duration);
+            return;
+        }
         if (isFollowingPlayback() || isRemotePlaybackLocked()) return;
         const width = progressContainer.clientWidth;
         const clickX = e.offsetX;
@@ -9527,6 +9821,10 @@ export function initMusicPlayer() {
     });
 
     audio.addEventListener('timeupdate', () => {
+        if (getRemotePlaybackSession()) {
+            renderSharedPlaybackStatus();
+            return;
+        }
         const currentTrack = getCurrentTrack();
         if (!isCurrentAudioSource(currentTrack)) return;
         const nextTime = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;

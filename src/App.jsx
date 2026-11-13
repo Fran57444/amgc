@@ -708,12 +708,27 @@ function App() {
                   <div id="shared-playback-status" className="shared-playback-status" hidden role="status" aria-live="polite">
                     <img id="shared-playback-cover" alt="" />
                     <span className="shared-playback-copy">
-                      <strong id="shared-playback-source"></strong>
-                      <span id="shared-playback-title"></span>
+                      <strong id="shared-playback-source" aria-label="">
+                        <span id="shared-playback-source-label"></span>
+                      </strong>
+                      <span id="shared-playback-title" className="shared-playback-title-row">
+                        <span id="shared-playback-title-text"></span>
+                        <svg id="shared-playback-device-phone" className="shared-playback-device-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" hidden>
+                          <rect x="6.5" y="2.5" width="11" height="19" rx="2.2" />
+                          <path d="M10 5.5h4M11 18.5h2" />
+                        </svg>
+                        <svg id="shared-playback-device-pc" className="shared-playback-device-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" hidden>
+                          <rect x="3" y="3" width="18" height="13" rx="1.5" />
+                          <path d="M8 21h8M12 16v5M5 21h14" />
+                        </svg>
+                      </span>
                       <small id="shared-playback-artist"></small>
                       <span className="shared-playback-progress"><span id="shared-playback-progress-fill" /></span>
                       <small id="shared-playback-time"></small>
                     </span>
+                    <button id="shared-playback-takeover" className="shared-playback-takeover" type="button">
+                      Recuperar control en esta PC
+                    </button>
                   </div>
                 </div>
               </div>

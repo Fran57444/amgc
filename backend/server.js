@@ -634,6 +634,7 @@ const messageSchema = new mongoose.Schema({
 const Message = mongoose.model('Message', messageSchema);
 let realtimeIo = null;
 const playbackStateByUser = new Map();
+const playbackSocketByUser = new Map();
 const listenTogetherQueueSessions = new Map();
 const listenTogetherQueueSessionByUser = new Map();
 
@@ -3417,6 +3418,135 @@ if (isMainModule) {
       }
     });
 
+    socket.on('playbackControlRequest', (payload = {}, acknowledge = () => {}) => {
+      const acknowledgeResult = typeof acknowledge === 'function' ? acknowledge : () => {};
+      const { action, deviceId, position, songId } = payload && typeof payload === 'object' && !Array.isArray(payload)
+        ? payload
+        : {};
+      const allowedActions = new Set(['toggle', 'next', 'previous', 'seek', 'shuffle', 'playTrack']);
+      if (
+        !allowedActions.has(action)
+        || typeof deviceId !== 'string'
+        || !deviceId.trim()
+        || deviceId.length > 128
+      ) {
+        acknowledgeResult({ success: false, error: 'La acción de reproducción no es válida.' });
+        return;
+      }
+
+      const playback = playbackStateByUser.get(authenticatedUserId);
+      if (!playback?.songId || !playback.deviceId) {
+        acknowledgeResult({ success: false, error: 'No hay una sesión de reproducción disponible.' });
+        return;
+      }
+      if (playback.deviceId === deviceId) {
+        acknowledgeResult({ success: true, local: true });
+        return;
+      }
+      const ownerSocket = io.sockets.sockets.get(playbackSocketByUser.get(authenticatedUserId));
+      if (
+        !ownerSocket
+        || ownerSocket.data.userId !== authenticatedUserId
+        || ownerSocket.data.playbackDeviceId !== playback.deviceId
+      ) {
+        acknowledgeResult({ success: false, error: 'El dispositivo que reproduce no está conectado.' });
+        return;
+      }
+      if (action === 'seek' && (!Number.isFinite(Number(position)) || Number(position) < 0)) {
+        acknowledgeResult({ success: false, error: 'La posición de reproducción no es válida.' });
+        return;
+      }
+      if (action === 'playTrack' && (typeof songId !== 'string' || !songId.trim() || songId.length > 128)) {
+        acknowledgeResult({ success: false, error: 'La canción solicitada no es válida.' });
+        return;
+      }
+
+      const command = { action };
+      if (action === 'seek') command.position = Number(position);
+      if (action === 'playTrack') command.songId = songId.trim();
+      ownerSocket.timeout(7000).emit('playbackControlCommand', command, (timeoutError, result) => {
+        if (timeoutError) {
+          acknowledgeResult({ success: false, error: 'El dispositivo no respondió al control remoto.' });
+          return;
+        }
+        acknowledgeResult(result?.success
+          ? { success: true }
+          : { success: false, error: result?.error || 'No se pudo controlar la reproducción.' });
+      });
+    });
+
+    socket.on('playbackTakeoverRequest', (payload = {}, acknowledge = () => {}) => {
+      const acknowledgeResult = typeof acknowledge === 'function' ? acknowledge : () => {};
+      const deviceId = payload && typeof payload === 'object' && !Array.isArray(payload)
+        ? payload.deviceId
+        : null;
+      if (typeof deviceId !== 'string' || !deviceId.trim() || deviceId.length > 128) {
+        acknowledgeResult({ success: false, error: 'No se pudo identificar este dispositivo.' });
+        return;
+      }
+      const playback = playbackStateByUser.get(authenticatedUserId);
+      if (!playback?.songId || !playback.deviceId) {
+        acknowledgeResult({ success: false, error: 'No hay una sesión de reproducción que transferir.' });
+        return;
+      }
+      if (playback.deviceId === deviceId) {
+        acknowledgeResult({ success: true, alreadyOwner: true, playback });
+        return;
+      }
+      const ownerSocket = io.sockets.sockets.get(playbackSocketByUser.get(authenticatedUserId));
+      if (
+        !ownerSocket
+        || ownerSocket.data.userId !== authenticatedUserId
+        || ownerSocket.data.playbackDeviceId !== playback.deviceId
+      ) {
+        acknowledgeResult({ success: false, error: 'El dispositivo que reproduce no está conectado; no se puede confirmar la transferencia.' });
+        return;
+      }
+      if (playback.isPlaying === false) {
+        acknowledgeResult({ success: true, playback, resumeAfterTransfer: false });
+        return;
+      }
+
+      ownerSocket.timeout(8000).emit(
+        'playbackHandoffRequest',
+        { requesterDeviceId: deviceId },
+        (timeoutError, result) => {
+          if (timeoutError) {
+            acknowledgeResult({ success: false, error: 'El dispositivo actual no confirmó la pausa.' });
+            return;
+          }
+          if (!result?.success || result.playback?.isPlaying !== false) {
+            acknowledgeResult({ success: false, error: result?.error || 'No se pudo confirmar la pausa del dispositivo actual.' });
+            return;
+          }
+
+          let pausedPlayback = playbackStateByUser.get(authenticatedUserId);
+          if (pausedPlayback?.deviceId !== playback.deviceId || pausedPlayback.isPlaying !== false) {
+            pausedPlayback = {
+              ...playback,
+              ...result.playback,
+              deviceId: playback.deviceId,
+              deviceType: playback.deviceType,
+              isPlaying: false,
+              updatedAt: new Date().toISOString()
+            };
+            playbackStateByUser.set(authenticatedUserId, pausedPlayback);
+            io.to(`user:${authenticatedUserId}`).except(ownerSocket.id).emit('playbackOwnerChanged', {
+              userId: authenticatedUserId,
+              playback: pausedPlayback
+            });
+            for (const friendId of socket.data.friendIds || []) {
+              io.to(`user:${friendId}`).emit('playbackStatusChanged', {
+                userId: authenticatedUserId,
+                playback: pausedPlayback
+              });
+            }
+          }
+          acknowledgeResult({ success: true, playback: pausedPlayback, resumeAfterTransfer: true });
+        }
+      );
+    });
+
     socket.on('friendsChanged', () => {
       refreshFriendIds().catch(error => console.error('Error actualizando amigos del socket:', error));
     });
@@ -3650,6 +3780,8 @@ if (isMainModule) {
           updatedAt: new Date().toISOString()
         };
         playbackStateByUser.set(normalizedId, sharedPlayback);
+        socket.data.playbackDeviceId = sharedPlayback.deviceId;
+        playbackSocketByUser.set(normalizedId, socket.id);
         io.to(`user:${normalizedId}`).except(socket.id).emit('playbackOwnerChanged', {
           userId: normalizedId,
           playback: sharedPlayback
@@ -3679,6 +3811,16 @@ if (isMainModule) {
       clearTimeout(tokenExpiryTimer);
       const normalizedId = socket.data.userId;
       if (!normalizedId) return;
+      if (playbackSocketByUser.get(normalizedId) === socket.id) {
+        const playback = playbackStateByUser.get(normalizedId);
+        const replacementSocket = [...io.sockets.sockets.values()].find(activeSocket => (
+          activeSocket.id !== socket.id
+          && activeSocket.data.userId === normalizedId
+          && activeSocket.data.playbackDeviceId === playback?.deviceId
+        ));
+        if (replacementSocket) playbackSocketByUser.set(normalizedId, replacementSocket.id);
+        else playbackSocketByUser.delete(normalizedId);
+      }
       const queueSessionId = listenTogetherQueueSessionByUser.get(normalizedId);
       const queueSession = queueSessionId ? listenTogetherQueueSessions.get(queueSessionId) : null;
       if (
