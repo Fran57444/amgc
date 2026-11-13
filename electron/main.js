@@ -644,8 +644,17 @@ function createMainWindow() {
                 redirectURL: mediaUrl.href
             });
         }).catch(error => {
-            console.error('No se pudo descargar el recurso multimedia localmente; se usará Render.', error);
-            callback({});
+            const fallbackUrl = details.resourceType === 'image'
+                ? new URL('https://drive.google.com/thumbnail')
+                : new URL('https://drive.google.com/uc');
+            if (details.resourceType === 'image') {
+                fallbackUrl.searchParams.set('sz', 'w160');
+            } else {
+                fallbackUrl.searchParams.set('export', 'download');
+            }
+            fallbackUrl.searchParams.set('id', fileId);
+            console.error('El servicio multimedia local no está disponible; se omite Render y se usa Google Drive.', error);
+            callback({ redirectURL: fallbackUrl.href });
         });
     });
 

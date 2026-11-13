@@ -169,3 +169,13 @@ export async function saveOfflineMedia(key, blob, contentType = '', sourceUrl = 
         updatedAt: Date.now()
     });
 }
+
+export async function saveOfflineMediaFile(key, localPath, contentType = '', sourceUrl = '') {
+    return writeRecord('media', {
+        key,
+        localPath,
+        contentType,
+        sourceUrl,
+        updatedAt: Date.now()
+    });
+}

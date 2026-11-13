@@ -327,34 +327,65 @@ function decryptSpotifyRefreshToken(encryptedToken) {
   ]).toString('utf8');
 }
 
-async function getSpotifyAccessToken(user) {
-  const configuration = getSpotifyConfiguration();
-  if (!configuration) {
-    const error = new Error('Spotify no está configurado en el servidor.');
-    error.statusCode = 503;
-    throw error;
+const spotifyAccessTokenCache = new Map();
+const spotifyAccessTokenRefreshes = new Map();
+
+async function getSpotifyAccessToken(user, forceRefresh = false) {
+  const userId = String(user?._id || '');
+  const pendingRefresh = spotifyAccessTokenRefreshes.get(userId);
+  if (pendingRefresh) return pendingRefresh;
+  const cachedToken = spotifyAccessTokenCache.get(userId);
+  if (!forceRefresh && cachedToken?.expiresAt > Date.now() + 30_000) {
+    return cachedToken.accessToken;
   }
-  const linkedUser = await User.findById(user._id).select('+spotify.refreshTokenEncrypted');
-  if (!linkedUser?.spotify?.refreshTokenEncrypted) {
-    const error = new Error('Primero conecta tu cuenta de Spotify.');
-    error.statusCode = 409;
-    throw error;
-  }
-  const refreshToken = decryptSpotifyRefreshToken(linkedUser.spotify.refreshTokenEncrypted);
-  const response = await axios.post(
-    'https://accounts.spotify.com/api/token',
-    new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken }),
-    {
-      auth: { username: configuration.clientId, password: configuration.clientSecret },
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      timeout: 15000
+  if (forceRefresh) spotifyAccessTokenCache.delete(userId);
+
+  const refreshPromise = (async () => {
+    const configuration = getSpotifyConfiguration();
+    if (!configuration) {
+      const error = new Error('Spotify no está configurado en el servidor.');
+      error.statusCode = 503;
+      throw error;
     }
-  );
-  if (response.data.refresh_token) {
-    linkedUser.spotify.refreshTokenEncrypted = encryptSpotifyRefreshToken(response.data.refresh_token);
-    await linkedUser.save();
+    const linkedUser = await User.findById(user._id).select('+spotify.refreshTokenEncrypted');
+    if (!linkedUser?.spotify?.refreshTokenEncrypted) {
+      const error = new Error('Primero conecta tu cuenta de Spotify.');
+      error.statusCode = 409;
+      throw error;
+    }
+    const refreshToken = decryptSpotifyRefreshToken(linkedUser.spotify.refreshTokenEncrypted);
+    const response = await axios.post(
+      'https://accounts.spotify.com/api/token',
+      new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken }),
+      {
+        auth: { username: configuration.clientId, password: configuration.clientSecret },
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        timeout: 15000
+      }
+    );
+    if (response.data.refresh_token) {
+      linkedUser.spotify.refreshTokenEncrypted = encryptSpotifyRefreshToken(response.data.refresh_token);
+      await linkedUser.save();
+    }
+    const accessToken = response.data.access_token;
+    if (typeof accessToken !== 'string' || !accessToken) {
+      throw new Error('Spotify no devolvió un token de acceso válido.');
+    }
+    const expiresIn = Math.max(60, Number(response.data.expires_in) || 3600);
+    spotifyAccessTokenCache.set(userId, {
+      accessToken,
+      expiresAt: Date.now() + expiresIn * 1000
+    });
+    return accessToken;
+  })();
+  spotifyAccessTokenRefreshes.set(userId, refreshPromise);
+  try {
+    return await refreshPromise;
+  } finally {
+    if (spotifyAccessTokenRefreshes.get(userId) === refreshPromise) {
+      spotifyAccessTokenRefreshes.delete(userId);
+    }
   }
-  return response.data.access_token;
 }
 
 const SPOTIFY_TRACKS_PER_PAGE = 1000;
@@ -2267,6 +2298,21 @@ app.get('/api/spotify/status', async (req, res) => {
   }
 });
 
+app.get('/api/spotify/access-token', async (req, res) => {
+  try {
+    res.set('Cache-Control', 'private, no-store');
+    const accessToken = await getSpotifyAccessToken(req.user, req.query.refresh === 'true');
+    const token = spotifyAccessTokenCache.get(String(req.user._id));
+    res.json({ accessToken, expiresAt: token?.expiresAt || Date.now() + 3600_000 });
+  } catch (error) {
+    const statusCode = error.statusCode || (error.response ? 502 : 500);
+    console.error('No se pudo emitir un token de acceso para Spotify.', error.message || error);
+    res.status(statusCode).json({
+      error: error.statusCode ? error.message : 'No se pudo autorizar la consulta directa a Spotify.'
+    });
+  }
+});
+
 app.post('/api/spotify/connect', async (req, res) => {
   const configuration = getSpotifyConfiguration();
   if (!configuration) {
@@ -2329,6 +2375,7 @@ app.get('/api/spotify/callback', async (req, res) => {
     };
     await user.save();
     spotifyLikedTracksCache.delete(String(user._id));
+    spotifyAccessTokenCache.delete(String(user._id));
     return redirectToApp('connected');
   } catch (error) {
     console.error('No se pudo completar la conexión con Spotify.', error.message || error);
@@ -2405,19 +2452,134 @@ app.get('/api/spotify/liked-tracks', async (req, res) => {
   }
 });
 
+app.post('/api/spotify/track-status', async (req, res) => {
+  const tracks = req.body?.tracks;
+  if (!Array.isArray(tracks) || tracks.length > SPOTIFY_TRACKS_PER_PAGE
+    || tracks.some(track => (
+      !track
+      || typeof track.id !== 'string'
+      || !/^[A-Za-z0-9]{10,40}$/.test(track.id)
+      || typeof track.name !== 'string'
+      || !track.name.trim()
+      || track.name.length > 200
+      || typeof track.artist !== 'string'
+      || !track.artist.trim()
+      || track.artist.length > 200
+    ))) {
+    return res.status(400).json({ error: 'La lista de canciones de Spotify no es válida.' });
+  }
+  try {
+    const metadataPairs = tracks.map(track => ({
+      id: track.id,
+      name: track.name.trim(),
+      artist: track.artist.trim()
+    }));
+    const uniquePairs = new Map(metadataPairs.map(pair => [
+      `${normalizeSongMetadata(pair.name)}\u0000${normalizeSongMetadata(pair.artist)}`,
+      pair
+    ]));
+    const artistNames = [...new Set(metadataPairs.map(pair => pair.artist))];
+    const matchingConditions = [
+      ...[...uniquePairs.values()].map(pair => ({ name: pair.name, artist: pair.artist })),
+      ...(artistNames.length ? [{ artist: { $in: artistNames } }] : [])
+    ];
+    const [existingSongs, existingSuggestions] = matchingConditions.length
+      ? await Promise.all([
+        Song.find({ $or: matchingConditions }).collation(songMetadataCollation()).select('name artist').lean(),
+        SongSuggestion.find({
+          $or: [
+            ...matchingConditions,
+            { spotifyTrackId: { $in: metadataPairs.map(pair => pair.id) } }
+          ]
+        }).collation(songMetadataCollation()).select('name artist spotifyTrackId').lean()
+      ])
+      : [[], []];
+    const programSongsByArtist = groupSongsByArtist(existingSongs);
+    const suggestedSongsByArtist = groupSongsByArtist(existingSuggestions);
+    const suggestedTrackIds = new Set(existingSuggestions.map(item => item.spotifyTrackId).filter(Boolean));
+    res.json({
+      statuses: metadataPairs.map(track => {
+        const programCandidates = programSongsByArtist.get(normalizeSongMetadata(track.artist)) || [];
+        const suggestionCandidates = suggestedSongsByArtist.get(normalizeSongMetadata(track.artist)) || [];
+        return {
+          id: track.id,
+          isInProgram: programCandidates.some(candidate =>
+            isSimilarSongMetadata(track.name, track.artist, candidate)
+          ),
+          isSuggested: suggestedTrackIds.has(track.id)
+            || suggestionCandidates.some(candidate =>
+              isSimilarSongMetadata(track.name, track.artist, candidate)
+            )
+        };
+      })
+    });
+  } catch (error) {
+    console.error('No se pudieron comprobar las canciones de Spotify contra el catálogo.', error);
+    res.status(500).json({ error: 'No se pudieron comprobar las canciones contra el catálogo.' });
+  }
+});
+
 app.post('/api/spotify/import', async (req, res) => {
   try {
-    const trackIds = Array.isArray(req.body?.trackIds)
-      ? [...new Set(req.body.trackIds.filter(id => typeof id === 'string' && /^[A-Za-z0-9]{10,40}$/.test(id)))]
-      : [];
+    let trackIds = [];
+    let selectedTracks = [];
+    if (Array.isArray(req.body?.tracks)) {
+      if (!req.body.tracks.length || req.body.tracks.length > 100
+        || req.body.tracks.some(track => (
+          !track
+          || typeof track.id !== 'string'
+          || !/^[A-Za-z0-9]{10,40}$/.test(track.id)
+          || typeof track.name !== 'string'
+          || !track.name.trim()
+          || track.name.length > 200
+          || typeof track.artist !== 'string'
+          || !track.artist.trim()
+          || track.artist.length > 200
+          || (track.coverUrl !== undefined && typeof track.coverUrl !== 'string')
+          || (typeof track.coverUrl === 'string' && track.coverUrl.length > 2048)
+        ))) {
+        return res.status(400).json({ error: 'La lista de canciones seleccionadas no es válida.' });
+      }
+      const uniqueTracks = new Map();
+      for (const track of req.body.tracks) {
+        let coverUrl = '';
+        if (track.coverUrl) {
+          try {
+            const parsedCoverUrl = new URL(track.coverUrl);
+            if (parsedCoverUrl.protocol !== 'https:' || parsedCoverUrl.hostname !== 'i.scdn.co'
+              || parsedCoverUrl.username || parsedCoverUrl.password
+              || (parsedCoverUrl.port && parsedCoverUrl.port !== '443')) {
+              throw new Error('Host de portada no válido.');
+            }
+            coverUrl = parsedCoverUrl.toString();
+          } catch {
+            return res.status(400).json({ error: 'La URL de portada de Spotify no es válida.' });
+          }
+        }
+        uniqueTracks.set(track.id, {
+          id: track.id,
+          name: track.name.trim(),
+          artists: [{ name: track.artist.trim() }],
+          album: { images: coverUrl ? [{ url: coverUrl }] : [] }
+        });
+      }
+      selectedTracks = [...uniqueTracks.values()];
+      trackIds = selectedTracks.map(track => track.id);
+    } else {
+      trackIds = Array.isArray(req.body?.trackIds)
+        ? [...new Set(req.body.trackIds.filter(id => typeof id === 'string' && /^[A-Za-z0-9]{10,40}$/.test(id)))]
+        : [];
+    }
     if (!trackIds.length || trackIds.length > 100) {
       return res.status(400).json({ error: 'Selecciona entre 1 y 100 canciones de Spotify.' });
     }
-    const accessToken = await getSpotifyAccessToken(req.user);
-    const likedTrackMap = await getSpotifyLikedTracksByIds(req.user._id, accessToken, trackIds);
-    const selectedTracks = trackIds
-      .map(id => likedTrackMap.get(id))
-      .filter(track => track && track.name && track.artists?.length);
+    if (!selectedTracks.length) {
+      const accessToken = await getSpotifyAccessToken(req.user);
+      const likedTrackMap = await getSpotifyLikedTracksByIds(req.user._id, accessToken, trackIds);
+      selectedTracks = trackIds
+        .map(id => likedTrackMap.get(id))
+        .filter(track => track && track.name && track.artists?.length);
+    }
     if (!selectedTracks.length) {
       return res.status(400).json({ error: 'Las canciones seleccionadas ya no están en tus Me gusta de Spotify.' });
     }
@@ -2484,6 +2646,7 @@ app.post('/api/spotify/disconnect', async (req, res) => {
   try {
     await User.findByIdAndUpdate(req.user._id, { $unset: { spotify: 1 } });
     spotifyLikedTracksCache.delete(String(req.user._id));
+    spotifyAccessTokenCache.delete(String(req.user._id));
     res.json({ success: true });
   } catch (error) {
     console.error('No se pudo desconectar Spotify.', error);

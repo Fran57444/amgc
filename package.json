@@ -20,6 +20,7 @@
     "android:run": "npm run android:sync && cap run android",
     "build:vercel": "vite build --mode vercel",
     "oauth:token": "node backend/generate-oauth-token.js",
+    "analyze:media": "node backend/analyze-media-traffic.js",
     "build": "vite build",
     "lint": "oxlint",
     "preview": "vite preview"

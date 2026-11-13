@@ -13,6 +13,7 @@ import {
 } from './offlineStore.js';
 import { createOfflineMediaManager } from './offlineMedia.js';
 import { createSongListRenderer } from './songList.js';
+import { fetchSpotifyLikedTracksPage } from './spotifyClient.js';
 
 export function initMusicPlayer() {
     const API_URL = import.meta.env.VITE_API_URL || '/api';
@@ -678,6 +679,10 @@ export function initMusicPlayer() {
     let spotifyTotal = 0;
     let spotifyHasMore = false;
     let spotifyLikedTracksLoaded = false;
+    let spotifyApiAccessToken = '';
+    let spotifyApiAccessTokenExpiresAt = 0;
+    let spotifyApiAccessTokenUserId = '';
+    let spotifyApiAccessTokenRequest = null;
 
     const btnPlayAllSongs = document.getElementById("btn-play-all-songs");
     const btnPlayPlaylist = document.getElementById("btn-play-playlist");
@@ -6030,9 +6035,33 @@ export function initMusicPlayer() {
         try {
             const apiOrigin = new URL(API_URL, window.location.href).origin;
             const artworkUrl = new URL(track.cover, `${apiOrigin}/`);
-            if (artworkUrl.protocol !== 'https:' || artworkUrl.origin !== apiOrigin
-                || artworkUrl.username || artworkUrl.password) return null;
-            return artworkUrl.href;
+            if (artworkUrl.protocol !== 'https:' || artworkUrl.username || artworkUrl.password) return null;
+            if (artworkUrl.origin === apiOrigin
+                && /^\/(?:api\/)?spotify\/cover$/.test(artworkUrl.pathname)) {
+                const spotifyCoverUrl = artworkUrl.searchParams.get('url');
+                if (!spotifyCoverUrl) return null;
+                const directCoverUrl = new URL(spotifyCoverUrl);
+                if (directCoverUrl.protocol === 'https:'
+                    && directCoverUrl.hostname.toLowerCase() === 'i.scdn.co'
+                    && !directCoverUrl.username && !directCoverUrl.password
+                    && (!directCoverUrl.port || directCoverUrl.port === '443')) {
+                    return directCoverUrl.href;
+                }
+                return null;
+            }
+            const driveFileId = (artworkUrl.origin === apiOrigin
+                ? artworkUrl.pathname.match(/^\/(?:api\/)?media\/([\w-]{25,})$/)?.[1]
+                : null)
+                || (/^(?:drive\.google\.com|drive\.usercontent\.google\.com)$/i.test(artworkUrl.hostname)
+                    ? artworkUrl.searchParams.get('id')
+                        || artworkUrl.pathname.match(/\/file\/d\/([\w-]+)/)?.[1]
+                    : null);
+            if (driveFileId && /^[\w-]{25,}$/.test(driveFileId)) {
+                return `https://drive.google.com/uc?export=download&id=${encodeURIComponent(driveFileId)}`;
+            }
+            if (artworkUrl.hostname.toLowerCase() === 'i.scdn.co'
+                && (!artworkUrl.port || artworkUrl.port === '443')) return artworkUrl.href;
+            return artworkUrl.origin === apiOrigin ? artworkUrl.href : null;
         } catch (error) {
             console.warn('La URL de portada para Discord no es válida.', error);
             return null;
@@ -7038,6 +7067,44 @@ export function initMusicPlayer() {
         if (spotifyImportButton) spotifyImportButton.hidden = !spotifySelectedTrackIds.size;
     }
 
+    async function getSpotifyApiAccessToken(forceRefresh = false) {
+        const userId = String(getStoredUser()?._id || '');
+        if (spotifyApiAccessTokenUserId !== userId) {
+            spotifyApiAccessToken = '';
+            spotifyApiAccessTokenExpiresAt = 0;
+            spotifyApiAccessTokenRequest = null;
+            spotifyApiAccessTokenUserId = userId;
+        }
+        if (!forceRefresh && spotifyApiAccessToken
+            && spotifyApiAccessTokenExpiresAt > Date.now() + 30_000) {
+            return spotifyApiAccessToken;
+        }
+        if (!forceRefresh && spotifyApiAccessTokenRequest) return spotifyApiAccessTokenRequest;
+        const tokenRequest = (async () => {
+            const query = forceRefresh ? '?refresh=true' : '';
+            const response = await apiFetch(`${API_URL}/spotify/access-token${query}`);
+            const result = await response.json().catch(() => null);
+            if (!response.ok) throw new Error(result?.error || 'No se pudo autorizar la consulta directa a Spotify.');
+            if (typeof result?.accessToken !== 'string' || !result.accessToken) {
+                throw new Error('El servidor no devolvió un token válido para Spotify.');
+            }
+            if (String(getStoredUser()?._id || '') !== userId || !spotifyIsConnected) {
+                throw new Error('La sesión cambió mientras se autorizaba Spotify.');
+            }
+            spotifyApiAccessToken = result.accessToken;
+            spotifyApiAccessTokenExpiresAt = Number(result.expiresAt) || Date.now() + 3500_000;
+            return spotifyApiAccessToken;
+        })();
+        spotifyApiAccessTokenRequest = tokenRequest;
+        try {
+            return await tokenRequest;
+        } finally {
+            if (spotifyApiAccessTokenRequest === tokenRequest) {
+                spotifyApiAccessTokenRequest = null;
+            }
+        }
+    }
+
     async function loadSpotifyLikedTracks(refresh = false, append = false) {
         if (!spotifyIsConnected || !spotifyLikesStatus) return;
         const offset = append ? spotifyNextOffset : 0;
@@ -7047,20 +7114,26 @@ export function initMusicPlayer() {
             ? 'Cargando más canciones guardadas de Spotify...'
             : 'Cargando canciones guardadas de Spotify...';
         try {
-            const query = new URLSearchParams({ offset: String(offset) });
-            if (refresh) query.set('refresh', 'true');
-            const response = await apiFetch(`${API_URL}/spotify/liked-tracks?${query}`);
-            const result = await response.json().catch(() => null);
-            if (!response.ok) throw new Error(result?.error || 'No se pudieron cargar tus Me gusta.');
-            if (!Array.isArray(result?.tracks)) {
-                throw new Error('Spotify devolvió una lista de canciones inválida.');
+            const page = await fetchSpotifyLikedTracksPage(offset, getSpotifyApiAccessToken);
+            const statusResponse = await apiFetch(`${API_URL}/spotify/track-status`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    tracks: page.tracks.map(({ id, name, artist }) => ({ id, name, artist }))
+                })
+            });
+            const statusResult = await statusResponse.json().catch(() => null);
+            if (!statusResponse.ok) {
+                throw new Error(statusResult?.error || 'No se pudieron comprobar las canciones del catálogo.');
             }
+            const statuses = new Map((statusResult?.statuses || []).map(status => [status.id, status]));
+            const tracks = page.tracks.map(track => ({ ...track, ...statuses.get(track.id) }));
             spotifyLikedTracks = append
-                ? [...spotifyLikedTracks, ...result.tracks]
-                : result.tracks;
-            spotifyNextOffset = Number(result.nextOffset) || offset;
-            spotifyTotal = Number(result.total) || 0;
-            spotifyHasMore = Boolean(result.hasMore);
+                ? [...spotifyLikedTracks, ...tracks]
+                : tracks;
+            spotifyNextOffset = Number(page.nextOffset) || offset;
+            spotifyTotal = Number(page.total) || 0;
+            spotifyHasMore = Boolean(page.hasMore);
             spotifyLikedTracksLoaded = true;
             if (refresh) spotifySelectedTrackIds.clear();
             spotifySelectedTrackIds = new Set(
@@ -7091,6 +7164,12 @@ export function initMusicPlayer() {
             if (!response.ok) throw new Error(result?.error || 'No se pudo consultar Spotify.');
             const connectionChanged = spotifyIsConnected !== result.connected;
             spotifyIsConnected = result.connected;
+            if (!result.connected) {
+                spotifyApiAccessToken = '';
+                spotifyApiAccessTokenExpiresAt = 0;
+                spotifyApiAccessTokenUserId = '';
+                spotifyApiAccessTokenRequest = null;
+            }
             if (spotifyConnectButton) {
                 spotifyConnectButton.hidden = result.connected;
                 spotifyConnectButton.disabled = !result.configured;
@@ -7143,6 +7222,10 @@ export function initMusicPlayer() {
             const result = await response.json().catch(() => null);
             if (!response.ok) throw new Error(result?.error || 'No se pudo desconectar Spotify.');
             spotifyIsConnected = false;
+            spotifyApiAccessToken = '';
+            spotifyApiAccessTokenExpiresAt = 0;
+            spotifyApiAccessTokenUserId = '';
+            spotifyApiAccessTokenRequest = null;
             spotifyLikedTracks = [];
             spotifySelectedTrackIds.clear();
             spotifyNextOffset = 0;
@@ -7176,13 +7259,16 @@ export function initMusicPlayer() {
     spotifyImportButton?.addEventListener('click', async () => {
         const trackIds = [...spotifySelectedTrackIds];
         if (!trackIds.length) return;
+        const tracks = spotifyLikedTracks
+            .filter(track => spotifySelectedTrackIds.has(track.id))
+            .map(({ id, name, artist, coverUrl }) => ({ id, name, artist, coverUrl }));
         spotifyImportButton.disabled = true;
         spotifyLikesStatus.textContent = 'Importando canciones como sugerencias...';
         try {
             const response = await apiFetch(`${API_URL}/spotify/import`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ trackIds })
+                body: JSON.stringify({ tracks })
             });
             const result = await response.json().catch(() => null);
             if (!response.ok) throw new Error(result?.error || 'No se pudieron importar las canciones.');
@@ -7503,7 +7589,7 @@ export function initMusicPlayer() {
             card.append(heading, form);
             fragment.appendChild(card);
 
-            const previewSelectedImage = bindImageDropzone(
+            bindImageDropzone(
                 imageWrapper,
                 imageInput,
                 imagePreview,
@@ -7512,35 +7598,14 @@ export function initMusicPlayer() {
                 imagePlaceholder
             );
             const spotifyCoverLoadPromise = suggestion.coverUrl
-                ? (async () => {
-                    try {
-                        imageStatus.textContent = 'Cargando carátula de Spotify...';
-                        const response = await apiFetch(
-                            `${API_URL}/spotify/cover?url=${encodeURIComponent(suggestion.coverUrl)}`
-                        );
-                        if (!response.ok) {
-                            const result = await response.json().catch(() => null);
-                            throw new Error(result?.error || 'No se pudo cargar la carátula de Spotify.');
-                        }
-                        const coverBlob = await response.blob();
-                        if (imageInput.files?.[0]) return true;
-                        const coverFile = new File(
-                            [coverBlob],
-                            `spotify-cover-${suggestionId}.jpg`,
-                            { type: coverBlob.type || 'image/jpeg' }
-                        );
-                        const transfer = new DataTransfer();
-                        transfer.items.add(coverFile);
-                        imageInput.files = transfer.files;
-                        await previewSelectedImage();
-                        return true;
-                    } catch (error) {
-                        console.error('No se pudo preparar la carátula importada de Spotify.', error);
-                        imageStatus.textContent = error.message || 'No se pudo preparar la carátula de Spotify.';
-                        imageStatus.classList.add('error');
-                        return false;
-                    }
-                })()
+                ? Promise.resolve().then(() => {
+                    if (imageInput.files?.[0]) return true;
+                    imagePreview.src = suggestion.coverUrl;
+                    imagePreview.hidden = false;
+                    imagePlaceholder.hidden = true;
+                    imageStatus.textContent = 'Portada de Spotify. Puedes reemplazarla.';
+                    return true;
+                })
                 : Promise.resolve(true);
             bindYoutubeSearch({
                 searchInput: youtubeSearchInput,
@@ -7587,9 +7652,6 @@ export function initMusicPlayer() {
                         await spotifyCoverLoadPromise;
                     }
                     const coverFile = imageInput.files?.[0];
-                    if (suggestion.coverUrl && !coverFile) {
-                        throw new Error('No se pudo preparar la carátula. Selecciona una portada manualmente.');
-                    }
                     uploadStatus.textContent = 'Agregando canción...';
                     const formData = new FormData();
                     formData.append('name', name);
@@ -7603,6 +7665,7 @@ export function initMusicPlayer() {
                     const currentUser = getStoredUser();
                     if (currentUser?._id) formData.append('userId', currentUser._id);
                     if (coverFile) formData.append('cover', coverFile);
+                    else if (suggestion.coverUrl) formData.append('coverUrl', suggestion.coverUrl);
                     if (youtubeLink) {
                         uploadStatus.textContent = 'Descargando audio...';
                         ytProgress = startYtDownloadProgress(`Descargando: ${name} - ${songArtist}`);
