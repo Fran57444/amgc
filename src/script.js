@@ -950,7 +950,7 @@ export function initMusicPlayer() {
         const playback = getRemotePlaybackSession();
         if (!playback) return getCurrentTrack();
         const songId = String(playback.songId || '');
-        const track = playlist.find(song => String(song._id || song.id || '') === songId);
+        const track = findRemotePlaybackTrack();
         const playbackColor = typeof playback.color === 'string' && CSS.supports('color', playback.color)
             ? playback.color
             : track?.color;
@@ -962,6 +962,13 @@ export function initMusicPlayer() {
             cover: playback.cover || track?.cover || '',
             color: playbackColor || '#151515'
         };
+    }
+
+    function findRemotePlaybackTrack() {
+        const playback = getRemotePlaybackSession();
+        if (!playback?.songId) return null;
+        const songId = String(playback.songId);
+        return playlist.find(track => String(track._id || track.id || '') === songId) || null;
     }
 
     try {
@@ -2527,7 +2534,7 @@ export function initMusicPlayer() {
             const response = await requestPlaybackSocket(
                 'playbackTransferRequest',
                 { targetDeviceId },
-                40000
+                55000
             );
             if (!response.success) throw new Error(response.error || 'No se pudo transferir la reproducción.');
             if (response.alreadyOwner) showToast('Ese dispositivo ya tiene el control de reproducción.');
@@ -2681,7 +2688,7 @@ export function initMusicPlayer() {
         ) {
             response = await requestPlaybackSocket('playbackTransferRequest', {
                 targetDeviceId: playbackDeviceId
-            }, 40000);
+            }, 55000);
         }
         if (!response.success && notifyError) showToast(response.error || 'No se pudo controlar la reproducción remota.', true);
         return Boolean(response.success);
@@ -2712,6 +2719,8 @@ export function initMusicPlayer() {
             updatePlaybackDevicePickerIcons();
             const localTrack = getCurrentTrack();
             if (localTrack) {
+                bottomBar.style.setProperty('--track-color', safeColor(localTrack.color));
+                updateVolumeSliderUI(currentVolume);
                 trackNameEl.textContent = localTrack.name || '';
                 trackArtistEl.textContent = localTrack.artist || '';
                 bottomBarCover.src = getSongCover(localTrack);
@@ -2735,6 +2744,8 @@ export function initMusicPlayer() {
         sharedPlaybackTitleText.textContent = playback.songName || '';
         sharedPlaybackArtist.textContent = playback.artist || '';
         sharedPlaybackCover.src = playback.cover || '/img/vinculo.png';
+        bottomBar.style.setProperty('--track-color', safeColor(playback.color));
+        updateVolumeSliderUI(currentVolume);
         sharedPlaybackProgressFill.style.width = `${progress}%`;
         sharedPlaybackTimeLabel.textContent = `${formatTrackTime(currentTime)} / ${formatTrackTime(duration)}`;
         trackNameEl.textContent = playback.songName || '';
@@ -2768,6 +2779,10 @@ export function initMusicPlayer() {
             sharedPlaybackClockTimer = null;
             renderSharedPlaybackStatus();
             if (isLyricsMode) updateLyricsView();
+            if (!getRemotePlaybackSession()) {
+                updateCurrentLyric(getCurrentTrack(), Number.isFinite(audio.currentTime) ? audio.currentTime : 0);
+                renderQueue();
+            }
             const profileUser = selectedProfileUser || getStoredUser();
             if (hadRemotePlayback && isProfileMode && String(profileUser?._id || '') === ownUserId) {
                 renderProfile();
@@ -2782,10 +2797,13 @@ export function initMusicPlayer() {
         stopPlaybackStatusSync();
         pauseForRemotePlayback();
         renderSharedPlaybackStatus();
+        updateCurrentLyric(getLyricsTrack(), getSharedPlaybackTime(playback));
+        renderQueue();
         if (sharedPlaybackClockTimer) clearInterval(sharedPlaybackClockTimer);
         if (playback.isPlaying !== false) {
             sharedPlaybackClockTimer = setInterval(() => {
                 renderSharedPlaybackStatus();
+                updateCurrentLyric(getLyricsTrack(), getSharedPlaybackTime(sharedDevicePlayback));
                 if (isLyricsMode) updateLyricsPlaybackProgress();
                 if (isProfileMode) updateProfileActivityProgress();
             }, 1000);
@@ -6823,13 +6841,24 @@ export function initMusicPlayer() {
         bottomBarActionMenu.querySelector('.action-add-queue').addEventListener('click', (e) => {
             e.stopPropagation();
             bottomBarActionMenu.classList.remove('show');
-            if (addTrackToQueue(getCurrentTrack(), false)) renderQueue();
+            const track = getRemotePlaybackSession() ? findRemotePlaybackTrack() : getCurrentTrack();
+            if (!track) {
+                showToast('La canción del otro dispositivo no está disponible en esta biblioteca.', true);
+                return;
+            }
+            if (addTrackToQueue(track, false)) renderQueue();
         });
         
         bottomBarActionMenu.querySelector('.action-add-pl').addEventListener('click', (e) => {
             e.stopPropagation();
             bottomBarActionMenu.classList.remove('show');
-            openAddToPlaylistModal(currentTrackIndex);
+            const track = getRemotePlaybackSession() ? findRemotePlaybackTrack() : getCurrentTrack();
+            const trackIndex = track ? playlist.indexOf(track) : -1;
+            if (trackIndex < 0) {
+                showToast('La canción del otro dispositivo no está disponible en esta biblioteca.', true);
+                return;
+            }
+            openAddToPlaylistModal(trackIndex);
         });
     }
 
@@ -9296,7 +9325,7 @@ export function initMusicPlayer() {
             volumeTooltip.value = String(Number(percent.toFixed(2)));
         }
         const sliderPercent = (displayValue / maxVolume) * 100;
-        const trackColor = getCurrentTrack()?.color || '#ffffff';
+        const trackColor = safeColor(getRemotePlaybackSession()?.color || getCurrentTrack()?.color || '#ffffff');
 
         if (percent <= 100) {
             volumeSlider.style.background = `linear-gradient(to right, ${trackColor} ${sliderPercent}%, #333 ${sliderPercent}%)`;
@@ -9362,7 +9391,8 @@ export function initMusicPlayer() {
     function renderQueue() {
         queueList.innerHTML = '';
         const upcomingIndices = isShuffle ? [...unplayedIndices] : getSequentialQueueIndices();
-        const currentTrack = getCurrentTrack();
+        const remotePlayback = getRemotePlaybackSession();
+        const currentTrack = remotePlayback ? getLyricsTrack() : getCurrentTrack();
 
         if (currentTrack) {
             const currentHeader = document.createElement('div');
@@ -9372,7 +9402,7 @@ export function initMusicPlayer() {
 
             const currentItem = document.createElement('li');
             currentItem.className = 'queue-item active';
-            currentItem.dataset.trackIndex = String(currentTrackIndex);
+            if (!remotePlayback) currentItem.dataset.trackIndex = String(currentTrackIndex);
             currentItem.style.setProperty('--track-color', safeColor(currentTrack.color));
             currentItem.innerHTML = `
                 ${createImageMarkup(getSongCover(currentTrack), 'queue-item-img')}

@@ -650,6 +650,7 @@ let realtimeIo = null;
 const playbackStateByUser = new Map();
 const playbackSocketByUser = new Map();
 const playbackTransferTargetByUser = new Map();
+const playbackTransferInProgressByUser = new Map();
 const listenTogetherQueueSessions = new Map();
 const listenTogetherQueueSessionByUser = new Map();
 
@@ -3818,6 +3819,21 @@ if (isMainModule) {
         emitPlaybackDevicesChanged();
         return;
       }
+      if (playbackTransferInProgressByUser.has(authenticatedUserId)) {
+        acknowledgeResult({ success: false, error: 'Ya hay una transferencia de reproducción en curso.' });
+        return;
+      }
+      playbackTransferInProgressByUser.set(authenticatedUserId, normalizedTargetDeviceId);
+      const clearTransferLock = () => {
+        if (playbackTransferInProgressByUser.get(authenticatedUserId) === normalizedTargetDeviceId) {
+          playbackTransferInProgressByUser.delete(authenticatedUserId);
+        }
+      };
+      const clearTransferTarget = () => {
+        if (playbackTransferTargetByUser.get(authenticatedUserId) === normalizedTargetDeviceId) {
+          playbackTransferTargetByUser.delete(authenticatedUserId);
+        }
+      };
 
       let playback = playbackStateByUser.get(authenticatedUserId);
       if (!playback) {
@@ -3826,36 +3842,37 @@ if (isMainModule) {
           if (playback?.songId) playbackStateByUser.set(authenticatedUserId, playback);
         } catch (error) {
           console.error('No se pudo recuperar el estado de reproducción para transferirlo.', error);
+          clearTransferLock();
           acknowledgeResult({ success: false, error: 'No se pudo consultar la sesión de reproducción.' });
           return;
         }
       }
       if (!playback?.songId || !playback.deviceId) {
+        clearTransferLock();
         acknowledgeResult({ success: false, error: 'No hay una canción activa para transferir.' });
         return;
       }
-      if (playback.deviceId === normalizedTargetDeviceId && playback.isPlaying !== false) {
+      if (playback.deviceId === normalizedTargetDeviceId) {
+        clearTransferLock();
         acknowledgeResult({ success: true, alreadyOwner: true });
         return;
       }
 
       const sendToTarget = (pausedPlayback, resumeAfterTransfer) => {
         playbackTransferTargetByUser.set(authenticatedUserId, normalizedTargetDeviceId);
-        targetSocket.timeout(25000).emit(
+        targetSocket.timeout(45000).emit(
           'playbackTransferCommand',
           { playback: pausedPlayback, resumeAfterTransfer },
           (deliveryError, result) => {
             if (deliveryError) {
-              if (playbackTransferTargetByUser.get(authenticatedUserId) === normalizedTargetDeviceId) {
-                playbackTransferTargetByUser.delete(authenticatedUserId);
-              }
+              clearTransferTarget();
+              clearTransferLock();
               acknowledgeResult({ success: false, error: 'El dispositivo de destino no respondió a la transferencia.' });
               return;
             }
             if (!result?.success) {
-              if (playbackTransferTargetByUser.get(authenticatedUserId) === normalizedTargetDeviceId) {
-                playbackTransferTargetByUser.delete(authenticatedUserId);
-              }
+              clearTransferTarget();
+              clearTransferLock();
               acknowledgeResult({
                 success: false,
                 error: result?.error || 'No se pudo iniciar la reproducción en el dispositivo de destino.'
@@ -3876,12 +3893,12 @@ if (isMainModule) {
                 updatedAt: new Date(transferredAt).toISOString()
               };
               publishPlaybackState(transferredPlayback);
+              playbackSocketByUser.set(authenticatedUserId, targetSocket.id);
               void User.findByIdAndUpdate(authenticatedUserId, { $set: { lastPlayed: transferredPlayback } })
                 .catch(error => console.error('No se pudo guardar el dispositivo que recibió la reproducción.', error));
             }
-            if (playbackTransferTargetByUser.get(authenticatedUserId) === normalizedTargetDeviceId) {
-              playbackTransferTargetByUser.delete(authenticatedUserId);
-            }
+            clearTransferTarget();
+            clearTransferLock();
             acknowledgeResult({ success: true });
           }
         );
@@ -3916,6 +3933,8 @@ if (isMainModule) {
         { requesterDeviceId: normalizedTargetDeviceId },
         (handoffError, result) => {
           if (handoffError || !result?.success || result.playback?.isPlaying !== false) {
+            clearTransferTarget();
+            clearTransferLock();
             acknowledgeResult({
               success: false,
               error: handoffError
