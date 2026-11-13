@@ -50,6 +50,8 @@ export function initMusicPlayer() {
     let sharedDevicePlayback = null;
     let suppressRemotePlaybackPause = false;
     let sharedPlaybackClockTimer = null;
+    let connectedPlaybackDevices = [];
+    let playbackTransferPending = false;
     const socket = io(import.meta.env.VITE_SOCKET_URL || window.location.origin, {
         autoConnect: false,
         transports: ['websocket', 'polling'],
@@ -250,7 +252,7 @@ export function initMusicPlayer() {
         connectRealtime();
     });
     socket.off('connect').on('connect', async () => {
-        socket.emit('playbackStateRequest');
+        socket.emit('playbackStateRequest', { deviceId: playbackDeviceId, deviceType: playbackDeviceType });
         const isReconnect = realtimeConnectedBefore;
         realtimeConnectedBefore = true;
         void loadSongSuggestions(false);
@@ -275,7 +277,9 @@ export function initMusicPlayer() {
             }
         }
         if (listeningTogetherUserId) joinListenTogetherQueue(listeningTogetherUserId, true);
-        if (!audio.paused) broadcastPlaybackState(true);
+        if (!audio.paused && getCurrentTrack() && !getRemotePlaybackSession()) {
+            broadcastPlaybackState(true);
+        }
         if (activeChatFriendId) loadChatMessages(false);
         refreshChatNotifications();
     });
@@ -562,14 +566,14 @@ export function initMusicPlayer() {
     const sharedPlaybackStatus = document.getElementById('shared-playback-status');
     const sharedPlaybackSource = document.getElementById('shared-playback-source');
     const sharedPlaybackSourceLabel = document.getElementById('shared-playback-source-label');
-    const sharedPlaybackPhoneIcon = document.getElementById('shared-playback-device-phone');
-    const sharedPlaybackPcIcon = document.getElementById('shared-playback-device-pc');
     const sharedPlaybackTitleText = document.getElementById('shared-playback-title-text');
     const sharedPlaybackArtist = document.getElementById('shared-playback-artist');
     const sharedPlaybackCover = document.getElementById('shared-playback-cover');
     const sharedPlaybackProgressFill = document.getElementById('shared-playback-progress-fill');
     const sharedPlaybackTimeLabel = document.getElementById('shared-playback-time');
-    const sharedPlaybackTakeover = document.getElementById('shared-playback-takeover');
+    const playbackDevicePicker = document.getElementById('playback-device-picker');
+    const playbackDeviceList = document.getElementById('playback-device-list');
+    const playbackDeviceTriggers = [...document.querySelectorAll('[data-playback-device-trigger]')];
     const bottomBarCover = document.getElementById("bottom-bar-cover");
     const btnShuffle = document.getElementById("btn-shuffle");
     const btnQueue = document.getElementById("btn-queue");
@@ -2212,9 +2216,9 @@ export function initMusicPlayer() {
             const listeningLabel = isLoadingTrack
                 ? 'Cargando'
                 : isListening
-                    ? `Escuchando desde ${playbackDeviceLabel(displayDeviceType)}`
+                    ? 'Escuchando'
                 : displayTrack
-                    ? `${displayDeviceType ? `Pausado en ${playbackDeviceLabel(displayDeviceType)}` : 'Estaba escuchando'}${lastPlayedLabel}`
+                    ? `${displayDeviceType ? 'Pausado' : 'Estaba escuchando'}${lastPlayedLabel}`
                     : 'Sin actividad reciente';
             const statusLabel = isOfflineProfile ? 'Modo offline' : isOnline ? 'En línea' : 'Desconectado';
             const statusMeta = !isOfflineProfile && !isOnline && user?.lastActive ? ` · ${timeAgo(user.lastActive)}` : '';
@@ -2409,10 +2413,6 @@ export function initMusicPlayer() {
         return `${mins}:${String(secs).padStart(2, '0')}`;
     }
 
-    function playbackDeviceLabel(deviceType) {
-        return deviceType === 'mobile' ? 'el celular' : deviceType === 'desktop' ? 'la PC' : 'otro dispositivo';
-    }
-
     function playbackDeviceIconMarkup(deviceType) {
         const iconContents = deviceType === 'mobile'
             ? '<rect x="6.5" y="2.5" width="11" height="19" rx="2.2"></rect><path d="M10 5.5h4M11 18.5h2"></path>'
@@ -2421,6 +2421,137 @@ export function initMusicPlayer() {
                 : '';
         if (!iconContents) return '';
         return `<svg class="playback-device-inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${iconContents}</svg>`;
+    }
+
+    function updatePlaybackDevicePickerIcons() {
+        const deviceType = getRemotePlaybackSession()?.deviceType || playbackDeviceType;
+        playbackDeviceTriggers.forEach(trigger => {
+            const phoneIcon = trigger.querySelector('[data-playback-device-phone]');
+            const pcIcon = trigger.querySelector('[data-playback-device-pc]');
+            if (phoneIcon) phoneIcon.hidden = deviceType !== 'mobile';
+            if (pcIcon) pcIcon.hidden = deviceType !== 'desktop';
+        });
+    }
+
+    function renderPlaybackDevicePicker() {
+        if (!playbackDeviceList) return;
+        const devices = connectedPlaybackDevices.length
+            ? [...connectedPlaybackDevices]
+            : [{ deviceId: playbackDeviceId, deviceType: playbackDeviceType }];
+        if (!devices.some(device => device.deviceId === playbackDeviceId)) {
+            devices.unshift({ deviceId: playbackDeviceId, deviceType: playbackDeviceType });
+        }
+        const activeDeviceId = sharedDevicePlayback?.deviceId
+            || (getCurrentTrack() ? playbackDeviceId : '');
+        const typeCounts = new Map();
+        devices.forEach(device => {
+            if (device.deviceId !== playbackDeviceId) {
+                typeCounts.set(device.deviceType, (typeCounts.get(device.deviceType) || 0) + 1);
+            }
+        });
+        const typeIndexes = new Map();
+        playbackDeviceList.replaceChildren();
+        devices.sort((first, second) => Number(second.deviceId === playbackDeviceId) - Number(first.deviceId === playbackDeviceId));
+        devices.forEach(device => {
+            const isCurrentDevice = device.deviceId === playbackDeviceId;
+            const isCurrentPlaybackDevice = device.deviceId === activeDeviceId;
+            const deviceTypeLabel = device.deviceType === 'mobile'
+                ? 'Celular'
+                : device.deviceType === 'desktop' ? 'PC' : 'Dispositivo';
+            let label = isCurrentDevice ? 'Este equipo' : deviceTypeLabel;
+            if (!isCurrentDevice && (typeCounts.get(device.deviceType) || 0) > 1) {
+                const index = (typeIndexes.get(device.deviceType) || 0) + 1;
+                typeIndexes.set(device.deviceType, index);
+                label += ` ${index}`;
+            }
+            const option = document.createElement('button');
+            option.type = 'button';
+            option.className = 'playback-device-option';
+            option.setAttribute('aria-label', isCurrentDevice ? label : `Transferir reproducción a ${label}`);
+            option.disabled = playbackTransferPending || isCurrentPlaybackDevice;
+            const icon = document.createElement('span');
+            icon.className = 'playback-device-option-icon';
+            icon.innerHTML = playbackDeviceIconMarkup(device.deviceType);
+            const name = document.createElement('span');
+            name.className = 'playback-device-option-name';
+            name.textContent = label;
+            const status = document.createElement('small');
+            status.className = 'playback-device-option-status';
+            status.textContent = isCurrentPlaybackDevice ? 'Reproduciendo aquí' : '';
+            option.append(icon, name, status);
+            option.addEventListener('click', () => void transferPlaybackToDevice(device.deviceId));
+            playbackDeviceList.append(option);
+        });
+    }
+
+    function setPlaybackDevicePickerOpen(open) {
+        if (!playbackDevicePicker) return;
+        playbackDevicePicker.hidden = !open;
+        playbackDeviceTriggers.forEach(trigger => trigger.setAttribute('aria-expanded', String(open)));
+        if (open) renderPlaybackDevicePicker();
+    }
+
+    async function transferPlaybackToDevice(targetDeviceId) {
+        if (playbackTransferPending) return;
+        setPlaybackDevicePickerOpen(false);
+        playbackTransferPending = true;
+        renderPlaybackDevicePicker();
+        try {
+            const response = await requestPlaybackSocket(
+                'playbackTransferRequest',
+                { targetDeviceId },
+                40000
+            );
+            if (!response.success) throw new Error(response.error || 'No se pudo transferir la reproducción.');
+            if (response.alreadyOwner) showToast('Ese dispositivo ya tiene el control de reproducción.');
+        } catch (error) {
+            showToast(error.message || 'No se pudo transferir la reproducción.', true);
+        } finally {
+            playbackTransferPending = false;
+            renderPlaybackDevicePicker();
+        }
+    }
+
+    async function activateTransferredPlayback(request = {}, acknowledge = () => {}) {
+        const acknowledgeResult = typeof acknowledge === 'function' ? acknowledge : () => {};
+        const playback = request.playback;
+        if (!playback?.songId) {
+            acknowledgeResult({ success: false, error: 'La transferencia no contiene una canción válida.' });
+            return;
+        }
+        playbackTransferPending = true;
+        renderPlaybackDevicePicker();
+        try {
+            const trackIndex = playlist.findIndex(track => String(track._id) === String(playback.songId));
+            if (trackIndex < 0) throw new Error('La canción actual no está disponible en esta biblioteca.');
+            const duration = Math.max(0, Number(playback.duration) || 0);
+            let restoreTime = getSharedPlaybackTime(playback);
+            if (duration > 0 && restoreTime >= duration - 1) restoreTime = 0;
+            const shouldResume = request.resumeAfterTransfer === true;
+            sharedDevicePlayback = null;
+            if (sharedPlaybackClockTimer) clearInterval(sharedPlaybackClockTimer);
+            sharedPlaybackClockTimer = null;
+            renderSharedPlaybackStatus();
+            const loaded = await loadAndPlayTrack(trackIndex, 'regular', shouldResume, restoreTime);
+            if (!loaded) throw new Error('No se pudo iniciar la canción en esta PC.');
+            if (!shouldResume) {
+                await waitForAudioMetadata();
+                audio.currentTime = Math.min(restoreTime, audio.duration || restoreTime);
+                sharedPlaybackTime = Number(audio.currentTime) || 0;
+                sharedPlaybackDuration = Number(audio.duration) || duration;
+                broadcastPlaybackState(true);
+                void updateUserStatus(true);
+            }
+            acknowledgeResult({ success: true });
+        } catch (error) {
+            sharedDevicePlayback = { ...playback, isPlaying: false };
+            renderSharedPlaybackStatus();
+            acknowledgeResult({ success: false, error: error.message || 'No se pudo iniciar la reproducción en esta PC.' });
+        } finally {
+            playbackTransferPending = false;
+            renderPlaybackDevicePicker();
+            renderSharedPlaybackStatus();
+        }
     }
 
     function getSharedPlaybackTime(playback) {
@@ -2448,13 +2579,13 @@ export function initMusicPlayer() {
             : null;
     }
 
-    function requestPlaybackSocket(eventName, payload) {
+    function requestPlaybackSocket(eventName, payload, timeout = 8000) {
         return new Promise(resolve => {
             if (!socket?.connected) {
                 resolve({ success: false, error: 'No hay conexión en tiempo real.' });
                 return;
             }
-            socket.timeout(8000).emit(eventName, payload, (timeoutError, response) => {
+            socket.timeout(timeout).emit(eventName, payload, (timeoutError, response) => {
                 resolve(timeoutError
                     ? { success: false, error: 'El servidor no confirmó la acción a tiempo.' }
                     : response || { success: false, error: 'El servidor devolvió una respuesta vacía.' });
@@ -2499,7 +2630,6 @@ export function initMusicPlayer() {
         return Boolean(response.success);
     }
 
-    let playbackTakeoverPending = false;
     let remoteSeekTimer = null;
     let queuedRemoteSeekPosition = 0;
     function queueRemotePlaybackSeek(position) {
@@ -2509,67 +2639,6 @@ export function initMusicPlayer() {
             remoteSeekTimer = null;
             void requestRemotePlaybackControl('seek', { position: queuedRemoteSeekPosition });
         }, 120);
-    }
-
-    function flushRemotePlaybackSeek() {
-        if (!remoteSeekTimer) return Promise.resolve(true);
-        clearTimeout(remoteSeekTimer);
-        remoteSeekTimer = null;
-        return requestRemotePlaybackControl('seek', { position: queuedRemoteSeekPosition }, false);
-    }
-
-    async function takePlaybackControlHere() {
-        const remotePlayback = getRemotePlaybackSession();
-        if (!remotePlayback || playbackTakeoverPending) return;
-        let shouldResume = remotePlayback.isPlaying !== false;
-        let fallbackPosition = getSharedPlaybackTime(remotePlayback);
-        let playbackAfterPause = null;
-        playbackTakeoverPending = true;
-        sharedPlaybackTakeover.disabled = true;
-        sharedPlaybackTakeover.textContent = 'Recuperando control…';
-        try {
-            if (!await flushRemotePlaybackSeek()) throw new Error('No se pudo aplicar la posición de reproducción solicitada.');
-            const latestPlayback = getRemotePlaybackSession() || remotePlayback;
-            shouldResume = latestPlayback.isPlaying !== false;
-            fallbackPosition = getSharedPlaybackTime(latestPlayback);
-            const response = await requestPlaybackSocket('playbackTakeoverRequest', {
-                deviceId: playbackDeviceId
-            });
-            if (!response.success) throw new Error(response.error || 'No se pudo transferir la reproducción.');
-            if (typeof response.resumeAfterTransfer === 'boolean') shouldResume = response.resumeAfterTransfer;
-            const playback = response.playback || remotePlayback;
-            playbackAfterPause = playback;
-            const trackIndex = playlist.findIndex(track => String(track._id) === String(playback.songId));
-            if (trackIndex < 0) throw new Error('La canción actual no está disponible en esta biblioteca.');
-            const restoreTime = Number.isFinite(Number(playback.currentTime))
-                ? getSharedPlaybackTime(playback)
-                : fallbackPosition;
-            sharedDevicePlayback = null;
-            if (sharedPlaybackClockTimer) clearInterval(sharedPlaybackClockTimer);
-            sharedPlaybackClockTimer = null;
-            renderSharedPlaybackStatus();
-            const loaded = await loadAndPlayTrack(trackIndex, 'regular', shouldResume, restoreTime);
-            if (!loaded) throw new Error('No se pudo iniciar la canción en esta PC.');
-            if (!shouldResume) {
-                await waitForAudioMetadata();
-                audio.currentTime = Math.min(restoreTime, audio.duration || restoreTime);
-                sharedPlaybackTime = Number(audio.currentTime) || 0;
-                sharedPlaybackDuration = Number(audio.duration) || Number(playback.duration) || 0;
-                broadcastPlaybackState(true);
-                void updateUserStatus(true);
-            }
-        } catch (error) {
-            if (playbackAfterPause) {
-                sharedDevicePlayback = playbackAfterPause;
-                renderSharedPlaybackStatus();
-            }
-            showToast(error.message || 'No se pudo recuperar el control de reproducción.', true);
-        } finally {
-            playbackTakeoverPending = false;
-            sharedPlaybackTakeover.disabled = false;
-            sharedPlaybackTakeover.textContent = 'Recuperar control en esta PC';
-            renderSharedPlaybackStatus();
-        }
     }
 
     function updatePlaybackControlLock() {
@@ -2583,6 +2652,7 @@ export function initMusicPlayer() {
         const visible = Boolean(playback?.songName && playback.deviceId !== playbackDeviceId);
         sharedPlaybackStatus.hidden = !visible;
         if (!visible) {
+            updatePlaybackDevicePickerIcons();
             const localTrack = getCurrentTrack();
             if (localTrack) {
                 trackNameEl.textContent = localTrack.name || '';
@@ -2601,20 +2671,14 @@ export function initMusicPlayer() {
             updatePlaybackControlLock();
             return;
         }
-        sharedPlaybackTakeover.disabled = playbackTakeoverPending || !socket?.connected;
         const duration = Math.max(0, Number(playback.duration) || 0);
         const currentTime = getSharedPlaybackTime(playback);
         const progress = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
-        const sourceLabel = playback.isPlaying === false
-            ? `En pausa en ${playbackDeviceLabel(playback.deviceType)}`
-            : `Reproduciendo desde ${playbackDeviceLabel(playback.deviceType)}`;
-        const playbackIsMobile = playback.deviceType === 'mobile';
-        const playbackIsDesktop = playback.deviceType === 'desktop';
+        const sourceLabel = playback.isPlaying === false ? 'En pausa' : 'Reproduciendo';
         sharedPlaybackSourceLabel.textContent = sourceLabel;
         sharedPlaybackSource.setAttribute('aria-label', sourceLabel);
         sharedPlaybackSource.title = sourceLabel;
-        sharedPlaybackPhoneIcon.hidden = !playbackIsMobile;
-        sharedPlaybackPcIcon.hidden = !playbackIsDesktop;
+        updatePlaybackDevicePickerIcons();
         sharedPlaybackTitleText.textContent = playback.songName || '';
         sharedPlaybackArtist.textContent = playback.artist || '';
         sharedPlaybackCover.src = playback.cover || '/img/vinculo.png';
@@ -2798,7 +2862,7 @@ export function initMusicPlayer() {
             const playback = friend.lastPlayed;
             const duration = Number(playback?.duration) || 0;
             if (hasPlaybackEvidence(playback) && playback?.isPlaying !== false && duration > 0) {
-                return `En línea · Escuchando desde ${playbackDeviceLabel(playback.deviceType)} ${playbackDeviceIconMarkup(playback.deviceType)} · ${formatTrackTime(Number(playback.currentTime) || 0)} / ${formatTrackTime(duration)}`;
+                return `En línea · Escuchando ${playbackDeviceIconMarkup(playback.deviceType)} · ${formatTrackTime(Number(playback.currentTime) || 0)} / ${formatTrackTime(duration)}`;
             }
             return 'En línea';
         }
@@ -2821,7 +2885,7 @@ export function initMusicPlayer() {
                 const lastPlayedAt = playback?.updatedAt || friend.lastActive;
                 const lastPlayedLabel = lastPlayedAt ? ` · ${timeAgo(lastPlayedAt)}` : '';
                 const playbackLabel = isPlaying
-                    ? `${escapeHtml(`Escuchando desde ${playbackDeviceLabel(playback.deviceType)}`)} ${playbackDeviceIconMarkup(playback.deviceType)}`
+                    ? `Escuchando ${playbackDeviceIconMarkup(playback.deviceType)}`
                     : escapeHtml(`Escuchó por última vez${lastPlayedLabel}`);
                 return `
                     <li class="friend-sidebar-item" data-friend-id="${escapeHtml(friend._id)}" data-friend-name="${escapeHtml(friend.username)}">
@@ -3560,6 +3624,19 @@ export function initMusicPlayer() {
             }
         };
         socket.off('playbackOwnerChanged').on('playbackOwnerChanged', handleOwnPlaybackUpdate);
+        socket.off('playbackDevicesChanged').on('playbackDevicesChanged', ({ userId, devices } = {}) => {
+            if (
+                String(userId || '') !== String(getStoredUser()?._id || '')
+                || !Array.isArray(devices)
+            ) return;
+            connectedPlaybackDevices = devices.filter(device => (
+                typeof device?.deviceId === 'string'
+                && ['mobile', 'desktop', 'unknown'].includes(device.deviceType)
+            ));
+            updatePlaybackDevicePickerIcons();
+            renderPlaybackDevicePicker();
+        });
+        socket.off('playbackTransferCommand').on('playbackTransferCommand', activateTransferredPlayback);
         socket.off('playbackControlCommand').on('playbackControlCommand', async (command = {}, acknowledge = () => {}) => {
             const acknowledgeResult = typeof acknowledge === 'function' ? acknowledge : () => {};
             if (!getCurrentTrack()) {
@@ -3619,7 +3696,9 @@ export function initMusicPlayer() {
         });
         socket.off('songChanged').on('songChanged', handleFriendPlayback);
         socket.off('playbackStatusChanged').on('playbackStatusChanged', handleFriendPlayback);
-        if (socket.connected) socket.emit('playbackStateRequest');
+        if (socket.connected) {
+            socket.emit('playbackStateRequest', { deviceId: playbackDeviceId, deviceType: playbackDeviceType });
+        }
         socket.off('playlistChanged').on('playlistChanged', ({ playlistId, deleted, changedBy } = {}) => {
             if (String(changedBy || '') === String(getStoredUser()?._id || '')) return;
             playlistRealtimeRefresh = playlistRealtimeRefresh.then(async () => {
@@ -9630,7 +9709,19 @@ export function initMusicPlayer() {
         broadcastPlaybackState(true);
         void updateUserStatus(true);
     });
-    sharedPlaybackTakeover?.addEventListener('click', () => void takePlaybackControlHere());
+    playbackDeviceTriggers.forEach(trigger => {
+        trigger.addEventListener('click', event => {
+            event.stopPropagation();
+            setPlaybackDevicePickerOpen(playbackDevicePicker.hidden);
+        });
+    });
+    playbackDevicePicker?.addEventListener('click', event => event.stopPropagation());
+    document.addEventListener('click', () => setPlaybackDevicePickerOpen(false));
+    document.addEventListener('keydown', event => {
+        if (event.key === 'Escape') setPlaybackDevicePickerOpen(false);
+    });
+    updatePlaybackDevicePickerIcons();
+    renderPlaybackDevicePicker();
 
     if (btnAllSongs) {
         btnAllSongs.addEventListener('click', (e) => {

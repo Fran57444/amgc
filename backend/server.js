@@ -159,6 +159,7 @@ const userSchema = new mongoose.Schema({
     currentTime: Number,
     duration: Number,
     isPlaying: Boolean,
+    resumeAfterTransfer: Boolean,
     deviceId: String,
     deviceType: String,
     updatedAt: Date
@@ -1522,6 +1523,7 @@ app.post('/api/users/status', async (req, res) => {
         : '#ff8a00';
       updateData.lastPlayed = {
         ...lastPlayed,
+        resumeAfterTransfer: lastPlayed.resumeAfterTransfer === true,
         color: playbackColor,
         updatedAt: new Date()
       };
@@ -3388,6 +3390,52 @@ if (isMainModule) {
       socket.data.friendIds = (user?.friends || []).map(String);
       return socket.data.friendIds;
     };
+    const getPlaybackOwnerSocket = playback => {
+      const mappedSocket = io.sockets.sockets.get(playbackSocketByUser.get(authenticatedUserId));
+      const isOwnerSocket = activeSocket => (
+        activeSocket?.data.userId === authenticatedUserId
+        && activeSocket.data.playbackDeviceId === playback?.deviceId
+      );
+      if (isOwnerSocket(mappedSocket)) return mappedSocket;
+      const ownerSocket = [...io.sockets.sockets.values()].find(isOwnerSocket);
+      if (ownerSocket) playbackSocketByUser.set(authenticatedUserId, ownerSocket.id);
+      return ownerSocket;
+    };
+    const getConnectedPlaybackDevices = () => {
+      const devices = new Map();
+      for (const activeSocket of io.sockets.sockets.values()) {
+        const { playbackDeviceId, playbackDeviceType } = activeSocket.data;
+        if (
+          activeSocket.data.userId !== authenticatedUserId
+          || typeof playbackDeviceId !== 'string'
+          || !playbackDeviceId
+        ) continue;
+        devices.set(playbackDeviceId, {
+          deviceId: playbackDeviceId,
+          deviceType: ['mobile', 'desktop'].includes(playbackDeviceType) ? playbackDeviceType : 'unknown'
+        });
+      }
+      return [...devices.values()];
+    };
+    const emitPlaybackDevicesChanged = () => {
+      io.to(`user:${authenticatedUserId}`).emit('playbackDevicesChanged', {
+        userId: authenticatedUserId,
+        devices: getConnectedPlaybackDevices()
+      });
+    };
+    const publishPlaybackState = (playback, friendIds = socket.data.friendIds || []) => {
+      playbackStateByUser.set(authenticatedUserId, playback);
+      io.to(`user:${authenticatedUserId}`).emit('playbackOwnerChanged', {
+        userId: authenticatedUserId,
+        playback
+      });
+      for (const friendId of friendIds) {
+        io.to(`user:${friendId}`).emit('playbackStatusChanged', {
+          userId: authenticatedUserId,
+          playback
+        });
+      }
+    };
     const onlinePresencePromise = User.findByIdAndUpdate(
       authenticatedUserId,
       { isOnline: true, lastActive: new Date() },
@@ -3403,11 +3451,27 @@ if (isMainModule) {
       }
     }).catch(error => console.error('Error actualizando presencia y amigos del socket:', error));
 
-    socket.on('playbackStateRequest', async () => {
+    socket.on('playbackStateRequest', async (payload = {}) => {
       try {
-        const playback = playbackStateByUser.get(authenticatedUserId)
-          || (await User.findById(authenticatedUserId).select('lastPlayed').lean())?.lastPlayed;
+        const deviceId = payload && typeof payload === 'object' && !Array.isArray(payload)
+          ? payload.deviceId
+          : null;
+        if (typeof deviceId === 'string' && deviceId.trim() && deviceId.length <= 128) {
+          socket.data.playbackDeviceId = deviceId.trim();
+          socket.data.playbackDeviceType = payload && ['mobile', 'desktop'].includes(payload.deviceType)
+            ? payload.deviceType
+            : 'unknown';
+          emitPlaybackDevicesChanged();
+        }
+        let playback = playbackStateByUser.get(authenticatedUserId);
+        if (!playback) {
+          playback = (await User.findById(authenticatedUserId).select('lastPlayed').lean())?.lastPlayed;
+          if (playback?.songId) playbackStateByUser.set(authenticatedUserId, playback);
+        }
         if (playback?.songId) {
+          if (playback.deviceId && socket.data.playbackDeviceId === playback.deviceId) {
+            playbackSocketByUser.set(authenticatedUserId, socket.id);
+          }
           socket.emit('playbackOwnerChanged', {
             userId: authenticatedUserId,
             playback
@@ -3443,11 +3507,10 @@ if (isMainModule) {
         acknowledgeResult({ success: true, local: true });
         return;
       }
-      const ownerSocket = io.sockets.sockets.get(playbackSocketByUser.get(authenticatedUserId));
+      const ownerSocket = getPlaybackOwnerSocket(playback);
       if (
         !ownerSocket
-        || ownerSocket.data.userId !== authenticatedUserId
-        || ownerSocket.data.playbackDeviceId !== playback.deviceId
+        || !ownerSocket.connected
       ) {
         acknowledgeResult({ success: false, error: 'El dispositivo que reproduce no está conectado.' });
         return;
@@ -3493,11 +3556,10 @@ if (isMainModule) {
         acknowledgeResult({ success: true, alreadyOwner: true, playback });
         return;
       }
-      const ownerSocket = io.sockets.sockets.get(playbackSocketByUser.get(authenticatedUserId));
+      const ownerSocket = getPlaybackOwnerSocket(playback);
       if (
         !ownerSocket
-        || ownerSocket.data.userId !== authenticatedUserId
-        || ownerSocket.data.playbackDeviceId !== playback.deviceId
+        || !ownerSocket.connected
       ) {
         acknowledgeResult({ success: false, error: 'El dispositivo que reproduce no está conectado; no se puede confirmar la transferencia.' });
         return;
@@ -3543,6 +3605,110 @@ if (isMainModule) {
             }
           }
           acknowledgeResult({ success: true, playback: pausedPlayback, resumeAfterTransfer: true });
+        }
+      );
+    });
+
+    socket.on('playbackTransferRequest', async (payload = {}, acknowledge = () => {}) => {
+      const acknowledgeResult = typeof acknowledge === 'function' ? acknowledge : () => {};
+      const targetDeviceId = payload && typeof payload === 'object' && !Array.isArray(payload)
+        ? payload.targetDeviceId
+        : null;
+      if (typeof targetDeviceId !== 'string' || !targetDeviceId.trim() || targetDeviceId.length > 128) {
+        acknowledgeResult({ success: false, error: 'No se pudo identificar el dispositivo de destino.' });
+        return;
+      }
+      const normalizedTargetDeviceId = targetDeviceId.trim();
+      const targetSocket = [...io.sockets.sockets.values()].find(activeSocket => (
+        activeSocket.data.userId === authenticatedUserId
+        && activeSocket.data.playbackDeviceId === normalizedTargetDeviceId
+      ));
+      if (!targetSocket) {
+        acknowledgeResult({ success: false, error: 'Ese dispositivo ya no está conectado.' });
+        emitPlaybackDevicesChanged();
+        return;
+      }
+
+      let playback = playbackStateByUser.get(authenticatedUserId);
+      if (!playback) {
+        try {
+          playback = (await User.findById(authenticatedUserId).select('lastPlayed').lean())?.lastPlayed;
+          if (playback?.songId) playbackStateByUser.set(authenticatedUserId, playback);
+        } catch (error) {
+          console.error('No se pudo recuperar el estado de reproducción para transferirlo.', error);
+          acknowledgeResult({ success: false, error: 'No se pudo consultar la sesión de reproducción.' });
+          return;
+        }
+      }
+      if (!playback?.songId || !playback.deviceId) {
+        acknowledgeResult({ success: false, error: 'No hay una canción activa para transferir.' });
+        return;
+      }
+      if (playback.deviceId === normalizedTargetDeviceId && playback.isPlaying !== false) {
+        acknowledgeResult({ success: true, alreadyOwner: true });
+        return;
+      }
+
+      const sendToTarget = (pausedPlayback, resumeAfterTransfer) => {
+        targetSocket.timeout(25000).emit(
+          'playbackTransferCommand',
+          { playback: pausedPlayback, resumeAfterTransfer },
+          (deliveryError, result) => {
+            if (deliveryError) {
+              acknowledgeResult({ success: false, error: 'El dispositivo de destino no respondió a la transferencia.' });
+              return;
+            }
+            acknowledgeResult(result?.success
+              ? { success: true }
+              : { success: false, error: result?.error || 'No se pudo iniciar la reproducción en el dispositivo de destino.' });
+          }
+        );
+      };
+      const transferPausedPlayback = (pausedPlayback, resumeAfterTransfer) => {
+        const normalizedPlayback = {
+          ...pausedPlayback,
+          isPlaying: false,
+          resumeAfterTransfer: Boolean(resumeAfterTransfer),
+          updatedAt: new Date().toISOString()
+        };
+        publishPlaybackState(normalizedPlayback);
+        void User.findByIdAndUpdate(authenticatedUserId, { $set: { lastPlayed: normalizedPlayback } })
+          .catch(error => console.error('No se pudo guardar la reproducción pausada antes de transferirla.', error));
+        sendToTarget(normalizedPlayback, Boolean(resumeAfterTransfer));
+      };
+
+      const ownerSocket = getPlaybackOwnerSocket(playback);
+      if (playback.isPlaying === false) {
+        sendToTarget(playback, playback.resumeAfterTransfer === true);
+        return;
+      }
+      if (!ownerSocket?.connected) {
+        transferPausedPlayback(playback, true);
+        void User.findByIdAndUpdate(authenticatedUserId, { $set: { lastPlayed: {
+          ...playback,
+          isPlaying: false,
+          resumeAfterTransfer: true
+        } } }).catch(error => console.error('No se pudo guardar la reproducción pausada tras una desconexión.', error));
+        return;
+      }
+
+      ownerSocket.timeout(8000).emit(
+        'playbackHandoffRequest',
+        { requesterDeviceId: normalizedTargetDeviceId },
+        (handoffError, result) => {
+          if (handoffError || !result?.success || result.playback?.isPlaying !== false) {
+            acknowledgeResult({
+              success: false,
+              error: handoffError
+                ? 'El dispositivo que reproduce no confirmó la pausa.'
+                : result?.error || 'No se pudo confirmar la pausa del dispositivo actual.'
+            });
+            return;
+          }
+          transferPausedPlayback(
+            { ...playback, ...result.playback, deviceId: playback.deviceId, deviceType: playback.deviceType },
+            true
+          );
         }
       );
     });
@@ -3811,16 +3977,58 @@ if (isMainModule) {
       clearTimeout(tokenExpiryTimer);
       const normalizedId = socket.data.userId;
       if (!normalizedId) return;
-      if (playbackSocketByUser.get(normalizedId) === socket.id) {
-        const playback = playbackStateByUser.get(normalizedId);
+      const playback = playbackStateByUser.get(normalizedId);
+      const wasOwnerSocket = playbackSocketByUser.get(normalizedId) === socket.id;
+      const wasOwnerDevice = Boolean(
+        playback?.deviceId
+        && socket.data.playbackDeviceId === playback.deviceId
+      );
+      if (wasOwnerSocket || wasOwnerDevice) {
         const replacementSocket = [...io.sockets.sockets.values()].find(activeSocket => (
           activeSocket.id !== socket.id
           && activeSocket.data.userId === normalizedId
           && activeSocket.data.playbackDeviceId === playback?.deviceId
         ));
-        if (replacementSocket) playbackSocketByUser.set(normalizedId, replacementSocket.id);
-        else playbackSocketByUser.delete(normalizedId);
+        if (replacementSocket) {
+          playbackSocketByUser.set(normalizedId, replacementSocket.id);
+        } else {
+          playbackSocketByUser.delete(normalizedId);
+          if (wasOwnerDevice && playback?.isPlaying !== false) {
+            const duration = Math.max(0, Number(playback.duration) || 0);
+            const baseTime = Math.max(0, Number(playback.currentTime) || 0);
+            const lastUpdate = Date.parse(playback.updatedAt || '');
+            const elapsed = Number.isFinite(lastUpdate)
+              ? Math.max(0, (Date.now() - lastUpdate) / 1000)
+              : 0;
+            const currentTime = duration > 0
+              ? Math.min(duration, baseTime + elapsed)
+              : baseTime + elapsed;
+            const pausedPlayback = {
+              ...playback,
+              currentTime,
+              isPlaying: false,
+              resumeAfterTransfer: true,
+              updatedAt: new Date().toISOString()
+            };
+            let friendIds = socket.data.friendIds;
+            if (!Array.isArray(friendIds)) {
+              try {
+                friendIds = await refreshFriendIds();
+              } catch (error) {
+                console.error('No se pudieron consultar los amigos al cerrar el dispositivo.', error);
+                friendIds = [];
+              }
+            }
+            publishPlaybackState(pausedPlayback, friendIds);
+            try {
+              await User.findByIdAndUpdate(normalizedId, { $set: { lastPlayed: pausedPlayback } });
+            } catch (error) {
+              console.error('No se pudo guardar la reproducción pausada tras cerrar el dispositivo.', error);
+            }
+          }
+        }
       }
+      emitPlaybackDevicesChanged();
       const queueSessionId = listenTogetherQueueSessionByUser.get(normalizedId);
       const queueSession = queueSessionId ? listenTogetherQueueSessions.get(queueSessionId) : null;
       if (

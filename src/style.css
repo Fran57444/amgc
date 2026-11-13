@@ -302,14 +302,26 @@ input, textarea, select {
 .shared-playback-copy strong { color: #ffbf78; font-size: .68rem; }
 .shared-playback-title-row { display: flex; min-width: 0; align-items: center; gap: 4px; }
 .shared-playback-title-row > span { min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.shared-playback-device-icon { display: block; width: 16px; height: 16px; flex: 0 0 16px; color: #ffbf78; }
-.shared-playback-device-icon[hidden] { display: none; }
+.playback-device-picker-trigger { display: inline-flex; width: 24px; height: 24px; flex: 0 0 24px; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: 4px; background: transparent; color: #ffbf78; cursor: pointer; }
+.playback-device-picker-trigger:hover, .playback-device-picker-trigger[aria-expanded="true"] { background: rgba(255,191,120,.14); }
+.playback-device-picker-trigger svg { width: 17px; height: 17px; }
+.playback-device-picker-trigger svg[hidden] { display: none; }
+.shared-playback-device-trigger { margin-left: 2px; }
+.playback-device-picker { position: absolute; z-index: 20; bottom: calc(100% + 10px); left: 0; width: 230px; max-height: 300px; overflow-y: auto; padding: 11px; border: 1px solid rgba(255,255,255,.16); border-radius: 8px; background: #171717; box-shadow: 0 10px 32px rgba(0,0,0,.5); }
+.playback-device-picker[hidden] { display: none; }
+.playback-device-picker > strong { display: block; margin: 0 4px 8px; color: rgba(255,255,255,.68); font-size: .68rem; letter-spacing: .08em; text-transform: uppercase; }
+#playback-device-list { display: grid; gap: 4px; }
+.playback-device-option { display: flex; min-width: 0; align-items: center; gap: 9px; padding: 8px; border: 0; border-radius: 5px; background: transparent; color: #fff; text-align: left; cursor: pointer; }
+.playback-device-option:hover:not(:disabled) { background: rgba(255,255,255,.09); }
+.playback-device-option:disabled { opacity: .62; cursor: default; }
+.playback-device-option-icon { display: inline-flex; width: 18px; height: 18px; flex: 0 0 18px; color: #ffbf78; }
+.playback-device-option-icon svg { width: 100%; height: 100%; }
+.playback-device-option-name { min-width: 0; flex: 1; overflow: hidden; font-size: .78rem; text-overflow: ellipsis; white-space: nowrap; }
+.playback-device-option-status { color: rgba(255,255,255,.5); font-size: .62rem; }
 .shared-playback-copy > span:not(.shared-playback-progress), .shared-playback-copy small { overflow: hidden; color: #fff; font-size: .68rem; text-overflow: ellipsis; white-space: nowrap; }
 .shared-playback-copy small { color: rgba(255,255,255,.65); }
 .shared-playback-progress { display: block; width: min(100%, 220px); height: 3px; overflow: hidden; border-radius: 3px; background: rgba(255,255,255,.18); }
 .shared-playback-progress span { display: block; width: 0; height: 100%; background: #ffbf78; }
-.shared-playback-takeover { flex: 0 0 auto; padding: 7px 10px; border: 1px solid rgba(255,191,120,.5); border-radius: 4px; background: rgba(255,191,120,.12); color: #ffbf78; font: inherit; font-size: .68rem; cursor: pointer; }
-.shared-playback-takeover:disabled { opacity: .55; cursor: wait; }
 #bottom-bar.is-remote-playback #bottom-bar-cover,
 #bottom-bar.is-remote-playback .track-title-container,
 #bottom-bar.is-remote-playback #track-artist,
