@@ -164,6 +164,7 @@ const userSchema = new mongoose.Schema({
     transferId: String,
     transferTargetDeviceId: String,
     transferPending: Boolean,
+    requestedSongId: String,
     deviceId: String,
     deviceType: String,
     sourceUpdatedAt: Number,
@@ -178,6 +179,8 @@ const userSchema = new mongoose.Schema({
     color: String,
     playedAt: Date
   }],
+  accountQueue: { type: [String], default: [] },
+  accountQueueRevision: { type: Number, default: 0 },
   savedPlaylists: [{ type: String }],
   settings: {
     seekSeconds: { type: Number, default: 5 },
@@ -688,6 +691,8 @@ const playbackTransferTargetByUser = new Map();
 const playbackTransferInProgressByUser = new Map();
 const accountQueueByUser = new Map();
 const accountQueueUpdateSequenceByUser = new Map();
+const accountQueueLoadPromisesByUser = new Map();
+const accountQueueMutationInProgressByUser = new Set();
 const listenTogetherQueueSessions = new Map();
 const listenTogetherQueueSessionByUser = new Map();
 
@@ -706,6 +711,52 @@ function normalizeSharedPlaybackCover(cover) {
   if (!normalized || normalized === '/img/vinculo.png' || normalized.length > 4096) return '';
   if (/^(?:https?:\/\/|\/)/i.test(normalized)) return normalized;
   return /^[a-z][a-z\d+.-]*:/i.test(normalized) ? '' : normalized;
+}
+
+async function getAccountQueueSnapshot(userId) {
+  const cachedQueue = accountQueueByUser.get(userId);
+  if (cachedQueue) return cachedQueue;
+
+  let loadPromise = accountQueueLoadPromisesByUser.get(userId);
+  if (!loadPromise) {
+    loadPromise = User.findById(userId)
+      .select('accountQueue accountQueueRevision')
+      .lean()
+      .then(user => {
+        const currentQueue = accountQueueByUser.get(userId);
+        if (currentQueue) return currentQueue;
+        const queue = {
+          revision: Math.max(0, Number(user?.accountQueueRevision) || 0),
+          songIds: Array.isArray(user?.accountQueue)
+            ? user.accountQueue.map(String)
+            : []
+        };
+        accountQueueByUser.set(userId, queue);
+        return queue;
+      })
+      .finally(() => {
+        if (accountQueueLoadPromisesByUser.get(userId) === loadPromise) {
+          accountQueueLoadPromisesByUser.delete(userId);
+        }
+      });
+    accountQueueLoadPromisesByUser.set(userId, loadPromise);
+  }
+  return loadPromise;
+}
+
+async function runAccountQueueMutation(userId, operation) {
+  if (accountQueueMutationInProgressByUser.has(userId)) {
+    return { success: false, error: 'La cola se está actualizando en otro dispositivo. Vuelve a intentarlo.' };
+  }
+  accountQueueMutationInProgressByUser.add(userId);
+  try {
+    return await operation();
+  } catch (error) {
+    console.error('No se pudo completar una operación de cola de la cuenta.', error);
+    return { success: false, error: 'No se pudo actualizar la cola de la cuenta.' };
+  } finally {
+    accountQueueMutationInProgressByUser.delete(userId);
+  }
 }
 
 function inferPlaybackDeviceName(userAgent, deviceType) {
@@ -4054,7 +4105,8 @@ if (isMainModule) {
             socket.emit('playbackTransferCommand', {
               playback,
               transferId: playback.transferId,
-              resumeAfterTransfer: playback.resumeAfterTransfer === true
+              resumeAfterTransfer: playback.resumeAfterTransfer === true,
+              requestedSongId: playback.requestedSongId || ''
             });
           }
         }
@@ -4116,7 +4168,7 @@ if (isMainModule) {
       const command = { action };
       if (action === 'seek') command.position = Number(position);
       if (action === 'playTrack') command.songId = songId.trim();
-      ownerSocket.timeout(7000).emit('playbackControlCommand', command, (timeoutError, result) => {
+      ownerSocket.timeout(5000).emit('playbackControlCommand', command, (timeoutError, result) => {
         if (timeoutError) {
           acknowledgeResult({
             success: false,
@@ -4131,19 +4183,21 @@ if (isMainModule) {
       });
     });
 
-    socket.on('accountQueueRequest', (acknowledge = () => {}) => {
-      const queue = accountQueueByUser.get(authenticatedUserId);
-      if (queue) {
-        socket.emit('accountQueueSnapshot', queue);
+    socket.on('accountQueueRequest', async (acknowledge = () => {}) => {
+      try {
+        const queue = await getAccountQueueSnapshot(authenticatedUserId);
+        const hasSavedQueue = queue.revision > 0 || queue.songIds.length > 0;
+        if (hasSavedQueue) socket.emit('accountQueueSnapshot', queue);
+        const playback = playbackStateByUser.get(authenticatedUserId);
+        const ownerSocket = playback?.deviceId ? getPlaybackOwnerSocket(playback) : null;
+        if (ownerSocket) ownerSocket.emit('accountQueuePublishRequest');
+        acknowledge(hasSavedQueue || ownerSocket
+          ? { success: true }
+          : { success: false, error: 'No hay una reproducción activa en esta cuenta.' });
+      } catch (error) {
+        console.error('No se pudo recuperar la cola de la cuenta.', error);
+        acknowledge({ success: false, error: 'No se pudo cargar la cola de la cuenta.' });
       }
-      const playback = playbackStateByUser.get(authenticatedUserId);
-      const ownerSocket = playback?.deviceId ? getPlaybackOwnerSocket(playback) : null;
-      if (ownerSocket) ownerSocket.emit('accountQueuePublishRequest');
-      if (queue || ownerSocket) {
-        acknowledge({ success: true });
-        return;
-      }
-      acknowledge({ success: false, error: 'No hay una reproducción activa en esta cuenta.' });
     });
 
     socket.on('accountQueueSnapshot', async ({ songIds } = {}, acknowledge = () => {}) => {
@@ -4167,6 +4221,7 @@ if (isMainModule) {
       const updateSequence = (accountQueueUpdateSequenceByUser.get(authenticatedUserId) || 0) + 1;
       accountQueueUpdateSequenceByUser.set(authenticatedUserId, updateSequence);
       try {
+        const previousQueue = await getAccountQueueSnapshot(authenticatedUserId);
         const normalizedSongIds = songIds.map(id => String(id).toLowerCase());
         const existingSongIds = new Set((await Song.find({ _id: { $in: normalizedSongIds } })
           .select('_id')
@@ -4180,9 +4235,41 @@ if (isMainModule) {
           return;
         }
         const queue = {
-          revision: (accountQueueByUser.get(authenticatedUserId)?.revision || 0) + 1,
+          revision: previousQueue.revision + 1,
           songIds: normalizedSongIds
         };
+        const revisionFilter = previousQueue.revision === 0
+          ? {
+            $or: [
+              { accountQueueRevision: 0 },
+              { accountQueueRevision: { $exists: false } }
+            ]
+          }
+          : { accountQueueRevision: previousQueue.revision };
+        const saved = await User.updateOne(
+          { _id: authenticatedUserId, ...revisionFilter },
+          {
+            $set: {
+              accountQueue: normalizedSongIds,
+              accountQueueRevision: queue.revision
+            }
+          }
+        );
+        if (!saved.matchedCount) {
+          const persistedQueue = await User.findById(authenticatedUserId)
+            .select('accountQueue accountQueueRevision')
+            .lean();
+          if (persistedQueue) {
+            accountQueueByUser.set(authenticatedUserId, {
+              revision: Math.max(0, Number(persistedQueue.accountQueueRevision) || 0),
+              songIds: Array.isArray(persistedQueue.accountQueue)
+                ? persistedQueue.accountQueue.map(String)
+                : []
+            });
+          }
+          acknowledge({ success: false, error: 'La cola cambió. Vuelve a sincronizarla.' });
+          return;
+        }
         accountQueueByUser.set(authenticatedUserId, queue);
         io.to(`user:${authenticatedUserId}`).emit('accountQueueSnapshot', queue);
         acknowledge({ success: true, revision: queue.revision });
@@ -4192,118 +4279,200 @@ if (isMainModule) {
       }
     });
 
-    socket.on('accountQueueAddRequest', async ({ songId } = {}, acknowledge = () => {}) => {
-      const normalizedSongId = String(songId || '');
-      const playback = playbackStateByUser.get(authenticatedUserId);
-      const ownerSocket = playback?.deviceId ? getPlaybackOwnerSocket(playback) : null;
-      if (!isValidObjectId(normalizedSongId)) {
-        acknowledge({ success: false, error: 'La canción solicitada no es válida.' });
-        return;
-      }
-      if (!ownerSocket) {
-        acknowledge({ success: false, error: 'El dispositivo que reproduce no está conectado.' });
-        return;
-      }
-      try {
-        if (!(await Song.exists({ _id: normalizedSongId }))) {
-          acknowledge({ success: false, error: 'La canción ya no está disponible.' });
-          return;
+    socket.on('accountQueueAdvance', async ({ revision, count } = {}, acknowledge = () => {}) => {
+      const result = await runAccountQueueMutation(authenticatedUserId, async () => {
+        const playback = playbackStateByUser.get(authenticatedUserId);
+        if (
+          !playback?.deviceId
+          || playback.deviceId !== socket.data.playbackDeviceId
+          || playbackSocketByUser.get(authenticatedUserId) !== socket.id
+        ) {
+          return { success: false, error: 'Solo el dispositivo que reproduce puede avanzar la cola.' };
         }
-        ownerSocket.timeout(5000).emit(
-          'accountQueueAddCommand',
-          { songId: normalizedSongId },
-          (deliveryError, response) => {
-            if (deliveryError) {
-              acknowledge({ success: false, error: 'No se pudo actualizar la cola en el otro dispositivo.' });
-              return;
-            }
-            acknowledge(response || { success: false, error: 'No se pudo añadir la canción a la cola.' });
+        const queue = await getAccountQueueSnapshot(authenticatedUserId);
+        if (
+          queue.revision !== revision
+          || !Number.isInteger(count)
+          || count < 1
+          || count > queue.songIds.length
+        ) {
+          return { success: false, error: 'La cola cambió. Vuelve a sincronizarla.' };
+        }
+        const nextQueue = {
+          revision: queue.revision + 1,
+          songIds: queue.songIds.slice(count)
+        };
+        const revisionFilter = queue.revision === 0
+          ? {
+            $or: [
+              { accountQueueRevision: 0 },
+              { accountQueueRevision: { $exists: false } }
+            ]
           }
-        );
-      } catch (error) {
-        console.error('No se pudo añadir una canción a la cola de la cuenta.', error);
-        acknowledge({ success: false, error: 'No se pudo añadir la canción a la cola.' });
-      }
+          : { accountQueueRevision: queue.revision };
+        try {
+          const saved = await User.updateOne(
+            { _id: authenticatedUserId, ...revisionFilter },
+            {
+              $set: {
+                accountQueue: nextQueue.songIds,
+                accountQueueRevision: nextQueue.revision
+              }
+            }
+          );
+          if (!saved.matchedCount) {
+            const persistedQueue = await User.findById(authenticatedUserId)
+              .select('accountQueue accountQueueRevision')
+              .lean();
+            if (persistedQueue) {
+              accountQueueByUser.set(authenticatedUserId, {
+                revision: Math.max(0, Number(persistedQueue.accountQueueRevision) || 0),
+                songIds: Array.isArray(persistedQueue.accountQueue)
+                  ? persistedQueue.accountQueue.map(String)
+                  : []
+              });
+            }
+            return { success: false, error: 'La cola cambió. Vuelve a sincronizarla.' };
+          }
+          accountQueueByUser.set(authenticatedUserId, nextQueue);
+          io.to(`user:${authenticatedUserId}`).emit('accountQueueSnapshot', nextQueue);
+          return { success: true, revision: nextQueue.revision };
+        } catch (error) {
+          console.error('No se pudo avanzar la cola de la cuenta.', error);
+          return { success: false, error: 'No se pudo sincronizar la cola de la cuenta.' };
+        }
+      });
+      acknowledge(result);
+    });
+
+    socket.on('accountQueueAddRequest', async ({ songId } = {}, acknowledge = () => {}) => {
+      const result = await runAccountQueueMutation(authenticatedUserId, async () => {
+        const normalizedSongId = String(songId || '');
+        const playback = playbackStateByUser.get(authenticatedUserId);
+        const ownerSocket = playback?.deviceId ? getPlaybackOwnerSocket(playback) : null;
+        if (!isValidObjectId(normalizedSongId)) {
+          return { success: false, error: 'La canción solicitada no es válida.' };
+        }
+        if (!ownerSocket) {
+          return {
+            success: false,
+            ownerDisconnected: true,
+            error: 'El dispositivo que reproduce no está conectado.'
+          };
+        }
+        try {
+          if (!(await Song.exists({ _id: normalizedSongId }))) {
+            return { success: false, error: 'La canción ya no está disponible.' };
+          }
+          return await new Promise(resolve => {
+            ownerSocket.timeout(7000).emit(
+              'accountQueueAddCommand',
+              { songId: normalizedSongId },
+              (deliveryError, response) => resolve(deliveryError
+                ? {
+                  success: false,
+                  ownerUnresponsive: true,
+                  error: 'El dispositivo que reproduce no respondió.'
+                }
+                : response || { success: false, error: 'No se pudo añadir la canción a la cola.' })
+            );
+          });
+        } catch (error) {
+          console.error('No se pudo añadir una canción a la cola de la cuenta.', error);
+          return { success: false, error: 'No se pudo añadir la canción a la cola.' };
+        }
+      });
+      acknowledge(result);
     });
 
     socket.on('accountQueueUpdateRequest', async ({ revision, songIds } = {}, acknowledge = () => {}) => {
-      const queue = accountQueueByUser.get(authenticatedUserId);
-      if (
-        !queue
-        || queue.revision !== revision
-        || !Array.isArray(songIds)
-        || songIds.length > 5000
-        || songIds.some(id => !isValidObjectId(String(id)))
-      ) {
-        acknowledge({ success: false, error: 'La cola cambió. Vuelve a intentarlo.' });
-        return;
-      }
-      const playback = playbackStateByUser.get(authenticatedUserId);
-      const ownerSocket = playback?.deviceId ? getPlaybackOwnerSocket(playback) : null;
-      if (!ownerSocket) {
-        acknowledge({ success: false, error: 'El dispositivo que reproduce no está conectado.' });
-        return;
-      }
-      try {
-        const normalizedSongIds = songIds.map(id => String(id).toLowerCase());
-        const existingSongIds = new Set((await Song.find({ _id: { $in: normalizedSongIds } })
-          .select('_id')
-          .lean()).map(song => String(song._id)));
-        if (normalizedSongIds.some(id => !existingSongIds.has(id))) {
-          acknowledge({ success: false, error: 'La cola contiene canciones que ya no están disponibles.' });
-          return;
+      const result = await runAccountQueueMutation(authenticatedUserId, async () => {
+        const queue = await getAccountQueueSnapshot(authenticatedUserId);
+        if (
+          queue.revision !== revision
+          || !Array.isArray(songIds)
+          || songIds.length > 5000
+          || songIds.some(id => !isValidObjectId(String(id)))
+        ) {
+          return { success: false, error: 'La cola cambió. Vuelve a intentarlo.' };
         }
-        if (accountQueueByUser.get(authenticatedUserId)?.revision !== revision) {
-          acknowledge({ success: false, error: 'La cola cambió. Vuelve a intentarlo.' });
-          return;
+        const playback = playbackStateByUser.get(authenticatedUserId);
+        const ownerSocket = playback?.deviceId ? getPlaybackOwnerSocket(playback) : null;
+        if (!ownerSocket) {
+          return {
+            success: false,
+            ownerDisconnected: true,
+            error: 'El dispositivo que reproduce no está conectado.'
+          };
         }
-        ownerSocket.timeout(7000).emit(
-          'accountQueueReplaceCommand',
-          { revision, songIds: normalizedSongIds },
-          (deliveryError, response) => {
-            if (deliveryError) {
-              acknowledge({ success: false, error: 'El dispositivo que reproduce no respondió.' });
-              return;
-            }
-            acknowledge(response || { success: false, error: 'No se pudo actualizar la cola.' });
+        try {
+          const normalizedSongIds = songIds.map(id => String(id).toLowerCase());
+          const existingSongIds = new Set((await Song.find({ _id: { $in: normalizedSongIds } })
+            .select('_id')
+            .lean()).map(song => String(song._id)));
+          if (normalizedSongIds.some(id => !existingSongIds.has(id))) {
+            return { success: false, error: 'La cola contiene canciones que ya no están disponibles.' };
           }
-        );
-      } catch (error) {
-        console.error('No se pudo actualizar la cola de la cuenta.', error);
-        acknowledge({ success: false, error: 'No se pudo actualizar la cola de la cuenta.' });
-      }
+          if (accountQueueByUser.get(authenticatedUserId)?.revision !== revision) {
+            return { success: false, error: 'La cola cambió. Vuelve a intentarlo.' };
+          }
+          return await new Promise(resolve => {
+            ownerSocket.timeout(5000).emit(
+              'accountQueueReplaceCommand',
+              { revision, songIds: normalizedSongIds },
+              (deliveryError, response) => resolve(deliveryError
+                ? {
+                  success: false,
+                  ownerUnresponsive: true,
+                  error: 'El dispositivo que reproduce no respondió.'
+                }
+                : response || { success: false, error: 'No se pudo actualizar la cola.' })
+            );
+          });
+        } catch (error) {
+          console.error('No se pudo actualizar la cola de la cuenta.', error);
+          return { success: false, error: 'No se pudo actualizar la cola de la cuenta.' };
+        }
+      });
+      acknowledge(result);
     });
 
-    socket.on('accountQueuePlayRequest', ({ songId, position, revision } = {}, acknowledge = () => {}) => {
-      const queue = accountQueueByUser.get(authenticatedUserId);
-      const normalizedSongId = String(songId || '');
-      if (
-        !queue
-        || queue.revision !== revision
-        || !Number.isInteger(position)
-        || position < 0
-        || queue.songIds[position] !== normalizedSongId
-      ) {
-        acknowledge({ success: false, error: 'La cola cambió. Vuelve a seleccionar la canción.' });
-        return;
-      }
-      const playback = playbackStateByUser.get(authenticatedUserId);
-      const ownerSocket = playback?.deviceId ? getPlaybackOwnerSocket(playback) : null;
-      if (!ownerSocket) {
-        acknowledge({ success: false, error: 'El dispositivo que reproduce no está conectado.' });
-        return;
-      }
-      ownerSocket.timeout(12000).emit(
-        'accountQueuePlayCommand',
-        { songId: normalizedSongId, position, revision },
-        (deliveryError, response) => {
-          if (deliveryError) {
-            acknowledge({ success: false, error: 'El otro dispositivo no pudo reproducir la canción.' });
-            return;
-          }
-          acknowledge(response || { success: false, error: 'No se pudo reproducir la canción.' });
+    socket.on('accountQueuePlayRequest', async ({ songId, position, revision } = {}, acknowledge = () => {}) => {
+      const result = await runAccountQueueMutation(authenticatedUserId, async () => {
+        const queue = await getAccountQueueSnapshot(authenticatedUserId);
+        const normalizedSongId = String(songId || '');
+        if (
+          queue.revision !== revision
+          || !Number.isInteger(position)
+          || position < 0
+          || queue.songIds[position] !== normalizedSongId
+        ) {
+          return { success: false, error: 'La cola cambió. Vuelve a seleccionar la canción.' };
         }
-      );
+        const playback = playbackStateByUser.get(authenticatedUserId);
+        const ownerSocket = playback?.deviceId ? getPlaybackOwnerSocket(playback) : null;
+        if (!ownerSocket) {
+          return {
+            success: false,
+            ownerDisconnected: true,
+            error: 'El dispositivo que reproduce no está conectado.'
+          };
+        }
+        return new Promise(resolve => {
+          ownerSocket.timeout(5000).emit(
+            'accountQueuePlayCommand',
+            { songId: normalizedSongId, position, revision },
+            (deliveryError, response) => resolve(deliveryError
+              ? {
+                success: false,
+                ownerUnresponsive: true,
+                error: 'El dispositivo que reproduce no respondió.'
+              }
+              : response || { success: false, error: 'No se pudo reproducir la canción.' })
+          );
+        });
+      });
+      acknowledge(result);
     });
 
     socket.on('playbackTakeoverRequest', (payload = {}, acknowledge = () => {}) => {
@@ -4453,9 +4622,29 @@ if (isMainModule) {
       const targetDeviceId = payload && typeof payload === 'object' && !Array.isArray(payload)
         ? payload.targetDeviceId
         : null;
+      const requestedSongId = payload && typeof payload === 'object' && !Array.isArray(payload)
+        ? String(payload.requestedSongId || '')
+        : '';
+      const authoritative = payload?.authoritative === true;
       if (typeof targetDeviceId !== 'string' || !targetDeviceId.trim() || targetDeviceId.length > 128) {
         acknowledgeResult({ success: false, error: 'No se pudo identificar el dispositivo de destino.' });
         return;
+      }
+      if (requestedSongId && !isValidObjectId(requestedSongId)) {
+        acknowledgeResult({ success: false, error: 'La canción solicitada para transferir no es válida.' });
+        return;
+      }
+      if (requestedSongId) {
+        try {
+          if (!(await Song.exists({ _id: requestedSongId }))) {
+            acknowledgeResult({ success: false, error: 'La canción solicitada ya no está disponible.' });
+            return;
+          }
+        } catch (error) {
+          console.error('No se pudo validar la canción solicitada para transferir.', error);
+          acknowledgeResult({ success: false, error: 'No se pudo validar la canción solicitada.' });
+          return;
+        }
       }
       const normalizedTargetDeviceId = targetDeviceId.trim();
       const targetSocket = [...io.sockets.sockets.values()].find(activeSocket => (
@@ -4651,7 +4840,8 @@ if (isMainModule) {
           {
             playback: playbackStateByUser.get(authenticatedUserId),
             transferId,
-            resumeAfterTransfer: true
+            resumeAfterTransfer: true,
+            requestedSongId
           },
           (deliveryError, result) => {
             if (deliveryError) {
@@ -4689,6 +4879,7 @@ if (isMainModule) {
           transferId,
           transferTargetDeviceId: normalizedTargetDeviceId,
           transferPending: true,
+          requestedSongId,
           sourceUpdatedAt: pausedAt,
           updatedAt: new Date(pausedAt).toISOString()
         };
@@ -4696,23 +4887,26 @@ if (isMainModule) {
           deviceId: normalizedTargetDeviceId,
           transferId
         });
+        const transferFilter = previousTransferId
+          ? {
+            _id: authenticatedUserId,
+            'lastPlayed.transferPending': true,
+            'lastPlayed.transferId': previousTransferId
+          }
+          : {
+            _id: authenticatedUserId,
+            'lastPlayed.transferPending': { $ne: true },
+            'lastPlayed.deviceId': pausedPlayback.deviceId,
+            ...(!authoritative && {
+              $or: [
+                { 'lastPlayed.sourceUpdatedAt': { $exists: false } },
+                { 'lastPlayed.sourceUpdatedAt': { $lte: pausedSourceUpdatedAt } }
+              ]
+            })
+          };
         try {
           const savedIntent = await User.findOneAndUpdate(
-            previousTransferId
-              ? {
-                _id: authenticatedUserId,
-                'lastPlayed.transferPending': true,
-                'lastPlayed.transferId': previousTransferId
-              }
-              : {
-                _id: authenticatedUserId,
-                'lastPlayed.transferPending': { $ne: true },
-                'lastPlayed.deviceId': pausedPlayback.deviceId,
-                $or: [
-                  { 'lastPlayed.sourceUpdatedAt': { $exists: false } },
-                  { 'lastPlayed.sourceUpdatedAt': { $lte: pausedSourceUpdatedAt } }
-                ]
-              },
+            transferFilter,
             { $set: { lastPlayed: transferIntent } },
             { returnDocument: 'after' }
           ).select('_id').lean();
@@ -4730,7 +4924,7 @@ if (isMainModule) {
       };
 
       const ownerSocket = getPlaybackOwnerSocket(playback);
-      if (playback.isPlaying === false) {
+      if (authoritative || playback.isPlaying === false) {
         await transferPausedPlayback(playback);
         return;
       }

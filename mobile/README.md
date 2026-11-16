@@ -1,0 +1,43 @@
+# AMGC
+
+Interfaz móvil de uso personal que comparte la API, las cuentas, las canciones y las playlists existentes.
+
+## Probar en la red local
+
+1. Desde la raíz del repositorio, ejecuta:
+
+   ```powershell
+   npm.cmd exec -- vite mobile --config vite.config.js --host 0.0.0.0 --port 5164
+   ```
+
+2. En el teléfono conectado a la misma red Wi-Fi, abre `http://IP-DEL-SERVIDOR:5164`. La app se conecta a Render (`https://mmamgc.onrender.com/api`); no necesita levantar el backend local.
+
+Para instalarla en la pantalla de inicio, el navegador requiere HTTPS; en la red local, usa un túnel HTTPS privado o aloja esta carpeta en un origen HTTPS de uso personal.
+
+Para generar una carpeta estática de publicación, desde la raíz ejecuta `npm.cmd exec -- vite build mobile --config vite.config.js`; publica el contenido de `mobile/dist`.
+
+## APK de Android
+
+El proyecto usa Capacitor. `npm run android:sync` construye la interfaz móvil y la copia al proyecto nativo; `npm run android:open` abre Android Studio, `npm run android:run` instala la app en un dispositivo o emulador conectado y `npm run android:build` genera `android/app/build/outputs/apk/debug/app-debug.apk`. La primera compilación requiere Android Studio, Android SDK y un JDK compatible configurado en `JAVA_HOME`; Java 8 no es compatible. El APK de este proyecto se verificó con JDK 21.
+
+La notificación APK es nativa: al reproducir, un servicio Android en primer plano publica la portada de la canción y controles de aleatorio, anterior, reproducir/pausar y siguiente. La portada se descarga fuera del hilo principal, se limita a 512 px y se reintenta ante fallos transitorios. Los controles se reenvían al reproductor móvil. En Android 13 o posterior, si se deniega el permiso, debe habilitarse desde los ajustes del sistema. Comprueba reproducción con pantalla bloqueada y en segundo plano en un dispositivo real, ya que el sistema puede variar el comportamiento de audio de WebView según el fabricante.
+
+## Conexión
+
+El cliente usa `https://mmamgc.onrender.com/api` en desarrollo, APK y publicación HTTPS. La URL es fija y no se configura desde la app.
+
+## Alcance
+
+Incluye inicio de sesión, catálogo, búsqueda, perfiles personales y de amigos, cambio de foto de perfil, gestión de amistades, estadísticas y progreso de reproducción en tiempo real, indicadores de mensajes no leídos, chat con respuesta a invitaciones de playlists y aviso de audio a amigos, sugerencias de canciones y playlists (crear, editar, borrar, guardar, compartir con amigos, administrar integrantes y organizar canciones). Las listas de canciones, las pistas de playlists y los Me gusta de Spotify muestran todos los elementos ya cargados; las imágenes se solicitan de forma diferida y la búsqueda se agrupa durante la escritura. Si Spotify está configurado en el servidor, permite conectar la cuenta, revisar los Me gusta por páginas con «Cargar más canciones» e importar canciones seleccionadas como sugerencias, marcando las que ya están en AMGC. Arrastra una canción hacia la derecha para añadirla a «A continuación»; usa el asa de arrastre para reordenar canciones en playlists y en la cola. La cola separa la secuencia general/de playlist de «A continuación», admite reproducción aleatoria y se sincroniza entre las instancias conectadas de la misma cuenta. Mientras un dispositivo reproduce, los demás muestran su cola y pueden añadir canciones o pedir que reproduzca una canción de esa cola. Escritorio y móvil comparten la actividad y los controles de reproducción: mientras otro dispositivo reproduce, se puede pausar, avanzar, retroceder, buscar canciones y cambiar la posición desde esta app. El icono de dispositivo abre el selector de dispositivos conectados, incluido «Este equipo», y permite transferir la sesión; si se cierra el dispositivo que reproducía, la sesión queda pausada para poder recuperarla desde otro dispositivo. Los amigos ven el progreso e identifican el dispositivo de origen con un icono. Estas funciones requieren conexión y Socket.IO activo. La última canción y su posición se restauran pausadas. Inicio conserva el símbolo giratorio y la transición de letras resaltadas; las secciones se abren desde el panel lateral y las playlists se seleccionan directamente desde allí.
+
+Al cambiar una canción desde cualquiera de los clientes, el anfitrión conectado recibe primero la orden y la aplica si confirma dentro de 5 segundos. Si se desconecta o no responde, el cliente solicitante inicia la reproducción local cuando tiene el audio disponible y sincroniza la transferencia al recuperar conexión; la misma regla funciona en ambos sentidos, incluida una PC anfitriona. Escritorio también conserva la instantánea de la cola de la cuenta y reintenta sincronizar cambios pendientes al reconectar.
+
+El permiso de notificaciones no se solicita al abrir la app: se pide al activar la notificación desde Ajustes. En Android se muestran los controles multimedia nativos; en la versión web/PWA, se usa la notificación del navegador. El control de volumen acepta porcentajes decimales escritos manualmente y conserva el volumen guardado hasta el máximo configurado.
+
+## Diferencias respecto al escritorio
+
+La app móvil conserva las funciones de escucha, playlists, perfiles, chat y cola, pero no incluye el panel de administración de cuentas ni el editor administrativo de canciones y asignaciones de color de letras. Discord Rich Presence y la descarga directa de MP3 a una carpeta local dependen de integraciones de escritorio y tampoco están disponibles en Android. En Android, una canción de Drive empieza a reproducirse por streaming directo sin esperar la descarga completa; si la conexión se interrumpe, la app intenta continuar desde una copia offline disponible. Sin esa copia, la canción no se puede reproducir sin conexión.
+
+Los ajustes de salto, volumen máximo y frases se guardan en la configuración compartida de la cuenta. En Android, las imágenes se descargan bajo demanda directamente desde Google Drive y se reutilizan desde el almacenamiento local: las filas usan miniaturas ligeras y el reproductor, el detalle de playlist y las notificaciones solicitan una variante de hasta 1000 px; la notificación usa primero la carátula local disponible. El modo offline guarda la variante grande de las carátulas y playlists, además de avatares ligeros, la biblioteca, las playlists de perfiles, la lista de amigos y los archivos de audio disponibles. Las descargas offline se reanudan al recuperar conexión. La última instantánea de la cola compartida también se conserva para poder consultarla y editarla tras reiniciar sin conexión; los cambios pendientes se guardan localmente y se reenvían usando la revisión más reciente del servidor, con reintentos espaciados si el anfitrión no responde. Editar la cola no transfiere el control: al seleccionar una canción, el teléfono intenta primero cambiarla en el anfitrión conectado; si este está desconectado o no confirma en 5 segundos, el teléfono inicia la reproducción local y sincroniza el traspaso en segundo plano. Sin una copia offline de audio, la reproducción local no puede continuar sin internet. El chat y la reproducción compartida entre amigos requieren conexión y Socket.IO activo. Las URL de Google Drive, las rutas antiguas de medios y los MP3 locales se resuelven usando el servidor de API configurado.
+
+La portada y los recursos de la app pueden quedar en caché; el audio descargado puede reproducirse sin conexión.
