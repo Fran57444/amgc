@@ -4438,41 +4438,46 @@ if (isMainModule) {
     });
 
     socket.on('accountQueuePlayRequest', async ({ songId, position, revision } = {}, acknowledge = () => {}) => {
-      const result = await runAccountQueueMutation(authenticatedUserId, async () => {
+      try {
         const queue = await getAccountQueueSnapshot(authenticatedUserId);
         const normalizedSongId = String(songId || '');
-        if (
-          queue.revision !== revision
-          || !Number.isInteger(position)
-          || position < 0
-          || queue.songIds[position] !== normalizedSongId
-        ) {
-          return { success: false, error: 'La cola cambió. Vuelve a seleccionar la canción.' };
+        if (!isValidObjectId(normalizedSongId)) {
+          acknowledge({ success: false, error: 'La canción solicitada no es válida.' });
+          return;
         }
         const playback = playbackStateByUser.get(authenticatedUserId);
         const ownerSocket = playback?.deviceId ? getPlaybackOwnerSocket(playback) : null;
         if (!ownerSocket) {
-          return {
+          acknowledge({
             success: false,
             ownerDisconnected: true,
             error: 'El dispositivo que reproduce no está conectado.'
-          };
+          });
+          return;
         }
-        return new Promise(resolve => {
-          ownerSocket.timeout(5000).emit(
-            'accountQueuePlayCommand',
-            { songId: normalizedSongId, position, revision },
-            (deliveryError, response) => resolve(deliveryError
+        const currentPosition = queue.songIds.indexOf(normalizedSongId);
+        ownerSocket.timeout(5000).emit(
+          'accountQueuePlayCommand',
+          {
+            songId: normalizedSongId,
+            position: currentPosition >= 0 ? currentPosition : position,
+            revision: queue.revision,
+            requestedRevision: revision
+          },
+          (deliveryError, response) => {
+            acknowledge(deliveryError
               ? {
                 success: false,
                 ownerUnresponsive: true,
                 error: 'El dispositivo que reproduce no respondió.'
               }
-              : response || { success: false, error: 'No se pudo reproducir la canción.' })
-          );
-        });
-      });
-      acknowledge(result);
+              : response || { success: false, error: 'No se pudo reproducir la canción.' });
+          }
+        );
+      } catch (error) {
+        console.error('No se pudo solicitar la reproducción desde la cola de la cuenta.', error);
+        acknowledge({ success: false, error: 'No se pudo solicitar la reproducción de la canción.' });
+      }
     });
 
     socket.on('playbackTakeoverRequest', (payload = {}, acknowledge = () => {}) => {

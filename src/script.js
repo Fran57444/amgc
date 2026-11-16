@@ -4280,39 +4280,38 @@ export function initMusicPlayer() {
             }
             acknowledge({ success: true, revision: accountQueueRevision });
         });
-        socket.off('accountQueuePlayCommand').on('accountQueuePlayCommand', async ({ songId, position, revision } = {}, acknowledge = () => {}) => {
+        socket.off('accountQueuePlayCommand').on('accountQueuePlayCommand', async ({ songId } = {}, acknowledge = () => {}) => {
             if (getRemotePlaybackSession() || listeningTogetherUserId) {
                 acknowledge({ success: false, error: 'La reproducción cambió de dispositivo.' });
                 return;
             }
+            if (sharedDevicePlayback?.deviceId === playbackDeviceId && sharedDevicePlayback.transferPending === true) {
+                acknowledge({
+                    success: false,
+                    ownerUnresponsive: true,
+                    error: 'La reproducción se está transfiriendo a otro dispositivo.'
+                });
+                return;
+            }
+            const requestedSongId = String(songId || '');
             const sourceIndices = isShuffle ? [...unplayedIndices] : getSequentialQueueIndices();
             const explicitQueueLength = customQueue.length;
             const queuedSongIds = [
                 ...customQueue.map(track => String(track?._id || track?.id || '')).filter(Boolean),
                 ...sourceIndices.map(index => String(playlist[index]?._id || playlist[index]?.id || '')).filter(Boolean)
             ];
-            if (
-                revision !== accountQueueRevision
-                || !Number.isInteger(position)
-                || position < 0
-                || queuedSongIds[position] !== String(songId || '')
-            ) {
-                acknowledge({ success: false, error: 'La cola cambió. Vuelve a seleccionar la canción.' });
+            const currentPosition = queuedSongIds.indexOf(requestedSongId);
+            const trackIndex = playlist.findIndex(track => String(track._id || track.id) === requestedSongId);
+            if (trackIndex < 0) {
+                acknowledge({ success: false, error: 'La canción ya no está disponible en esta biblioteca.' });
                 return;
             }
-            const trackIndex = position < explicitQueueLength
-                ? playlist.findIndex(track => String(track._id || track.id) === String(songId || ''))
-                : sourceIndices[position - explicitQueueLength];
-            if (trackIndex < 0 || !playlist[trackIndex]) {
-                acknowledge({ success: false, error: 'La canción ya no está en la cola.' });
-                return;
-            }
-            let source = 'custom';
-            if (position < explicitQueueLength) {
-                customQueue.splice(0, position + 1);
-            } else {
+            let source = currentPosition < 0 ? 'regular' : 'custom';
+            if (currentPosition >= 0 && currentPosition < explicitQueueLength) {
+                customQueue.splice(0, currentPosition + 1);
+            } else if (currentPosition >= explicitQueueLength) {
                 customQueue.length = 0;
-                if (isShuffle) unplayedIndices.splice(0, position - explicitQueueLength + 1);
+                if (isShuffle) unplayedIndices.splice(0, currentPosition - explicitQueueLength + 1);
                 source = isShuffle ? 'shuffle' : 'regular';
             }
             playbackHistory.push({ index: currentTrackIndex, source: currentTrackSource });
