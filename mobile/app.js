@@ -79,6 +79,7 @@ const state = {
   currentTrack: null,
   remotePlayback: null,
   ownPlayback: null,
+  playbackOwnerConfirmed: false,
   queueTitle: 'GENERAL',
   upcomingQueue: [],
   shuffleQueue: [],
@@ -723,11 +724,21 @@ async function activateTransferredPlayback(request = {}, acknowledge = () => {})
     acknowledgeResult({ success: false, error: 'La transferencia fue reemplazada por una selección más reciente.' });
     return;
   }
+  if (
+    isActivatingPlaybackTransfer
+    && transferId === activePlaybackTransferId
+    && activePlaybackTransferUserId === String(state.user?._id || '')
+    && requestedSongId === getSongId(getCurrentSong())
+  ) {
+    acknowledgeResult({ success: true });
+    return;
+  }
   const endLoading = beginPlaybackRequestLoading('Iniciando reproducción en este dispositivo…');
   if (transferId) {
     activePlaybackTransferId = transferId;
     activePlaybackTransferUserId = String(state.user?._id || '');
   }
+  state.playbackOwnerConfirmed = false;
   isActivatingPlaybackTransfer = true;
   playbackTransferPending = true;
   renderPlaybackDevicePicker();
@@ -784,6 +795,7 @@ async function activateTransferredPlayback(request = {}, acknowledge = () => {})
     const shouldResume = request.resumeAfterTransfer === true;
     state.remotePlayback = null;
     state.ownPlayback = null;
+    state.playbackOwnerConfirmed = false;
     const alreadyPlayingRequestedSong = shouldResume
       && !elements.audio.paused
       && getSongId(getCurrentSong()) === requestedSongId;
@@ -801,14 +813,41 @@ async function activateTransferredPlayback(request = {}, acknowledge = () => {})
           queueTitle: 'GENERAL',
           autoplay: shouldResume,
           restoreTime,
-          showError: false
+          showError: false,
+          awaitPlaybackStart: shouldResume
         });
         if (loaded || attempt > 0) break;
         await new Promise(resolve => window.setTimeout(resolve, 300));
       }
     }
+    if (!loaded && navigator.onLine) {
+      try {
+        const refreshedLibrary = await request('/songs');
+        const refreshedSongs = Array.isArray(refreshedLibrary?.songs) ? refreshedLibrary.songs : [];
+        const refreshedSong = refreshedSongs.find(track => getSongId(track) === requestedSongId);
+        const currentSource = song.path || song.audioUrl || '';
+        const refreshedSource = refreshedSong?.path || refreshedSong?.audioUrl || '';
+        if (refreshedSong && refreshedSource && refreshedSource !== currentSource) {
+          state.songs = refreshedSongs;
+          if (state.user?._id) {
+            void saveOfflineLibrary(state.user._id, state.songs).catch(error => {
+              console.warn('No se pudo actualizar la biblioteca para transferir la canción.', error);
+            });
+          }
+          loaded = await playTrack([refreshedSong], 0, {
+            queueTitle: 'GENERAL',
+            autoplay: shouldResume,
+            restoreTime,
+            showError: false,
+            awaitPlaybackStart: shouldResume
+          });
+        }
+      } catch (error) {
+        console.warn('No se pudo actualizar la canción durante la transferencia.', error);
+      }
+    }
     if (!loaded) {
-      throw new Error('No se pudo iniciar la canción en este dispositivo.');
+      throw new Error(elements.audio.error ? getAudioErrorMessage() : 'No se pudo iniciar la canción en este dispositivo.');
     }
     await waitForAudioMetadata();
     if (!alreadyPlayingRequestedSong) {
@@ -996,6 +1035,11 @@ function pauseForRemotePlayback() {
 function handleOwnPlaybackUpdate({ userId, playback } = {}) {
   const ownUserId = String(state.user?._id || '');
   if (!ownUserId || String(userId || '') !== ownUserId || !playback) return;
+  if (
+    isActivatingPlaybackTransfer
+    && playback.transferId === activePlaybackTransferId
+    && activePlaybackTransferUserId === ownUserId
+  ) return;
   const pendingPlaybackSongId = getPendingPlaybackTakeoverSongId();
   if (
     playback.deviceId
@@ -1008,6 +1052,7 @@ function handleOwnPlaybackUpdate({ userId, playback } = {}) {
     || playback.deviceId === playbackDeviceId
   ) {
     state.ownPlayback = playback;
+    state.playbackOwnerConfirmed = playback.transferPending !== true;
     const localSong = getCurrentSong();
     const expectedTime = getSharedPlaybackTime(playback);
     if (playback.transferPending === true && playback.isPlaying === false) {
@@ -1046,6 +1091,7 @@ function handleOwnPlaybackUpdate({ userId, playback } = {}) {
   }
   const previousSongId = state.remotePlayback?.songId;
   state.ownPlayback = null;
+  state.playbackOwnerConfirmed = false;
   state.remotePlayback = playback;
   syncAccountQueue();
   pauseForRemotePlayback();
@@ -3916,10 +3962,10 @@ function renderPlayerQueue({ syncAccount = true } = {}) {
   if (!elements.playerQueue || !queueList) return;
   queueList.replaceChildren();
   const remotePlayback = getRemotePlaybackSession();
-  const hasPendingAccountQueue = Array.isArray(state.accountQueuePendingIds);
-  const showAccountQueue = Boolean(
-    remotePlayback || hasPendingAccountQueue || state.accountQueueSnapshotCached
-  );
+  const isLocalQueue = !remotePlayback
+    && !state.followingUserId
+    && state.sharedQueueRole !== 'follower';
+  const showAccountQueue = Boolean(remotePlayback);
   const currentSong = remotePlayback ? getLyricsSong() : getCurrentSong();
   const upcoming = showAccountQueue
     ? getDisplayedAccountQueueIds().map((id, position) => ({
@@ -3931,19 +3977,47 @@ function renderPlayerQueue({ syncAccount = true } = {}) {
       .map((id, position) => ({ song: state.songs.find(song => getSongId(song) === id), position }))
       .filter(item => item.song)
     : state.upcomingQueue.map((song, position) => ({ song, position }));
-  const sourceQueue = showAccountQueue || state.sharedQueueRole === 'follower' ? [] : state.shuffle
-    ? state.shuffleQueue.map(index => ({ song: state.queue[index], index }))
-    : state.queue.slice(state.queueIndex + 1).map((song, index) => ({
-      song,
-      index: state.queueIndex + index + 1
-    }));
+  const activePlaylist = state.queueTitle === 'GENERAL'
+    ? null
+    : state.playlists.find(playlist => playlist.name === state.queueTitle);
+  const sourceQueue = isLocalQueue
+    ? state.queueTitle === 'GENERAL'
+      ? state.songs
+      : activePlaylist?.tracks || state.queue
+    : [];
+  const sourceQueueItems = sourceQueue.map((song, index) => ({ song, index }));
+  const currentSourceItem = sourceQueueItems.find(item => (
+    getSongId(item.song) === getSongId(currentSong)
+  ));
+  const shuffledSourceItems = state.shuffle
+    ? state.shuffleQueue
+      .map(index => getSongId(state.queue[index]))
+      .map(songId => sourceQueueItems.find(item => getSongId(item.song) === songId))
+      .filter(Boolean)
+    : [];
+  const displayedSourceItems = state.shuffle
+    ? [
+      ...(currentSourceItem ? [currentSourceItem] : []),
+      ...shuffledSourceItems.filter(item => item !== currentSourceItem),
+      ...sourceQueueItems.filter(item => (
+        item !== currentSourceItem
+        && !shuffledSourceItems.includes(item)
+      ))
+    ]
+    : sourceQueueItems;
+
   if (currentSong) {
     queueList.append(makeElement('p', 'queue-section-label', 'REPRODUCIENDO AHORA'));
     queueList.append(renderQueueTrack(currentSong, true));
   }
+
   if (upcoming.length) {
     queueList.append(makeElement('p', 'queue-section-label',
-      state.sharedQueueSessionId || showAccountQueue ? 'A CONTINUACIÓN EN LA COLA · COMPARTIDA' : 'A CONTINUACIÓN EN LA COLA'));
+      state.sharedQueueSessionId
+        ? 'A CONTINUACIÓN EN LA COLA · COMPARTIDA'
+        : showAccountQueue
+          ? 'A CONTINUACIÓN EN LA COLA · HEREDADA'
+          : 'A CONTINUACIÓN EN LA COLA'));
     upcoming.forEach(({ song, position }) => {
       queueList.append(renderQueueTrack(song, false, {
         position,
@@ -3953,18 +4027,17 @@ function renderPlayerQueue({ syncAccount = true } = {}) {
     });
   }
 
-  if (sourceQueue.length) {
+  if (displayedSourceItems.length) {
     queueList.append(makeElement('p', 'queue-section-label', state.queueTitle || 'GENERAL'));
-    sourceQueue.forEach(({ song, index }) => {
-      if (song)       queueList.append(renderQueueTrack(song, false, {
-        sourceIndex: index,
-        source: true,
-      }));
+    displayedSourceItems.forEach(({ song, index }) => {
+      if (song) queueList.append(renderQueueTrack(
+        song,
+        getSongId(song) === getSongId(currentSong),
+        { sourceIndex: index, source: true, sourceQueue, queueTitle: state.queueTitle }
+      ));
     });
-  } else if (!upcoming.length) {
-    queueList.append(makeElement('p', 'empty-state', currentSong
-      ? 'NO HAY MÁS CANCIONES EN LA COLA'
-      : 'Reproduce una canción para llenar la cola.'));
+  } else if (!upcoming.length && !currentSong) {
+    queueList.append(makeElement('p', 'empty-state', 'Reproduce una canción para llenar la cola.'));
   }
   if (state.sharedQueueRole === 'host') emitSharedQueueSnapshot();
   if (syncAccount && !remotePlayback && !state.followingUserId && currentSong) {
@@ -3984,24 +4057,24 @@ function renderQueueTrack(song, current, options = {}) {
     imageElement(getSongCover(song), '', ''),
     copy
   );
-  const canPlayAccountQueueTrack = Boolean(
-    getRemotePlaybackSession()
-    || Array.isArray(state.accountQueuePendingIds)
-    || state.accountQueueSnapshotCached
-  );
+  const canPlayAccountQueueTrack = Boolean(getRemotePlaybackSession());
   if (!current && (state.sharedQueueRole !== 'follower' || canPlayAccountQueueTrack)) {
     track.setAttribute('role', 'button');
     track.tabIndex = 0;
     track.addEventListener('click', () => {
       if (canPlayAccountQueueTrack) requestAccountQueuePlay(song, options.position);
-      else if (options.source) playSourceQueueTrack(options.sourceIndex);
+      else if (options.source) {
+        playSourceQueueTrack(options.sourceIndex, options.sourceQueue, options.queueTitle);
+      }
       else playUpcomingTrack(options.position);
     });
     track.addEventListener('keydown', event => {
       if (event.key === 'Enter' || event.key === ' ') {
         event.preventDefault();
         if (canPlayAccountQueueTrack) requestAccountQueuePlay(song, options.position);
-        else if (options.source) void playSourceQueueTrack(options.sourceIndex);
+        else if (options.source) {
+          void playSourceQueueTrack(options.sourceIndex, options.sourceQueue, options.queueTitle);
+        }
         else playUpcomingTrack(options.position);
       }
     });
@@ -4029,7 +4102,11 @@ function renderQueueTrack(song, current, options = {}) {
       removeUpcomingTrack(options.position);
     }, '×'));
   } else if ((state.sharedQueueRole === 'follower' || canPlayAccountQueueTrack) && !current) {
-    row.append(makeElement('small', 'queue-shared-label', 'Compartida'));
+    row.append(makeElement(
+      'small',
+      'queue-shared-label',
+      canPlayAccountQueueTrack ? 'Heredada' : 'Compartida'
+    ));
   }
   if (options.source) setupQueueAddSwipe(row, song);
   return row;
@@ -4220,8 +4297,16 @@ function pushPlaybackHistory() {
   if (state.playbackHistory.length > 100) state.playbackHistory.shift();
 }
 
-async function playSourceQueueTrack(index) {
-  if (state.sharedQueueRole === 'follower' || !state.queue[index]) return false;
+async function playSourceQueueTrack(index, sourceQueue = state.queue, queueTitle = state.queueTitle) {
+  if (state.sharedQueueRole === 'follower' || !sourceQueue[index]) return false;
+  const isCurrentQueue = sourceQueue.length === state.queue.length
+    && sourceQueue.every((song, queueIndex) => (
+      getSongId(song) === getSongId(state.queue[queueIndex])
+    ));
+  if (!isCurrentQueue) {
+    return playTrack(sourceQueue, index, { queueTitle });
+  }
+  if (!state.queue[index]) return false;
   const upcomingIndices = state.shuffle
     ? [...state.shuffleQueue]
     : state.queue.slice(state.queueIndex + 1).map((_, offset) => state.queueIndex + offset + 1);
@@ -4295,7 +4380,12 @@ function publishAccountQueueSnapshot(force = false, retried = false, allowPendin
   if (state.accountQueuePendingIds && !allowPending) return Promise.resolve(false);
   const publish = () => {
     if (state.accountQueuePendingIds && !allowPending) return Promise.resolve(false);
-    if (getRemotePlaybackSession() || !state.socket?.connected) return Promise.resolve(false);
+    if (
+      !state.playbackOwnerConfirmed
+      || state.ownPlayback?.deviceId !== playbackDeviceId
+      || getRemotePlaybackSession()
+      || !state.socket?.connected
+    ) return Promise.resolve(false);
     const songIds = getAccountQueueTracks().map(getSongId).filter(Boolean).slice(0, 5000);
     const signature = songIds.join(',');
     if (!force && signature === state.accountQueueSnapshotSignature) return Promise.resolve(true);
@@ -4330,7 +4420,12 @@ function publishAccountQueueSnapshot(force = false, retried = false, allowPendin
         if (state.accountQueueSnapshotSignature === signature) state.accountQueueSnapshotSignature = null;
         if (!retried) {
           window.setTimeout(() => {
-            if (state.socket?.connected && !getRemotePlaybackSession()) {
+            if (
+              state.socket?.connected
+              && state.playbackOwnerConfirmed
+              && state.ownPlayback?.deviceId === playbackDeviceId
+              && !getRemotePlaybackSession()
+            ) {
               void publishAccountQueueSnapshot(true, true);
             }
           }, 500);
@@ -4644,7 +4739,8 @@ async function loadTrack(song, {
   cacheOnly = false,
   forceApiProxy = false,
   bypassOfflineCache = false,
-  fallbackState = null
+  fallbackState = null,
+  awaitPlaybackStart = false
 } = {}) {
   if (autoplay && isRemotePlaybackLocked()) return false;
   const loadSequence = ++trackLoadSequence;
@@ -4715,24 +4811,28 @@ async function loadTrack(song, {
     if (autoplay) {
       if (!currentTrackShouldAutoplay) return false;
       const playPromise = elements.audio.play();
-      let timeoutId;
-      const started = await Promise.race([
-        playPromise.then(() => true),
-        new Promise(resolve => {
-          timeoutId = window.setTimeout(() => resolve(false), 1500);
-        })
-      ]);
-      if (timeoutId) window.clearTimeout(timeoutId);
-      if (!started) {
-        playPromise.catch(error => {
-          if (loadSequence !== trackLoadSequence || error.name === 'AbortError') return;
-          if (error.name === 'NotAllowedError') {
-            if (sync) state.followNeedsUserGesture = true;
-            if (showError) showToast('El navegador bloqueó la reproducción. Toca reproducir de nuevo.', true);
-          } else if (!elements.audio.error) {
-            console.warn('La reproducción móvil no llegó a iniciarse.', error);
-          }
-        });
+      if (awaitPlaybackStart) {
+        await waitForAudioPlaybackStart(playPromise);
+      } else {
+        let timeoutId;
+        const started = await Promise.race([
+          playPromise.then(() => true),
+          new Promise(resolve => {
+            timeoutId = window.setTimeout(() => resolve(false), 1500);
+          })
+        ]);
+        if (timeoutId) window.clearTimeout(timeoutId);
+        if (!started) {
+          playPromise.catch(error => {
+            if (loadSequence !== trackLoadSequence || error.name === 'AbortError') return;
+            if (error.name === 'NotAllowedError') {
+              if (sync) state.followNeedsUserGesture = true;
+              if (showError) showToast('El navegador bloqueó la reproducción. Toca reproducir de nuevo.', true);
+            } else if (!elements.audio.error) {
+              console.warn('La reproducción móvil no llegó a iniciarse.', error);
+            }
+          });
+        }
       }
       if (!currentTrackShouldAutoplay && !elements.audio.paused) elements.audio.pause();
     }
@@ -4742,7 +4842,14 @@ async function loadTrack(song, {
   } catch (error) {
     if (loadSequence !== trackLoadSequence) return false;
     if (error.name === 'AbortError' && !currentTrackShouldAutoplay) return false;
-    if (error.name === 'NotSupportedError' && activeTrackUsingOfflineCache && !activeTrackFallbackState.cache) {
+    if (
+      (
+        error.name === 'NotSupportedError'
+        || [2, 4].includes(elements.audio.error?.code)
+      )
+      && activeTrackUsingOfflineCache
+      && !activeTrackFallbackState.cache
+    ) {
       activeTrackFallbackState.cache = true;
       return loadTrack(song, {
         autoplay,
@@ -4750,10 +4857,20 @@ async function loadTrack(song, {
         restoreTime,
         showError,
         bypassOfflineCache: true,
-        fallbackState: activeTrackFallbackState
+        fallbackState: activeTrackFallbackState,
+        awaitPlaybackStart
       });
     }
-    if (error.name === 'NotSupportedError' && activeTrackIsRemoteStream && !activeTrackFallbackState.apiProxy) {
+    if (
+      (
+        error.name === 'NotSupportedError'
+        || error.name === 'PlaybackTimeoutError'
+        || [2, 4].includes(elements.audio.error?.code)
+      )
+      && activeTrackIsRemoteStream
+      && !activeTrackFallbackState.apiProxy
+      && navigator.onLine
+    ) {
       activeTrackFallbackState.apiProxy = true;
       return loadTrack(song, {
         autoplay,
@@ -4761,7 +4878,8 @@ async function loadTrack(song, {
         restoreTime,
         showError,
         forceApiProxy: true,
-        fallbackState: activeTrackFallbackState
+        fallbackState: activeTrackFallbackState,
+        awaitPlaybackStart
       });
     }
     console.error('No se pudo reproducir la canción.', error);
@@ -4780,7 +4898,8 @@ async function playTrack(queue, index, {
   autoplay = true,
   queueTitle = 'GENERAL',
   restoreTime = 0,
-  showError = true
+  showError = true,
+  awaitPlaybackStart = false
 } = {}) {
   if (autoplay && getRemotePlaybackSession()) {
     const remoteSong = queue?.[index];
@@ -4803,7 +4922,13 @@ async function playTrack(queue, index, {
   if (state.shuffle) rebuildShuffleQueue();
   else state.shuffleQueue = [];
   persistLastPlayback(0);
-  return loadTrack(state.currentTrack, { autoplay, sync, restoreTime, showError });
+  return loadTrack(state.currentTrack, {
+    autoplay,
+    sync,
+    restoreTime,
+    showError,
+    awaitPlaybackStart
+  });
 }
 
 function getLastPlaybackStorageKey() {
@@ -5139,6 +5264,11 @@ function persistUpcomingQueue() {
 async function restoreLastPlayback() {
   const userId = String(state.user?._id || '');
   if (!userId || state.restoredPlaybackForUser === userId) return;
+  const sharedPlayback = state.user?.lastPlayed;
+  if (sharedPlayback?.deviceId && sharedPlayback.deviceId !== playbackDeviceId) {
+    state.restoredPlaybackForUser = userId;
+    return;
+  }
   let saved = null;
   try {
     saved = JSON.parse(localStorage.getItem(getLastPlaybackStorageKey()) || 'null');
@@ -5220,6 +5350,41 @@ function waitForAudioMetadata() {
     };
     elements.audio.addEventListener('loadedmetadata', onLoaded, { once: true });
     elements.audio.addEventListener('error', onError, { once: true });
+  });
+}
+
+function waitForAudioPlaybackStart(playPromise) {
+  if (!elements.audio.paused && elements.audio.readyState >= 2) return Promise.resolve();
+  if (elements.audio.error) return Promise.reject(new Error(getAudioErrorMessage()));
+  return new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      cleanup();
+      const error = new Error('La canción no comenzó a reproducirse en este dispositivo.');
+      error.name = 'PlaybackTimeoutError';
+      reject(error);
+    }, 8000);
+    const cleanup = () => {
+      window.clearTimeout(timeout);
+      elements.audio.removeEventListener('playing', onPlaying);
+      elements.audio.removeEventListener('error', onError);
+    };
+    const onPlaying = () => {
+      if (elements.audio.paused) return;
+      cleanup();
+      resolve();
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error(getAudioErrorMessage()));
+    };
+    elements.audio.addEventListener('playing', onPlaying);
+    elements.audio.addEventListener('error', onError, { once: true });
+    playPromise.then(() => {
+      if (!elements.audio.paused && elements.audio.readyState >= 2) onPlaying();
+    }, error => {
+      cleanup();
+      reject(error);
+    });
   });
 }
 
@@ -5339,6 +5504,13 @@ function syncPlaybackStatus(force = false) {
         ...(state.followingUserId && { countListeningDelta: true })
       }
     })
+  }).then(() => {
+    if (!state.playbackOwnerConfirmed && state.socket?.connected) {
+      state.socket.emit('playbackStateRequest', {
+        deviceId: playbackDeviceId,
+        deviceType: playbackDeviceType
+      });
+    }
   }).catch(error => console.warn('No se pudo sincronizar la reproducción móvil.', error));
 }
 
@@ -5538,6 +5710,7 @@ function connectRealtime() {
     ) void loadFriends();
   }, 15000);
   socket.on('disconnect', () => {
+    state.playbackOwnerConfirmed = false;
     setCurrentUserOnline(false);
     updatePlayerUI();
     friendRealtimeUpdates.forEach((update, friendId) => {
@@ -5548,6 +5721,7 @@ function connectRealtime() {
   });
   socket.on('connect', () => {
     setCurrentUserOnline(true);
+    state.playbackOwnerConfirmed = false;
     state.accountQueueDeviceId = null;
     socket.emit('playbackStateRequest', { deviceId: playbackDeviceId, deviceType: playbackDeviceType });
     void resumePendingPlaybackTakeover().then(() => flushPendingAccountQueue());
@@ -6335,6 +6509,25 @@ function toggleShuffle() {
     void requestRemotePlaybackControl('shuffle');
     return;
   }
+  const activePlaylist = state.queueTitle === 'GENERAL'
+    ? null
+    : state.playlists.find(playlist => playlist.name === state.queueTitle);
+  const sourceQueue = state.queueTitle === 'GENERAL'
+    ? state.songs
+    : activePlaylist?.tracks;
+  const queueAnchor = state.currentQueueKind === 'source'
+    ? getCurrentSong()
+    : state.queue[state.queueIndex];
+  if (sourceQueue?.length && queueAnchor) {
+    const queueAnchorIndex = sourceQueue.findIndex(song => (
+      getSongId(song) === getSongId(queueAnchor)
+    ));
+    if (queueAnchorIndex >= 0) {
+      state.queue = [...sourceQueue];
+      state.queueIndex = queueAnchorIndex;
+      if (state.currentQueueKind === 'source') state.currentTrack = state.queue[queueAnchorIndex];
+    }
+  }
   state.shuffle = !state.shuffle;
   state.playbackHistory = [];
   if (state.shuffle) rebuildShuffleQueue();
@@ -6531,6 +6724,7 @@ function logout(showMessage) {
   state.socket = null;
   state.remotePlayback = null;
   state.ownPlayback = null;
+  state.playbackOwnerConfirmed = false;
   state.accountQueueIds = [];
   state.accountQueueSnapshotCached = false;
   state.accountQueuePendingIds = null;
@@ -7292,6 +7486,7 @@ elements.audio.addEventListener('ended', () => {
 });
 elements.audio.addEventListener('error', () => {
   if (!state.queue.length) return;
+  if (isActivatingPlaybackTransfer) return;
   const errorCode = elements.audio.error?.code;
   const song = getCurrentSong();
   if (
@@ -7309,21 +7504,27 @@ elements.audio.addEventListener('error', () => {
     });
     return;
   }
-  if (song && currentTrackShouldAutoplay && errorCode === 2 && activeTrackIsRemoteStream && !activeTrackFallbackState.cache) {
-    activeTrackFallbackState.cache = true;
-    void loadTrack(song, {
-      autoplay: true,
-      cacheOnly: true,
-      fallbackState: activeTrackFallbackState
-    });
-    return;
-  }
-  if (song && currentTrackShouldAutoplay && errorCode === 4 && activeTrackIsRemoteStream && !activeTrackFallbackState.apiProxy) {
+  if (
+    song
+    && currentTrackShouldAutoplay
+    && [2, 4].includes(errorCode)
+    && activeTrackIsRemoteStream
+    && !activeTrackFallbackState.apiProxy
+    && navigator.onLine
+  ) {
     activeTrackFallbackState.apiProxy = true;
     void loadTrack(song, {
       autoplay: true,
       forceApiProxy: true,
       fallbackState: activeTrackFallbackState
+    });
+    return;
+  }
+  if (!currentTrackShouldAutoplay) {
+    console.warn('Falló la carga de audio móvil en una reproducción pausada.', {
+      source: elements.audio.currentSrc,
+      code: errorCode,
+      message: elements.audio.error?.message
     });
     return;
   }

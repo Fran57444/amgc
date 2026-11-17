@@ -55,6 +55,7 @@ export function initMusicPlayer() {
     let suppressNextListeningDelta = false;
     let playbackStatusSyncTimer = null;
     let sharedDevicePlayback = null;
+    let playbackOwnerConfirmed = false;
     let suppressRemotePlaybackPause = false;
     let sharedPlaybackClockTimer = null;
     let connectedPlaybackDevices = [];
@@ -267,6 +268,7 @@ export function initMusicPlayer() {
         connectRealtime();
     });
     socket.off('connect').on('connect', async () => {
+        playbackOwnerConfirmed = false;
         accountQueueDeviceId = null;
         restoreAccountQueueCache();
         flushPendingAccountQueue();
@@ -303,6 +305,7 @@ export function initMusicPlayer() {
         refreshChatNotifications();
     });
     socket.off('disconnect').on('disconnect', () => {
+        playbackOwnerConfirmed = false;
         renderSharedPlaybackStatus();
         leaveListenTogetherQueue();
         if (!listeningTogetherUserId) return;
@@ -2671,11 +2674,21 @@ export function initMusicPlayer() {
             return;
         }
         const transferId = request.transferId || playback.transferId || null;
+        if (
+            isActivatingPlaybackTransfer
+            && transferId === activePlaybackTransferId
+            && activePlaybackTransferUserId === String(getStoredUser()?._id || '')
+            && requestedSongId === String(getCurrentTrack()?._id || getCurrentTrack()?.id || '')
+        ) {
+            acknowledgeResult({ success: true });
+            return;
+        }
         const endLoading = beginPlaybackRequestLoading();
         if (transferId) {
             activePlaybackTransferId = transferId;
             activePlaybackTransferUserId = String(getStoredUser()?._id || '');
         }
+        playbackOwnerConfirmed = false;
         isActivatingPlaybackTransfer = true;
         playbackTransferPending = true;
         renderPlaybackDevicePicker();
@@ -3046,6 +3059,11 @@ export function initMusicPlayer() {
     function handleOwnPlaybackUpdate({ userId, playback } = {}) {
         const ownUserId = String(getStoredUser()?._id || '');
         if (!ownUserId || String(userId || '') !== ownUserId || !playback) return;
+        if (
+            isActivatingPlaybackTransfer
+            && playback.transferId === activePlaybackTransferId
+            && activePlaybackTransferUserId === ownUserId
+        ) return;
         const pendingPlaybackSongId = getPendingPlaybackTakeoverSongId();
         const localTrackId = String(getCurrentTrack()?._id || getCurrentTrack()?.id || '');
         if (
@@ -3058,6 +3076,7 @@ export function initMusicPlayer() {
             !playback.deviceId
             || playback.deviceId === playbackDeviceId
         ) {
+            playbackOwnerConfirmed = playback.transferPending !== true;
             const localTrack = getCurrentTrack();
             const expectedTime = getSharedPlaybackTime(playback);
             if (playback.transferPending === true && playback.isPlaying === false) {
@@ -3105,6 +3124,7 @@ export function initMusicPlayer() {
         }
         const previousSongId = sharedDevicePlayback?.songId;
         const previousColor = sharedDevicePlayback?.color;
+        playbackOwnerConfirmed = false;
         sharedDevicePlayback = playback;
         syncAccountQueue();
         playbackActivityUserId = null;
@@ -3974,6 +3994,9 @@ export function initMusicPlayer() {
             });
             if (!response.ok) throw new Error(`No se pudo actualizar la actividad (${response.status}).`);
             if (payload.lastPlayed?.countListeningDelta === false) suppressNextListeningDelta = false;
+            if (payload.lastPlayed && !playbackOwnerConfirmed && socket.connected) {
+                socket.emit('playbackStateRequest', { deviceId: playbackDeviceId, deviceType: playbackDeviceType });
+            }
         } catch (e) {
             console.warn(e);
         }
@@ -6940,7 +6963,12 @@ export function initMusicPlayer() {
     }
 
     function publishAccountQueueSnapshot(force = false, allowPending = false) {
-        if (getRemotePlaybackSession() || (accountQueuePendingIds && !allowPending) || !socket.connected) {
+        if (
+            !playbackOwnerConfirmed
+            || getRemotePlaybackSession()
+            || (accountQueuePendingIds && !allowPending)
+            || !socket.connected
+        ) {
             return Promise.resolve(false);
         }
         const songIds = getAccountQueueSongIds();
@@ -7435,6 +7463,21 @@ export function initMusicPlayer() {
                     ? Number(element.dataset.trackIndex)
                     : trackIndex;
                 if (!Number.isInteger(selectedTrackIndex) || !playlist[selectedTrackIndex]) return;
+                if (queueSource && !activeQueueTracks.some(track => (
+                    String(track._id || track.id) === String(playlist[selectedTrackIndex]._id || playlist[selectedTrackIndex].id)
+                ))) {
+                    const selectedPlaylist = activePlaylistId
+                        ? userPlaylists.find(playlistItem => playlistItem.id === activePlaylistId)
+                        : null;
+                    activeQueueTracks = selectedPlaylist
+                        ? selectedPlaylist.tracks
+                            .map(track => playlist.find(main => String(main._id || main.id) === String(track._id || track.id)))
+                            .filter(Boolean)
+                        : [...playlist];
+                    queueName = selectedPlaylist?.name || 'GENERAL';
+                    generalQueueAnchorTrackId = String(getCurrentTrack()?._id || getCurrentTrack()?.id || '');
+                    resetPlaybackHistory();
+                }
                 if (queueSource && selectedTrackIndex !== currentTrackIndex && playlist[currentTrackIndex]) {
                     playbackHistory.push({ index: currentTrackIndex, source: currentTrackSource });
 
@@ -7457,6 +7500,7 @@ export function initMusicPlayer() {
                     }
                 } else if (!queueSource) {
                     activePlaylistId = null;
+                    queueName = 'GENERAL';
                     activeQueueTracks = [...playlist];
                     playbackHistory = [];
                     unplayedIndices = [];
@@ -10179,11 +10223,11 @@ export function initMusicPlayer() {
 
     function renderQueue() {
         queueList.innerHTML = '';
-        const upcomingIndices = isShuffle ? [...unplayedIndices] : getSequentialQueueIndices();
         const remotePlayback = getRemotePlaybackSession();
-        const hasAccountQueue = Boolean(remotePlayback || accountQueueSnapshotCached || accountQueuePendingIds);
+        const isLocalQueue = !remotePlayback && !listeningTogetherUserId && sharedQueueRole !== 'follower';
+        const hasAccountQueue = Boolean(remotePlayback);
         const currentTrack = remotePlayback ? getLyricsTrack() : getCurrentTrack();
-        const displayedQueue = hasAccountQueue
+        const displayedQueue = remotePlayback
             ? getDisplayedAccountQueueIds()
                 .map((songId, position) => ({
                     track: playlist.find(track => String(track._id || track.id) === songId),
@@ -10191,6 +10235,34 @@ export function initMusicPlayer() {
                 }))
                 .filter(item => item.track)
             : customQueue.map((track, position) => ({ track, position }));
+        const activeQueuePlaylist = activePlaylistId
+            ? userPlaylists.find(playlistItem => playlistItem.id === activePlaylistId)
+            : null;
+        const sourceTracks = isLocalQueue
+            ? activeQueuePlaylist
+                ? activeQueuePlaylist.tracks
+                    .map(track => playlist.find(main => String(main._id || main.id) === String(track._id || track.id)))
+                    .filter(Boolean)
+                : queueName === 'GENERAL'
+                    ? playlist
+                    : activeQueueTracks
+            : [];
+        const allSourceIndices = isLocalQueue
+            ? sourceTracks
+                .map(track => playlist.indexOf(track))
+                .filter(index => index !== -1)
+            : [];
+        const sourceIndices = isLocalQueue && isShuffle
+            ? [
+                ...(allSourceIndices.includes(currentTrackIndex) ? [currentTrackIndex] : []),
+                ...unplayedIndices.filter(index => (
+                    index !== currentTrackIndex && allSourceIndices.includes(index)
+                )),
+                ...allSourceIndices.filter(index => (
+                    index !== currentTrackIndex && !unplayedIndices.includes(index)
+                ))
+            ]
+            : allSourceIndices;
 
         if (currentTrack) {
             const currentHeader = document.createElement('div');
@@ -10215,9 +10287,11 @@ export function initMusicPlayer() {
         if (displayedQueue.length > 0) {
             const header = document.createElement('div');
             header.className = 'queue-header';
-            header.textContent = sharedQueueSessionId || hasAccountQueue
+            header.textContent = sharedQueueSessionId
                 ? 'A continuación en la cola · compartida'
-                : 'A continuación en la cola';
+                : hasAccountQueue
+                    ? 'A continuación en la cola · heredada'
+                    : 'A continuación en la cola';
             queueList.appendChild(header);
 
             displayedQueue.forEach(({ track, position }) => {
@@ -10279,21 +10353,19 @@ export function initMusicPlayer() {
                 }
                 queueList.appendChild(li);
             });
-
         }
 
-        if (upcomingIndices.length > 0 && !hasAccountQueue && sharedQueueRole !== 'follower') {
-            const activePlaylist = userPlaylists.find(playlistItem => playlistItem.id === activePlaylistId);
+        if (sourceIndices.length > 0 && isLocalQueue) {
             const sourceHeader = document.createElement('div');
             sourceHeader.className = 'queue-header';
             sourceHeader.textContent = queueName || 'GENERAL';
             queueList.appendChild(sourceHeader);
 
-            upcomingIndices.forEach((origIndex, position) => {
+            sourceIndices.forEach((origIndex, position) => {
                 const track = playlist[origIndex];
                 if (!track) return;
                 const li = document.createElement('li');
-                li.className = 'queue-source-item';
+                li.className = `queue-source-item${origIndex === currentTrackIndex ? ' active' : ''}`;
                 li.dataset.queueSource = isShuffle ? 'shuffle' : 'regular';
                 li.dataset.queuePosition = position;
                 li.dataset.trackIndex = String(origIndex);
@@ -10612,6 +10684,27 @@ export function initMusicPlayer() {
         if (getRemotePlaybackSession()) {
             void requestRemotePlaybackControl('shuffle');
             return;
+        }
+        const selectedPlaylist = activePlaylistId
+            ? userPlaylists.find(playlistItem => playlistItem.id === activePlaylistId)
+            : null;
+        const sourceQueue = selectedPlaylist
+            ? selectedPlaylist.tracks
+                .map(track => playlist.find(main => String(main._id || main.id) === String(track._id || track.id)))
+                .filter(Boolean)
+            : queueName === 'GENERAL'
+                ? playlist
+                : activeQueueTracks;
+        const queueMatchesSource = sourceQueue.length === activeQueueTracks.length
+            && sourceQueue.every((track, index) => (
+                String(track._id || track.id) === String(activeQueueTracks[index]?._id || activeQueueTracks[index]?.id)
+            ));
+        if (sourceQueue.length && !queueMatchesSource) {
+            activeQueueTracks = [...sourceQueue];
+            const anchorTrackId = generalQueueAnchorTrackId || String(getCurrentTrack()?._id || getCurrentTrack()?.id || '');
+            if (sourceQueue.some(track => String(track._id || track.id) === anchorTrackId)) {
+                generalQueueAnchorTrackId = anchorTrackId;
+            }
         }
         isShuffle = !isShuffle;
         btnShuffle.classList.toggle('active', isShuffle);
