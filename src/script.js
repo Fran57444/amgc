@@ -942,6 +942,7 @@ export function initMusicPlayer() {
     let sharedQueueJoinPending = false;
     let sharedQueueSnapshotRevision = 0;
     const pendingSharedQueueAdds = new Set();
+    const pendingSharedQueueRequestAdds = [];
     let lastSharedQueueSnapshot = null;
     let accountQueueIds = [];
     let accountQueueRevision = 0;
@@ -4200,6 +4201,7 @@ export function initMusicPlayer() {
             sharedQueueRole = 'host';
             lastSharedQueueSnapshot = null;
             sharedQueueSnapshotRevision = 0;
+            pendingSharedQueueRequestAdds.length = 0;
             renderQueue();
         });
         socket.off('listenTogetherQueueSnapshotRequest').on('listenTogetherQueueSnapshotRequest', ({ sessionId } = {}) => {
@@ -6894,6 +6896,7 @@ export function initMusicPlayer() {
             sharedQueueRole = 'follower';
             sharedQueueSnapshotRevision = 0;
             lastSharedQueueSnapshot = null;
+            pendingSharedQueueRequestAdds.length = 0;
             socket.emit('listenTogetherQueueSnapshotRequest', {
                 sessionId: sharedQueueSessionId
             }, snapshotResponse => {
@@ -7179,15 +7182,64 @@ export function initMusicPlayer() {
             showToast('La cola compartida se desconectó antes de añadir la canción.', true);
             return;
         }
-        socket.emit('listenTogetherQueueAddRequest', {
-            sessionId: sharedQueueSessionId,
+        const track = playlist.find(item => String(item._id || item.id) === String(songId));
+        if (!track) {
+            showToast('La canción no está disponible en esta biblioteca.', true);
+            return;
+        }
+        const visiblePendingCount = pendingSharedQueueRequestAdds.filter(pending => (
+            customQueue.filter(item => (
+                String(item._id || item.id) === pending.songId
+            )).length <= pending.baselineCount
+        )).length;
+        if (customQueue.length + visiblePendingCount >= 5000) {
+            showToast('La cola compartida alcanzó el máximo de 5000 canciones.', true);
+            return;
+        }
+        if (pendingSharedQueueRequestAdds.some(item => item.songId === String(songId))) {
+            showToast('La canción ya se está añadiendo a la cola.');
+            return;
+        }
+        const baselineCount = customQueue.filter(item => (
+            String(item._id || item.id) === String(songId)
+        )).length;
+        const sessionId = sharedQueueSessionId;
+        const socketForRequest = socket;
+        const optimisticTrack = { ...track };
+        const pending = { songId: String(songId), track: optimisticTrack, baselineCount, sessionId };
+        pendingSharedQueueRequestAdds.push(pending);
+        renderQueue();
+        showToast('Añadida localmente; sincronizando con el anfitrión…');
+        socketForRequest.timeout(7000).emit('listenTogetherQueueAddRequest', {
+            sessionId,
             songId: String(songId)
-        }, response => {
-            if (!response?.success) {
-                showToast(response?.error || 'No se pudo añadir la canción a la cola compartida.', true);
+        }, (timeoutError, response) => {
+            const pendingIndex = pendingSharedQueueRequestAdds.indexOf(pending);
+            if (pendingIndex < 0) return;
+            if (sessionId !== sharedQueueSessionId || socketForRequest !== socket) {
+                pendingSharedQueueRequestAdds.splice(pendingIndex, 1);
+                renderQueue();
                 return;
             }
-            showToast('Añadida a «A continuación en la cola».');
+            const snapshotIncludesAddition = customQueue.filter(item => (
+                String(item._id || item.id) === String(songId)
+            )).length > baselineCount;
+            pendingSharedQueueRequestAdds.splice(pendingIndex, 1);
+            const success = Boolean(response?.success || snapshotIncludesAddition);
+            if (success && !snapshotIncludesAddition) customQueue.push(optimisticTrack);
+            if (!success) {
+                for (const laterPending of pendingSharedQueueRequestAdds.slice(pendingIndex)) {
+                    if (laterPending.songId === String(songId)) laterPending.baselineCount -= 1;
+                }
+            }
+            renderQueue();
+            if (success) {
+                showToast('Añadida a «A continuación en la cola».');
+                return;
+            }
+            showToast(response?.error || (timeoutError
+                ? 'El anfitrión no confirmó la canción a tiempo.'
+                : 'No se pudo añadir la canción a la cola compartida.'), true);
         });
     }
 
@@ -7202,6 +7254,7 @@ export function initMusicPlayer() {
         sharedQueueJoinPending = false;
         sharedQueueSnapshotRevision = 0;
         lastSharedQueueSnapshot = null;
+        pendingSharedQueueRequestAdds.length = 0;
         sharedQueueSavedLocalQueue = null;
         pendingSharedQueueAdds.clear();
         if (restoredQueue) {
@@ -10326,7 +10379,19 @@ export function initMusicPlayer() {
                     position
                 }))
                 .filter(item => item.track)
-            : customQueue.map((track, position) => ({ track, position }));
+            : [
+                ...customQueue.map((track, position) => ({ track, position })),
+                ...(sharedQueueRole === 'follower'
+                    ? pendingSharedQueueRequestAdds
+                        .filter(pending => customQueue.filter(item => (
+                            String(item._id || item.id) === pending.songId
+                        )).length <= pending.baselineCount)
+                        .map(({ track }, index) => ({
+                            track,
+                            position: customQueue.length + index
+                        }))
+                    : [])
+            ];
         const activeQueuePlaylist = activePlaylistId
             ? userPlaylists.find(playlistItem => playlistItem.id === activePlaylistId)
             : null;
@@ -10344,7 +10409,7 @@ export function initMusicPlayer() {
                 .map(track => playlist.indexOf(track))
                 .filter(index => index !== -1)
             : [];
-        const sourceIndices = isLocalQueue && isShuffle
+        const sourceIndices = (isLocalQueue && isShuffle
             ? [
                 ...(allSourceIndices.includes(currentTrackIndex) ? [currentTrackIndex] : []),
                 ...unplayedIndices.filter(index => (
@@ -10354,7 +10419,7 @@ export function initMusicPlayer() {
                     index !== currentTrackIndex && !unplayedIndices.includes(index)
                 ))
             ]
-            : allSourceIndices;
+            : allSourceIndices).filter(index => index !== currentTrackIndex);
 
         if (currentTrack) {
             const currentHeader = document.createElement('div');

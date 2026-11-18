@@ -94,6 +94,7 @@ const state = {
   sharedQueueRole: null,
   sharedQueueRevision: 0,
   sharedQueueIds: [],
+  pendingSharedQueueAdds: [],
   sharedQueueSnapshotSignature: '',
   accountQueueIds: [],
   accountQueueSnapshotCached: false,
@@ -125,6 +126,7 @@ let accountQueueRetryTimer = null;
 let accountQueueRetryDelay = 15000;
 let accountQueueLastNotifiedSignature = '';
 let playbackRequestLoadingCount = 0;
+const pendingPlaylistAdds = new Set();
 
 const elements = {
   loginScreen: document.getElementById('login-screen'),
@@ -3968,13 +3970,16 @@ function renderPlayerQueue({ syncAccount = true } = {}) {
     && state.sharedQueueRole !== 'follower';
   const showAccountQueue = Boolean(remotePlayback);
   const currentSong = remotePlayback ? getLyricsSong() : getCurrentSong();
+  const sharedQueueIds = state.sharedQueueRole === 'follower'
+    ? getDisplayedSharedQueueIds()
+    : state.sharedQueueIds;
   const upcoming = showAccountQueue
     ? getDisplayedAccountQueueIds().map((id, position) => ({
       song: state.songs.find(song => getSongId(song) === id),
       position
     })).filter(item => item.song)
     : state.sharedQueueRole === 'follower'
-    ? state.sharedQueueIds
+    ? sharedQueueIds
       .map((id, position) => ({ song: state.songs.find(song => getSongId(song) === id), position }))
       .filter(item => item.song)
     : state.upcomingQueue.map((song, position) => ({ song, position }));
@@ -3996,7 +4001,7 @@ function renderPlayerQueue({ syncAccount = true } = {}) {
       .map(songId => sourceQueueItems.find(item => getSongId(item.song) === songId))
       .filter(Boolean)
     : [];
-  const displayedSourceItems = state.shuffle
+  const displayedSourceItems = (state.shuffle
     ? [
       ...(currentSourceItem ? [currentSourceItem] : []),
       ...shuffledSourceItems.filter(item => item !== currentSourceItem),
@@ -4005,7 +4010,7 @@ function renderPlayerQueue({ syncAccount = true } = {}) {
         && !shuffledSourceItems.includes(item)
       ))
     ]
-    : sourceQueueItems;
+    : sourceQueueItems).filter(item => item !== currentSourceItem);
 
   if (currentSong) {
     queueList.append(makeElement('p', 'queue-section-label', 'REPRODUCIENDO AHORA'));
@@ -4345,17 +4350,7 @@ function addToUpcomingQueue(song) {
     return;
   }
   if (state.sharedQueueRole === 'follower') {
-    if (!state.socket?.connected || !state.sharedQueueSessionId) {
-      showToast('No se pudo conectar a la cola compartida.', true);
-      return;
-    }
-    state.socket.emit('listenTogetherQueueAddRequest', {
-      sessionId: state.sharedQueueSessionId,
-      songId: getSongId(song)
-    }, response => {
-      if (!response?.success) showToast(response?.error || 'No se pudo añadir a la cola compartida.', true);
-      else showToast('Canción añadida a la cola compartida.');
-    });
+    requestSharedQueueAdd(song);
     return;
   }
   if (state.sharedQueueRole === 'host' && state.upcomingQueue.length >= 5000) {
@@ -4368,6 +4363,79 @@ function addToUpcomingQueue(song) {
   emitSharedQueueSnapshot();
   renderPlayerQueue();
   showToast('Canción añadida a continuación.');
+}
+
+function getDisplayedSharedQueueIds() {
+  const displayedIds = [...state.sharedQueueIds];
+  const counts = new Map();
+  for (const songId of state.sharedQueueIds) {
+    counts.set(songId, (counts.get(songId) || 0) + 1);
+  }
+  for (const pending of state.pendingSharedQueueAdds) {
+    if ((counts.get(pending.songId) || 0) > pending.baselineCount) continue;
+    displayedIds.push(pending.songId);
+  }
+  return displayedIds;
+}
+
+function settleSharedQueueAdd(pending, success) {
+  const pendingIndex = state.pendingSharedQueueAdds.indexOf(pending);
+  if (pendingIndex < 0) return;
+  const currentCount = state.sharedQueueIds.filter(songId => songId === pending.songId).length;
+  state.pendingSharedQueueAdds.splice(pendingIndex, 1);
+  if (success && pending.sessionId === state.sharedQueueSessionId
+    && currentCount <= pending.baselineCount) {
+    state.sharedQueueIds.push(pending.songId);
+  } else if (!success) {
+    for (const laterPending of state.pendingSharedQueueAdds.slice(pendingIndex)) {
+      if (laterPending.songId === pending.songId) laterPending.baselineCount -= 1;
+    }
+  }
+  renderPlayerQueue();
+}
+
+function requestSharedQueueAdd(song) {
+  const songId = getSongId(song);
+  const socket = state.socket;
+  const sessionId = state.sharedQueueSessionId;
+  if (!socket?.connected || !sessionId || !songId) {
+    showToast('No se pudo conectar a la cola compartida.', true);
+    return;
+  }
+  const currentCount = state.sharedQueueIds.filter(id => id === songId).length;
+  const pendingCount = state.pendingSharedQueueAdds.filter(item => item.songId === songId).length;
+  if (getDisplayedSharedQueueIds().length >= 5000) {
+    showToast('La cola compartida alcanzó el máximo de 5000 canciones.', true);
+    return;
+  }
+  const pending = {
+    songId,
+    sessionId,
+    baselineCount: currentCount + pendingCount
+  };
+  state.pendingSharedQueueAdds.push(pending);
+  renderPlayerQueue({ syncAccount: false });
+  showToast('Añadida localmente; sincronizando con el anfitrión…');
+  socket.timeout(7000).emit('listenTogetherQueueAddRequest', {
+    sessionId,
+    songId
+  }, (timeoutError, response) => {
+    if (socket !== state.socket || sessionId !== state.sharedQueueSessionId) {
+      state.pendingSharedQueueAdds = state.pendingSharedQueueAdds.filter(item => item !== pending);
+      return;
+    }
+    const snapshotIncludesAddition = state.sharedQueueIds
+      .filter(id => id === songId).length > pending.baselineCount;
+    const success = Boolean(response?.success || snapshotIncludesAddition);
+    settleSharedQueueAdd(pending, success);
+    if (success) {
+      showToast('Canción añadida a la cola compartida.');
+    } else {
+      showToast(response?.error || (timeoutError
+        ? 'El anfitrión no confirmó la canción a tiempo.'
+        : 'No se pudo añadir a la cola compartida.'), true);
+    }
+  });
 }
 
 function getAccountQueueTracks() {
@@ -6276,6 +6344,7 @@ function clearSharedQueueState() {
   state.sharedQueueRole = null;
   state.sharedQueueRevision = 0;
   state.sharedQueueIds = [];
+  state.pendingSharedQueueAdds = [];
   state.sharedQueueSnapshotSignature = '';
 }
 
@@ -6920,7 +6989,10 @@ async function savePlaylist(event) {
   data.append('name', name);
   data.append('desc', document.getElementById('playlist-description').value.trim());
   data.append('userId', state.user?._id || '');
-  data.append('tracks', JSON.stringify((playlist?.tracks || []).map(getSongId)));
+  const trackIds = (playlist?.tracks || []).map(getSongId);
+  const pendingSongId = state.pendingSongId ? String(state.pendingSongId) : '';
+  if (pendingSongId && !trackIds.includes(pendingSongId)) trackIds.push(pendingSongId);
+  data.append('tracks', JSON.stringify(trackIds));
   if (playlist?.photo) data.append('existingPhoto', playlist.photo);
   const photo = document.getElementById('playlist-photo').files?.[0];
   if (photo) data.append('photo', photo);
@@ -6928,12 +7000,7 @@ async function savePlaylist(event) {
     const savedPlaylist = await request('/playlists', { method: 'POST', body: data });
     closeDialog();
     await loadLibrary();
-    if (state.pendingSongId && savedPlaylist?.id) {
-      await request(`/playlists/${encodeURIComponent(savedPlaylist.id)}/tracks`, {
-        method: 'POST',
-        body: JSON.stringify({ userId: state.user?._id, songId: state.pendingSongId })
-      });
-      await loadLibrary();
+    if (pendingSongId && savedPlaylist?.id) {
       state.pendingSongId = null;
       state.selectedSongId = null;
       showToast('Playlist creada y canción agregada.');
@@ -7006,15 +7073,86 @@ function openAddToPlaylist(songId, playlistId = null) {
 }
 
 async function addSongToPlaylist(playlist, songId) {
-  try {
-    await request(`/playlists/${encodeURIComponent(playlist.id)}/tracks`, {
-      method: 'POST',
-      body: JSON.stringify({ userId: state.user?._id, songId })
+  const playlistId = String(playlist?.id || '');
+  const normalizedSongId = String(songId || '');
+  const currentUser = state.user;
+  const targetPlaylist = state.playlists.find(item => String(item.id) === playlistId);
+  const song = state.songs.find(item => getSongId(item) === normalizedSongId);
+  const pendingKey = `${playlistId}:${normalizedSongId}`;
+  if (!playlistId || !normalizedSongId || !targetPlaylist || !song || !currentUser?._id) {
+    showToast('No se pudo identificar la canción o playlist.', true);
+    return;
+  }
+  if ((targetPlaylist.tracks || []).some(track => getSongId(track) === normalizedSongId)) {
+    showToast('La canción ya está en esta playlist.');
+    return;
+  }
+  if (pendingPlaylistAdds.has(pendingKey)) return;
+  pendingPlaylistAdds.add(pendingKey);
+  const songDuration = Math.max(0, Number(song.duration) || 0);
+  const optimisticTrack = {
+    ...song,
+    addedBy: { _id: currentUser._id, username: currentUser.username },
+    addedAt: new Date().toISOString()
+  };
+  targetPlaylist.duration = (Number(targetPlaylist.duration)
+    || (targetPlaylist.tracks || []).reduce((total, track) => total + (Number(track.duration) || 0), 0))
+    + songDuration;
+  targetPlaylist.updatedAt = optimisticTrack.addedAt;
+  targetPlaylist.tracks = [...(targetPlaylist.tracks || []), optimisticTrack];
+  if (state.currentPlaylistId === playlistId) renderCurrentView();
+  if (state.offlineEnabled) {
+    void saveOfflinePlaylists(currentUser._id, state.playlists).catch(error => {
+      console.error('No se pudo guardar la playlist optimista en la caché offline.', error);
     });
-    await loadLibrary();
-    showToast(`Agregada a ${playlist.name}.`);
+  }
+  showToast(`Agregada localmente; sincronizando “${song.name}”…`);
+  try {
+    const result = await request(`/playlists/${encodeURIComponent(playlistId)}/tracks`, {
+      method: 'POST',
+      body: JSON.stringify({ userId: currentUser._id, songId: normalizedSongId })
+    });
+    const updatedPlaylist = state.playlists.find(item => String(item.id) === playlistId);
+    if (updatedPlaylist && Number.isFinite(Number(result?.duration))) {
+      updatedPlaylist.duration = Math.max(
+        Number(updatedPlaylist.duration) || 0,
+        Number(result.duration)
+      );
+    }
+    if (state.offlineEnabled) {
+      void saveOfflinePlaylists(currentUser._id, state.playlists).catch(error => {
+        console.error('No se pudo actualizar la caché offline de playlists.', error);
+      });
+    }
+    if (state.currentPlaylistId === playlistId) renderCurrentView();
+    showToast(`“${song.name}” se agregó a “${targetPlaylist.name}”.`);
   } catch (error) {
-    showToast(error.message || 'No se pudo agregar la canción.', true);
+    const updatedPlaylist = state.playlists.find(item => String(item.id) === playlistId);
+    const alreadyAdded = /ya está en la playlist/i.test(error.message || '');
+    if (updatedPlaylist && !alreadyAdded) {
+      const hadOptimisticTrack = (updatedPlaylist.tracks || []).includes(optimisticTrack);
+      const hasConfirmedTrack = (updatedPlaylist.tracks || []).some(track => (
+        getSongId(track) === normalizedSongId && track !== optimisticTrack
+      ));
+      if (hadOptimisticTrack && !hasConfirmedTrack) {
+        updatedPlaylist.tracks = updatedPlaylist.tracks.filter(track => track !== optimisticTrack);
+        updatedPlaylist.duration = Math.max(0, (Number(updatedPlaylist.duration) || 0) - songDuration);
+      }
+    }
+    if (alreadyAdded) {
+      void loadLibrary();
+      showToast('La canción ya estaba en esta playlist.');
+    } else {
+      showToast(error.message || 'No se pudo agregar la canción.', true);
+    }
+    if (state.currentPlaylistId === playlistId) renderCurrentView();
+    if (state.offlineEnabled) {
+      void saveOfflinePlaylists(currentUser._id, state.playlists).catch(saveError => {
+        console.error('No se pudo revertir la caché offline de playlists.', saveError);
+      });
+    }
+  } finally {
+    pendingPlaylistAdds.delete(pendingKey);
   }
 }
 
