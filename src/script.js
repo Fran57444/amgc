@@ -48,6 +48,7 @@ export function initMusicPlayer() {
     let offlineModeEnabled = false;
     let offlineDownloadPopupTimer = null;
     let offlineRecoveryTimer = null;
+    let offlineSessionRefreshInProgress = false;
     let offlineListeningBuffer = 0;
     let offlineListeningLastSample = null;
     let offlineListeningLastPersistAt = 0;
@@ -350,7 +351,8 @@ export function initMusicPlayer() {
         return response;
     };
     async function refreshOfflineSession() {
-        if (!accessToken || !navigator.onLine) return false;
+        if (!accessToken || !navigator.onLine || offlineSessionRefreshInProgress) return false;
+        offlineSessionRefreshInProgress = true;
         try {
             const response = await fetch(`${API_URL}/auth/me`, {
                 headers: { Authorization: `Bearer ${accessToken}` }
@@ -374,7 +376,13 @@ export function initMusicPlayer() {
             syncOfflineStatusIndicators();
             syncAccessControls();
             if (isProfileMode) renderProfile();
-            if (!(await syncOfflineListening())) return false;
+            if (!(await syncOfflineListening())) {
+                offlineOnly = true;
+                syncOfflineStatusIndicators();
+                syncAccessControls();
+                socket.disconnect();
+                return false;
+            }
             if (offlineRecoveryTimer) {
                 clearInterval(offlineRecoveryTimer);
                 offlineRecoveryTimer = null;
@@ -386,8 +394,14 @@ export function initMusicPlayer() {
             if (isProfileMode) renderProfile();
             return true;
         } catch (error) {
+            offlineOnly = true;
+            syncOfflineStatusIndicators();
+            syncAccessControls();
+            socket.disconnect();
             console.warn('El servidor aún no está disponible para salir del modo offline.', error);
             return false;
+        } finally {
+            offlineSessionRefreshInProgress = false;
         }
     }
     function startOfflineRecoveryTimer() {
@@ -452,6 +466,7 @@ export function initMusicPlayer() {
     };
     window.addEventListener('storage', handleOfflineStorageChange);
     const showToast = (message, error = false) => {
+        if (!error) return;
         let toast = document.getElementById('app-toast');
         if (!toast) {
             toast = document.createElement('div');
@@ -1059,7 +1074,7 @@ export function initMusicPlayer() {
     }
 
     function getTrackStorageId(track) {
-        return String(track?._id || track?.path || '');
+        return String(track?._id || track?.id || track?.path || '');
     }
 
     function formatLyricTimestamp(time) {
@@ -2711,17 +2726,7 @@ export function initMusicPlayer() {
             sharedDevicePlayback = null;
             if (sharedPlaybackClockTimer) clearInterval(sharedPlaybackClockTimer);
             sharedPlaybackClockTimer = null;
-            const queuePosition = accountQueueIds.indexOf(requestedSongId);
-            let queueSource = 'regular';
-            if (queuePosition >= 0) {
-                customQueue = accountQueueIds.slice(queuePosition + 1)
-                    .map(songId => playlist.find(track => String(track._id || track.id) === songId))
-                    .filter(Boolean);
-                activeQueueTracks = [playlist[trackIndex]];
-                generalQueueAnchorTrackId = String(playlist[trackIndex]._id || playlist[trackIndex].id);
-                unplayedIndices = [];
-                queueSource = 'custom';
-            }
+            const queueSource = 'regular';
             const alreadyPlayingRequestedSong = shouldResume
                 && !audio.paused
                 && String(getCurrentTrack()?._id || getCurrentTrack()?.id || '') === requestedSongId;
@@ -2747,6 +2752,14 @@ export function initMusicPlayer() {
             sharedPlaybackTime = Number(audio.currentTime) || 0;
             sharedPlaybackDuration = Number(audio.duration) || duration;
             if (shouldResume && audio.paused) await audio.play();
+            customQueue = [];
+            activePlaylistId = null;
+            queueName = 'GENERAL';
+            activeQueueTracks = [...playlist];
+            generalQueueAnchorTrackId = String(playlist[trackIndex]._id || playlist[trackIndex].id);
+            unplayedIndices = [];
+            savePendingAccountQueueIds([]);
+            renderQueue();
             isActivatingPlaybackTransfer = false;
             clearPendingPlaybackTakeover(requestedSongId);
             broadcastPlaybackState(true);
@@ -2865,6 +2878,14 @@ export function initMusicPlayer() {
             clearPendingPlaybackTakeover(String(songId));
             return false;
         }
+        customQueue = [];
+        activePlaylistId = null;
+        queueName = 'GENERAL';
+        activeQueueTracks = [...playlist];
+        generalQueueAnchorTrackId = String(playlist[trackIndex]._id || playlist[trackIndex].id);
+        unplayedIndices = [];
+        savePendingAccountQueueIds([]);
+        renderQueue();
         if (socket.connected) void resumePendingPlaybackTakeover();
         return true;
     }
@@ -4282,22 +4303,12 @@ export function initMusicPlayer() {
                 return;
             }
             const previousQueue = [...customQueue];
-            const previousActiveQueueTracks = [...activeQueueTracks];
-            const previousAnchorTrackId = generalQueueAnchorTrackId;
-            const previousUnplayedIndices = [...unplayedIndices];
-            const currentTrack = getCurrentTrack();
             customQueue = tracks;
-            activeQueueTracks = currentTrack ? [currentTrack] : [];
-            generalQueueAnchorTrackId = currentTrack ? String(currentTrack._id) : null;
-            unplayedIndices = [];
-            renderQueue();
+            renderQueue({ syncAccount: false });
             const synchronized = await publishAccountQueueSnapshot(true, true);
             if (!synchronized) {
                 customQueue = previousQueue;
-                activeQueueTracks = previousActiveQueueTracks;
-                generalQueueAnchorTrackId = previousAnchorTrackId;
-                unplayedIndices = previousUnplayedIndices;
-                renderQueue();
+                renderQueue({ syncAccount: false });
                 acknowledge({ success: false, error: 'No se pudo confirmar la actualización de la cola.' });
                 return;
             }
@@ -6064,6 +6075,8 @@ export function initMusicPlayer() {
         const requestSequence = ++musicDataRequestSequence;
         const userAtRequestStart = getStoredUser();
         const previousCatalogTrackIds = new Set(playlist.map(getTrackStorageId));
+        const previousActiveQueueTrackIds = activeQueueTracks.map(getTrackStorageId);
+        const previousTracksById = new Map(playlist.map(track => [getTrackStorageId(track), track]));
         const previousShuffleTrackIds = isShuffle
             ? unplayedIndices.map(index => getTrackStorageId(playlist[index])).filter(Boolean)
             : null;
@@ -6080,6 +6093,7 @@ export function initMusicPlayer() {
         const previousTrackId = ownsCurrentPlayback ? getCurrentTrack()?._id : null;
         const previousPlaybackTime = ownsCurrentPlayback && Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
         const wasPlayingBeforeRefresh = ownsCurrentPlayback && !audio.paused && !audio.ended;
+        let libraryLoaded = false;
         if (inlineSpinner) inlineSpinner.style.display = 'block';
         if (perroGif) perroGif.style.display = 'none';
 
@@ -6089,13 +6103,17 @@ export function initMusicPlayer() {
                     ? await getOfflineLibrary(userAtRequestStart._id)
                     : null;
                 if (requestSequence !== musicDataRequestSequence) return;
-                playlist = cachedLibrary?.songs || [];
-                await hydrateOfflineSongCovers(playlist);
-                if (!playlist.length) updateOfflineCacheStatus('No hay canciones guardadas en este dispositivo.');
+                if (cachedLibrary) {
+                    playlist = cachedLibrary.songs || [];
+                    libraryLoaded = true;
+                    await hydrateOfflineSongCovers(playlist);
+                    if (!playlist.length) updateOfflineCacheStatus('No hay canciones guardadas en este dispositivo.');
+                }
             } else {
                 const data = await fetchJsonWithRetry(`${API_URL}/songs`);
                 if (requestSequence !== musicDataRequestSequence) return;
                 playlist = data.songs || [];
+                libraryLoaded = true;
                 if (userAtRequestStart?._id && offlineModeEnabled) {
                     try {
                         await saveOfflineLibrary(userAtRequestStart._id, playlist);
@@ -6130,11 +6148,10 @@ export function initMusicPlayer() {
                 startOfflineRecoveryTimer();
                 setStoredUser(cachedUser);
                 playlist = cachedLibrary.songs || [];
+                libraryLoaded = true;
                 await hydrateOfflineSongCovers(playlist);
                 hideAuthOverlay();
                 updateOfflineCacheStatus('Sin conexión: reproduciendo el catálogo guardado en este dispositivo.');
-            } else {
-                playlist = [];
             }
         } finally {
             if (inlineSpinner) inlineSpinner.style.display = 'none';
@@ -6142,9 +6159,12 @@ export function initMusicPlayer() {
         }
 
         if (requestSequence !== musicDataRequestSequence) return;
+        if (!libraryLoaded) return;
         const selectedTrackId = currentTrackId || previousTrackId;
+        let selectedTrackWasRemoved = false;
         if (selectedTrackId) {
             const refreshedTrackIndex = playlist.findIndex(track => String(track._id) === String(selectedTrackId));
+            selectedTrackWasRemoved = refreshedTrackIndex === -1;
             currentTrackIndex = refreshedTrackIndex >= 0
                 ? refreshedTrackIndex
                 : Math.min(currentTrackIndex, Math.max(0, playlist.length - 1));
@@ -6153,7 +6173,17 @@ export function initMusicPlayer() {
             currentTrackIndex = Math.min(currentTrackIndex, Math.max(0, playlist.length - 1));
         }
 
-        activeQueueTracks = [...playlist];
+        activeQueueTracks = queueName === 'GENERAL'
+            ? [...playlist]
+            : previousActiveQueueTrackIds
+                .map(trackId => playlist.find(track => getTrackStorageId(track) === trackId))
+                .filter(Boolean);
+        if (selectedTrackWasRemoved) {
+            const replacementTrack = activeQueueTracks[0]
+                || (queueName === 'GENERAL' ? playlist[0] : null);
+            currentTrackIndex = replacementTrack ? playlist.indexOf(replacementTrack) : 0;
+            currentTrackId = replacementTrack?._id ?? null;
+        }
         if (previousShuffleTrackIds) {
             const indexByTrackId = new Map(playlist.map((track, index) => [getTrackStorageId(track), index]));
             const queuedIndices = new Set();
@@ -6191,6 +6221,55 @@ export function initMusicPlayer() {
             }
         }
         renderAllSongs();
+        const refreshedCurrentTrack = selectedTrackId
+            ? playlist.find(track => String(track._id) === String(selectedTrackId))
+            : null;
+        const previousCurrentTrack = selectedTrackId
+            ? previousTracksById.get(String(selectedTrackId))
+            : null;
+        const refreshedSource = refreshedCurrentTrack?.path || refreshedCurrentTrack?.audioUrl || '';
+        const previousSource = previousCurrentTrack?.path || previousCurrentTrack?.audioUrl || '';
+        if (
+            selectedTrackWasRemoved
+            && ownsCurrentPlayback
+            && currentTrackSource !== 'together'
+            && !getRemotePlaybackSession()
+        ) {
+            if (currentTrackId !== null) {
+                await loadAndPlayTrack(currentTrackIndex, currentTrackSource, wasPlayingBeforeRefresh);
+            } else {
+                audio.pause();
+                audioSourceLoadToken += 1;
+                audio.removeAttribute('src');
+                audio.load();
+                if (activeAudioObjectUrl) URL.revokeObjectURL(activeAudioObjectUrl);
+                if (activeAudioObjectUrlKey) offlineMediaManager.forgetObjectUrl(activeAudioObjectUrlKey);
+                activeAudioObjectUrl = null;
+                activeAudioObjectUrlKey = null;
+                trackNameEl.textContent = '';
+                trackArtistEl.textContent = '';
+                bottomBarCover.removeAttribute('src');
+                bottomBarCover.alt = 'SIN IMG';
+                bottomBarCover.classList.add('no-image');
+                updateDiscordPresence();
+            }
+        }
+        if (
+            refreshedCurrentTrack
+            && previousSource
+            && refreshedSource !== previousSource
+            && !offlineOnly
+            && currentTrackSource !== 'together'
+            && !getRemotePlaybackSession()
+        ) {
+            const refreshedIndex = playlist.indexOf(refreshedCurrentTrack);
+            await loadAndPlayTrack(
+                refreshedIndex,
+                currentTrackSource,
+                !audio.paused && !audio.ended,
+                Number.isFinite(audio.currentTime) ? audio.currentTime : 0
+            );
+        }
         if (playlist.length > 0 && !audio.src && userAtRequestStart?._id) {
             const user = userAtRequestStart;
             let savedPlayback = null;
@@ -6829,14 +6908,10 @@ export function initMusicPlayer() {
     }
 
     function getAccountQueueSongIds() {
-        const sourceIndices = isShuffle ? [...unplayedIndices] : getSequentialQueueIndices();
-        return [
-            ...customQueue.map(track => String(track?._id || track?.id || '')).filter(Boolean),
-            ...sourceIndices
-                .map(index => playlist[index])
-                .map(track => String(track?._id || track?.id || ''))
-                .filter(Boolean)
-        ].slice(0, 5000);
+        return customQueue
+            .map(track => String(track?._id || track?.id || ''))
+            .filter(Boolean)
+            .slice(0, 5000);
     }
 
     function getAccountQueueStorageKey(kind) {
@@ -10116,8 +10191,25 @@ export function initMusicPlayer() {
     audio.addEventListener('error', () => {
         audioLoading = false;
         renderPlaybackLoading();
-        if (currentTrackSource !== 'together' || !isCurrentAudioSource(getCurrentTrack())) return;
-        stopFollowingUnavailablePlayback('No se pudo cargar la canción que estás siguiendo.');
+        const currentTrack = getCurrentTrack();
+        if (!isCurrentAudioSource(currentTrack)) return;
+        if (currentTrackSource === 'together') {
+            stopFollowingUnavailablePlayback('No se pudo cargar la canción que estás siguiendo.');
+            return;
+        }
+        console.error('No se pudo cargar la canción actual.', {
+            trackId: getTrackStorageId(currentTrack),
+            source: audio.currentSrc,
+            code: audio.error?.code,
+            message: audio.error?.message
+        });
+        const audioErrorMessages = {
+            1: 'La carga de la canción fue cancelada.',
+            2: 'Error de red al cargar la canción. Comprueba tu conexión.',
+            3: 'El formato de audio no se pudo decodificar.',
+            4: 'El servidor no ofrece un formato de audio compatible.'
+        };
+        showToast(audioErrorMessages[audio.error?.code] || 'No se pudo cargar la canción.', true);
     });
 
     audio.addEventListener('waiting', () => {
@@ -10221,7 +10313,7 @@ export function initMusicPlayer() {
         });
     }
 
-    function renderQueue() {
+    function renderQueue({ syncAccount = true } = {}) {
         queueList.innerHTML = '';
         const remotePlayback = getRemotePlaybackSession();
         const isLocalQueue = !remotePlayback && !listeningTogetherUserId && sharedQueueRole !== 'follower';
@@ -10388,7 +10480,9 @@ export function initMusicPlayer() {
             queueList.appendChild(emptyQueue);
         }
         publishSharedQueueSnapshot();
-        if (!remotePlayback && !listeningTogetherUserId && currentTrack) publishAccountQueueSnapshot();
+        if (syncAccount && !remotePlayback && !listeningTogetherUserId && currentTrack) {
+            publishAccountQueueSnapshot();
+        }
     }
 
     function loadAndPlayTrack(index, source = 'regular', shouldPlay = true, restoreTime = 0, forceLocal = false) {
@@ -10401,6 +10495,12 @@ export function initMusicPlayer() {
         if (isFollowingPlayback() && source !== 'together') return Promise.resolve(false);
         if (index >= playlist.length) index = 0;
         if (index < 0) index = playlist.length - 1;
+        const track = playlist[index];
+        if (!track) return Promise.resolve(false);
+        if (!track.path && !track.audioUrl && !offlineModeEnabled && !offlineOnly) {
+            showToast('Esta canción no tiene un archivo de audio disponible.', true);
+            return Promise.resolve(false);
+        }
 
         listeningTogetherMetadataWaitToken += 1;
         listeningTogetherMetadataWaitTrackId = null;
@@ -10409,8 +10509,6 @@ export function initMusicPlayer() {
         currentTrackSource = source;
         resetSynchronizedPlaybackRate();
         updateListeningTogetherControls();
-        const track = playlist[currentTrackIndex];
-        if (!track) return;
         currentTrackId = track._id;
         if (source !== 'custom') generalQueueAnchorTrackId = String(track._id);
         const currentUser = getStoredUser();
@@ -10443,7 +10541,8 @@ export function initMusicPlayer() {
             if (offlineOnly && !localUrl) {
                 throw new Error(`"${track.name}" no está descargada para reproducirse sin conexión.`);
             }
-            const source = localUrl || track.path;
+            const source = localUrl || track.path || track.audioUrl;
+            if (!source) throw new Error(`"${track.name}" no tiene un archivo de audio disponible.`);
             if (activeAudioObjectUrl && activeAudioObjectUrl !== source) {
                 URL.revokeObjectURL(activeAudioObjectUrl);
                 if (activeAudioObjectUrlKey) offlineMediaManager.forgetObjectUrl(activeAudioObjectUrlKey);
@@ -10486,7 +10585,7 @@ export function initMusicPlayer() {
                     audio.currentTime = Math.min(restoreTime, audio.duration || restoreTime);
                 }, { once: true });
             }
-            audio.src = track.path;
+            audio.src = track.path || track.audioUrl;
             audio.currentTime = 0;
             if (shouldPlay) {
                 playbackPromise = audio.play().then(() => sourceLoadToken === audioSourceLoadToken).catch(error => {
@@ -10547,34 +10646,54 @@ export function initMusicPlayer() {
             return;
         }
         if (isFollowingPlayback() || isRemotePlaybackLocked()) return;
+        const hasPlayableSource = track => (
+            offlineModeEnabled
+            || offlineOnly
+            || Boolean(track?.path || track?.audioUrl)
+        );
         if (customQueue.length > 0) {
-            const nextTrack = customQueue.shift();
-            const idx = playlist.findIndex(t => t.path === nextTrack.path);
-            if (idx !== -1) {
+            while (customQueue.length > 0) {
+                const nextTrack = customQueue.shift();
+                const nextTrackId = getTrackStorageId(nextTrack);
+                const idx = playlist.findIndex(track => getTrackStorageId(track) === nextTrackId);
+                if (idx === -1) continue;
+                if (!hasPlayableSource(playlist[idx])) continue;
                 if (playlist[currentTrackIndex]) playbackHistory.push({ index: currentTrackIndex, source: currentTrackSource });
                 loadAndPlayTrack(idx, 'custom');
+                return;
             }
-            return;
         }
 
         if (isShuffle) {
-            if (unplayedIndices.length === 0) {
-                unplayedIndices = buildShuffleQueue();
+            if (unplayedIndices.length === 0) unplayedIndices = buildShuffleQueue();
+            while (unplayedIndices.length > 0) {
+                const nextRandom = unplayedIndices.shift();
+                if (!hasPlayableSource(playlist[nextRandom])) continue;
+                if (playlist[currentTrackIndex]) playbackHistory.push({ index: currentTrackIndex, source: currentTrackSource });
+                loadAndPlayTrack(nextRandom, 'shuffle');
+                return;
             }
-            if (unplayedIndices.length === 0) return;
-
-            const nextRandom = unplayedIndices.shift();
-            if (playlist[currentTrackIndex]) playbackHistory.push({ index: currentTrackIndex, source: currentTrackSource });
-            loadAndPlayTrack(nextRandom, 'shuffle');
+            showToast('No hay canciones disponibles para reproducir en la cola.', true);
         } else {
-            const nextIndex = getSequentialQueueIndices()[0];
+            const nextIndex = getSequentialQueueIndices().find(index => hasPlayableSource(playlist[index]));
             if (nextIndex !== undefined) {
                 if (playlist[currentTrackIndex]) playbackHistory.push({ index: currentTrackIndex, source: currentTrackSource });
                 loadAndPlayTrack(nextIndex, 'regular');
-            } else if (playlist.length > 0) {
-                currentTrackIndex = 0;
-                activeQueueTracks = activeQueueTracks.length ? activeQueueTracks : [...playlist];
-                loadAndPlayTrack(0, 'regular');
+            } else {
+                const firstQueueIndex = activeQueueTracks
+                    .map(track => playlist.findIndex(item => getTrackStorageId(item) === getTrackStorageId(track)))
+                    .find(index => index !== -1 && hasPlayableSource(playlist[index]))
+                    ?? (queueName === 'GENERAL'
+                        ? playlist.findIndex(hasPlayableSource)
+                        : -1);
+                if (firstQueueIndex !== -1) {
+                    if (playlist[currentTrackIndex]) {
+                        playbackHistory.push({ index: currentTrackIndex, source: currentTrackSource });
+                    }
+                    loadAndPlayTrack(firstQueueIndex, 'regular');
+                } else {
+                    showToast('No hay canciones disponibles para reproducir en la cola.', true);
+                }
             }
         }
     }

@@ -4,6 +4,8 @@ import {
     saveOfflineMedia
 } from './offlineStore.js';
 
+const OFFLINE_RESOURCE_TIMEOUT_MS = 60000;
+
 export function createOfflineMediaManager({ apiUrl, getState, updateStatus, getActiveObjectUrl }) {
     const objectUrls = new Map();
     let syncInProgress = false;
@@ -73,9 +75,18 @@ export function createOfflineMediaManager({ apiUrl, getState, updateStatus, getA
         let blob;
         let lastNetworkError;
         for (let attempt = 0; attempt < 3; attempt += 1) {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), OFFLINE_RESOURCE_TIMEOUT_MS);
             try {
-                response = await fetch(resolvedUrl, { credentials: 'omit' });
+                response = await fetch(resolvedUrl, {
+                    credentials: 'omit',
+                    signal: controller.signal
+                });
                 if (response.ok) {
+                    const contentType = response.headers.get('content-type')?.toLowerCase() || '';
+                    if (contentType.includes('text/html') || contentType.includes('application/json')) {
+                        throw new Error('El servidor devolvió una página en lugar del recurso multimedia.');
+                    }
                     blob = await response.blob();
                     break;
                 }
@@ -84,11 +95,13 @@ export function createOfflineMediaManager({ apiUrl, getState, updateStatus, getA
                 }
                 lastNetworkError = new Error(`El servidor respondió ${response.status}.`);
             } catch (error) {
-                if (error instanceof TypeError) {
+                if (error instanceof TypeError || error.name === 'AbortError') {
                     lastNetworkError = error;
                 } else {
                     throw error;
                 }
+            } finally {
+                clearTimeout(timeoutId);
             }
             if (attempt < 2) {
                 await new Promise(resolve => setTimeout(resolve, 750 * (2 ** attempt)));
@@ -129,7 +142,7 @@ export function createOfflineMediaManager({ apiUrl, getState, updateStatus, getA
                     if (url && typeof url === 'string' && !url.startsWith('data:')) resources.set(key, url);
                 };
                 state.playlist.forEach(song => {
-                    addResource(`song:${song._id}:audio`, song.path);
+                    addResource(`song:${song._id}:audio`, song.path || song.audioUrl);
                     addResource(`song:${song._id}:cover`, song.cover);
                 });
                 state.userPlaylists.forEach(playlistItem => {

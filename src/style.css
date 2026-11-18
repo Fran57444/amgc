@@ -25,7 +25,7 @@ input, textarea, select {
     pointer-events: none;
 }
 
-#track-name, #track-artist, #popup-song-name, .queue-item-name, 
+#track-name, #track-artist, #popup-song-name, .queue-item-name,
 .queue-item-artist, .all-songs-item-name, .friend-sidebar-name, 
 .friend-sidebar-song strong, .profile-sidebar-card span, 
 .profile-activity-details strong, .profile-activity-details small, 

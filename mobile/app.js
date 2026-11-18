@@ -32,6 +32,7 @@ const STORAGE_KEYS = {
   user: 'amgc-mobile-user'
 };
 const PLAYBACK_DEVICE_STORAGE_KEY = 'amgc-playback-device-id';
+const OFFLINE_RESOURCE_TIMEOUT_MS = 60000;
 let playbackDeviceId = localStorage.getItem(PLAYBACK_DEVICE_STORAGE_KEY);
 if (!playbackDeviceId) {
   playbackDeviceId = window.crypto && typeof window.crypto.randomUUID === 'function'
@@ -162,9 +163,8 @@ let audioSourceNode = null;
 let annoyAudioBufferPromise = null;
 let trackLoadSequence = 0;
 let activeOfflineAudioUrl = null;
-let activeTrackIsRemoteStream = false;
 let activeTrackUsingOfflineCache = false;
-let activeTrackFallbackState = { cache: false, apiProxy: false };
+let activeTrackFallbackState = { cache: false };
 let currentTrackShouldAutoplay = false;
 let handledEndedTrackSequence = 0;
 const playlistOrderSaves = new Map();
@@ -776,17 +776,6 @@ async function activateTransferredPlayback(request = {}, acknowledge = () => {})
       throw new Error('La canción transferida no está disponible en la biblioteca de este dispositivo.');
     }
     const song = queue[index];
-    const accountQueueIds = getDisplayedAccountQueueIds();
-    const queuedTracks = accountQueueIds
-      .map(id => state.songs.find(track => getSongId(track) === id))
-      .filter(Boolean);
-    const requestedQueuePosition = accountQueueIds.indexOf(requestedSongId);
-    state.upcomingQueue = requestedQueuePosition >= 0
-      ? queuedTracks.slice(requestedQueuePosition + 1)
-      : queuedTracks;
-    persistUpcomingQueue();
-    queue = [song];
-    index = 0;
     const duration = Math.max(0, Number(playback.duration) || 0);
     let restoreTime = requestedSongId === String(playback.songId)
       ? getSharedPlaybackTime(playback)
@@ -854,6 +843,10 @@ async function activateTransferredPlayback(request = {}, acknowledge = () => {})
       elements.audio.currentTime = Math.min(restoreTime, elements.audio.duration || restoreTime);
     }
     if (shouldResume && elements.audio.paused) await elements.audio.play();
+    state.upcomingQueue = [];
+    persistUpcomingQueue();
+    savePendingAccountQueueIds([]);
+    renderPlayerQueue({ syncAccount: false });
     isActivatingPlaybackTransfer = false;
     state.ownPlayback = {
       ...playback,
@@ -1136,6 +1129,7 @@ function generatePlaylistId() {
 }
 
 function showToast(message, isError = false) {
+  if (!isError) return;
   clearTimeout(toastTimer);
   elements.toast.textContent = message;
   elements.toast.classList.toggle('error', isError);
@@ -2482,11 +2476,6 @@ async function updatePlaybackNotification() {
     try {
       if (!cachedNativeNotificationCoverPath && coverCacheKey) {
         let cachedCover = await getOfflineMedia(coverCacheKey);
-        if (!cachedCover?.localPath) {
-          const smallCoverKey = getImageCacheKey(coverSource, 'small')
-            || `song:${getSongId(song)}:cover`;
-          if (smallCoverKey !== coverCacheKey) cachedCover = await getOfflineMedia(smallCoverKey);
-        }
         if (revision !== nativeNotificationRevision) return;
         cachedNativeNotificationCoverPath = cachedCover?.localPath || '';
       }
@@ -2526,7 +2515,7 @@ async function updatePlaybackNotification() {
       body: `${song.name || 'Canción'}  ·  ${song.artist || 'Artista desconocido'}`,
       icon: appIcon,
       badge: appIcon,
-      image: getSongCover(song) ? resolveImageUrl(getSongCover(song)) : undefined,
+      image: getSongCover(song) ? resolveImageUrl(getSongCover(song), 'large') : undefined,
       tag: 'amgc-mobile-playback',
       renotify: false,
       silent: true,
@@ -2896,21 +2885,33 @@ async function cacheOfflineResource(key, source) {
   let blob;
   let lastError;
   for (let attempt = 0; attempt < 3; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), OFFLINE_RESOURCE_TIMEOUT_MS);
     try {
-      const response = await fetch(url, { mode: 'cors', credentials: 'omit' });
+      const response = await fetch(url, {
+        mode: 'cors',
+        credentials: 'omit',
+        signal: controller.signal
+      });
       if (!response.ok) {
         if (response.status < 500 && response.status !== 429) {
           throw new Error(`El servidor respondió ${response.status}.`);
         }
         lastError = new Error(`El servidor respondió ${response.status}.`);
       } else {
+        const contentType = response.headers.get('content-type')?.toLowerCase() || '';
+        if (contentType.includes('text/html') || contentType.includes('application/json')) {
+          throw new Error('El servidor devolvió una página en lugar del recurso multimedia.');
+        }
         blob = await response.blob();
         if (!blob.size) throw new Error('El archivo descargado está vacío.');
         break;
       }
     } catch (error) {
-      if (!(error instanceof TypeError)) throw error;
+      if (!(error instanceof TypeError) && error.name !== 'AbortError') throw error;
       lastError = error;
+    } finally {
+      window.clearTimeout(timeoutId);
     }
     if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 1000 * (2 ** attempt)));
   }
@@ -4370,10 +4371,7 @@ function addToUpcomingQueue(song) {
 }
 
 function getAccountQueueTracks() {
-  const sourceQueue = state.shuffle
-    ? state.shuffleQueue.map(index => state.queue[index])
-    : state.queue.slice(state.queueIndex + 1);
-  return [...state.upcomingQueue, ...sourceQueue].filter(Boolean);
+  return state.upcomingQueue;
 }
 
 function publishAccountQueueSnapshot(force = false, retried = false, allowPending = false) {
@@ -4712,6 +4710,10 @@ function rebuildShuffleQueue() {
   }
 }
 
+function hasPlayableAudioSource(song) {
+  return state.offlineEnabled || Boolean(song?.path || song?.audioUrl);
+}
+
 async function playUpcomingTrack(index) {
   if (getRemotePlaybackSession()) {
     const song = state.upcomingQueue[index];
@@ -4721,6 +4723,19 @@ async function playUpcomingTrack(index) {
   }
   if (isRemotePlaybackLocked()) return false;
   if (index < 0 || index >= state.upcomingQueue.length) return false;
+  while (
+    index < state.upcomingQueue.length
+    && !hasPlayableAudioSource(state.upcomingQueue[index])
+  ) {
+    state.upcomingQueue.splice(index, 1);
+  }
+  if (index >= state.upcomingQueue.length) {
+    persistUpcomingQueue();
+    emitSharedQueueSnapshot();
+    renderPlayerQueue();
+    showToast('No hay canciones disponibles para reproducir en la cola.', true);
+    return false;
+  }
   const skippedTracks = state.upcomingQueue.splice(0, index + 1);
   const song = skippedTracks[skippedTracks.length - 1];
   persistUpcomingQueue();
@@ -4737,7 +4752,6 @@ async function loadTrack(song, {
   restoreTime = 0,
   showError = true,
   cacheOnly = false,
-  forceApiProxy = false,
   bypassOfflineCache = false,
   fallbackState = null,
   awaitPlaybackStart = false
@@ -4745,43 +4759,41 @@ async function loadTrack(song, {
   if (autoplay && isRemotePlaybackLocked()) return false;
   const loadSequence = ++trackLoadSequence;
   currentTrackShouldAutoplay = autoplay;
-  activeTrackIsRemoteStream = false;
   activeTrackUsingOfflineCache = false;
   activeTrackFallbackState = fallbackState || {
-    cache: cacheOnly || bypassOfflineCache,
-    apiProxy: forceApiProxy
+    cache: cacheOnly || bypassOfflineCache
   };
-  const source = song.path || song.audioUrl;
-  if (!source) {
-    if (showError) showToast('Esta canción no tiene un archivo de audio disponible.', true);
-    return false;
-  }
+  const source = song.path || song.audioUrl || '';
   try {
-    let mediaUrl = resolveMediaUrl(source);
-    if (forceApiProxy) {
-      const driveFileId = getDriveFileId(mediaUrl);
-      if (driveFileId) mediaUrl = `${API_BASE_URL}/media/${encodeURIComponent(driveFileId)}`;
-    }
+    let mediaUrl = source ? resolveMediaUrl(source) : '';
     const mediaKey = `song:${getSongId(song)}:audio`;
-    const cached = forceApiProxy || bypassOfflineCache ? null : await getOfflineMedia(mediaKey);
+    const cached = bypassOfflineCache ? null : await getOfflineMedia(mediaKey);
     if (loadSequence !== trackLoadSequence) return false;
-    if (cached?.localPath && (!cached.sourceUrl || sameMediaSource(cached.sourceUrl, mediaUrl))) {
+    if (cached?.localPath && (!source || !cached.sourceUrl || sameMediaSource(cached.sourceUrl, mediaUrl))) {
       if (activeOfflineAudioUrl) URL.revokeObjectURL(activeOfflineAudioUrl);
       activeOfflineAudioUrl = null;
       mediaUrl = Capacitor.convertFileSrc(cached.localPath);
       activeTrackUsingOfflineCache = true;
-    } else if (cached?.blob && (!cached.sourceUrl || sameMediaSource(cached.sourceUrl, mediaUrl))) {
+    } else if (cached?.blob && (!source || !cached.sourceUrl || sameMediaSource(cached.sourceUrl, mediaUrl))) {
       if (activeOfflineAudioUrl) URL.revokeObjectURL(activeOfflineAudioUrl);
       activeOfflineAudioUrl = URL.createObjectURL(cached.blob);
       mediaUrl = activeOfflineAudioUrl;
       activeTrackUsingOfflineCache = true;
+    } else if (!source) {
+      currentTrackShouldAutoplay = false;
+      elements.audio.pause();
+      elements.audio.removeAttribute('src');
+      elements.audio.load();
+      if (activeOfflineAudioUrl) URL.revokeObjectURL(activeOfflineAudioUrl);
+      activeOfflineAudioUrl = null;
+      updatePlayerUI();
+      throw new Error('Esta canción no tiene un archivo de audio disponible.');
     } else if (isAndroidNative && getDriveFileId(mediaUrl)) {
       if (cacheOnly || !navigator.onLine || state.offlineOnly) {
         throw new Error('Esta canción no está descargada para escucharla sin conexión.');
       }
       if (activeOfflineAudioUrl) URL.revokeObjectURL(activeOfflineAudioUrl);
       activeOfflineAudioUrl = null;
-      activeTrackIsRemoteStream = true;
     } else if (!navigator.onLine) {
       throw new Error('Esta canción no está descargada para escucharla sin conexión.');
     }
@@ -4801,6 +4813,7 @@ async function loadTrack(song, {
     elements.audio.volume = audioGain ? 1 : Math.min(state.volume, 1);
     if (Number.isFinite(restoreTime) && restoreTime > 0) {
       elements.audio.addEventListener('loadedmetadata', () => {
+        if (loadSequence !== trackLoadSequence) return;
         elements.audio.currentTime = Math.min(restoreTime, elements.audio.duration || restoreTime);
         updatePlayerUI();
       }, { once: true });
@@ -4857,27 +4870,6 @@ async function loadTrack(song, {
         restoreTime,
         showError,
         bypassOfflineCache: true,
-        fallbackState: activeTrackFallbackState,
-        awaitPlaybackStart
-      });
-    }
-    if (
-      (
-        error.name === 'NotSupportedError'
-        || error.name === 'PlaybackTimeoutError'
-        || [2, 4].includes(elements.audio.error?.code)
-      )
-      && activeTrackIsRemoteStream
-      && !activeTrackFallbackState.apiProxy
-      && navigator.onLine
-    ) {
-      activeTrackFallbackState.apiProxy = true;
-      return loadTrack(song, {
-        autoplay,
-        sync,
-        restoreTime,
-        showError,
-        forceApiProxy: true,
         fallbackState: activeTrackFallbackState,
         awaitPlaybackStart
       });
@@ -5098,10 +5090,24 @@ async function playAccountQueueTrackLocally(
     showToast('La canción no está disponible en la biblioteca local.', true);
     return false;
   }
+  let sourceQueue = state.songs;
+  let sourceIndex = sourceQueue.findIndex(track => getSongId(track) === String(songId));
+  if (sourceIndex < 0) {
+    sourceQueue = state.playlists.find(playlist => (
+      (playlist.tracks || []).some(track => getSongId(track) === String(songId))
+    ))?.tracks || [song];
+    sourceIndex = sourceQueue.findIndex(track => getSongId(track) === String(songId));
+  }
+  if (sourceIndex < 0) {
+    sourceQueue = [song];
+    sourceIndex = 0;
+  }
   const queuePosition = accountQueueIds.indexOf(String(songId));
-  const remainingIds = queuePosition >= 0
-    ? accountQueueIds.slice(queuePosition + 1)
-    : accountQueueIds;
+  const remainingIds = pendingTakeover
+    ? []
+    : queuePosition >= 0
+      ? accountQueueIds.slice(queuePosition + 1)
+      : accountQueueIds;
   const tracksById = new Map(state.songs.map(track => [getSongId(track), track]));
   const previousUpcomingQueue = [...state.upcomingQueue];
   const previousQueue = [...state.queue];
@@ -5118,11 +5124,10 @@ async function playAccountQueueTrackLocally(
   state.remotePlayback = null;
   state.accountQueueDeviceId = null;
   const shouldPersistTakeover = pendingTakeover || (!state.socket?.connected && !synchronizeAsOwner);
-  if (!synchronizeAsOwner || !state.socket?.connected) savePendingAccountQueueIds(remainingIds);
   if (shouldPersistTakeover) {
     savePendingPlaybackTakeover(songId);
   }
-  const started = await playTrack([song], 0, { queueTitle: 'GENERAL' });
+  const started = await playTrack(sourceQueue, sourceIndex, { queueTitle: 'GENERAL' });
   if (!started) {
     state.queue = previousQueue;
     state.queueIndex = previousQueueIndex;
@@ -5135,7 +5140,6 @@ async function playAccountQueueTrackLocally(
     persistUpcomingQueue();
     persistLastPlayback(previousPlaybackTime);
     if (shouldPersistTakeover) clearPendingPlaybackTakeover(String(songId));
-    if (synchronizeAsOwner && !state.socket?.connected) savePendingAccountQueueIds(previousUpcomingQueue.map(getSongId));
     if (previousCurrentTrack && !isRemotePlaybackLocked()) {
       await loadTrack(previousCurrentTrack, {
         autoplay: wasPlaying,
@@ -5145,6 +5149,9 @@ async function playAccountQueueTrackLocally(
     }
     renderPlayerQueue({ syncAccount: false });
     return false;
+  }
+  if (!synchronizeAsOwner || !state.socket?.connected) {
+    savePendingAccountQueueIds(remainingIds);
   }
   if (synchronizeAsOwner && state.socket?.connected) {
     if (hadPendingQueueUpdate) {
@@ -5177,11 +5184,17 @@ async function playLibrarySongLocallyForTakeover(songId, song) {
   savePendingPlaybackTakeover(songId);
   state.remotePlayback = null;
   state.accountQueueDeviceId = null;
-  const started = await playTrack([song], 0, { queueTitle: 'GENERAL' });
+  const queueIndex = state.songs.findIndex(track => getSongId(track) === String(songId));
+  const queue = queueIndex >= 0 ? state.songs : [song];
+  const started = await playTrack(queue, queueIndex >= 0 ? queueIndex : 0, { queueTitle: 'GENERAL' });
   if (!started) {
     clearPendingPlaybackTakeover(songId);
     return false;
   }
+  state.upcomingQueue = [];
+  persistUpcomingQueue();
+  savePendingAccountQueueIds([]);
+  renderPlayerQueue({ syncAccount: false });
   showToast('Reproducción local iniciada; se transferirá el control al recuperar conexión.');
   if (state.socket?.connected) void resumePendingPlaybackTakeover();
   return true;
@@ -5445,7 +5458,11 @@ function playNext(direction = 1) {
   }
   if (state.shuffle && direction > 0) {
     if (!state.shuffleQueue.length) rebuildShuffleQueue();
-    const nextIndex = state.shuffleQueue.shift();
+    let nextIndex;
+    while (state.shuffleQueue.length && nextIndex === undefined) {
+      const candidateIndex = state.shuffleQueue.shift();
+      if (hasPlayableAudioSource(state.queue[candidateIndex])) nextIndex = candidateIndex;
+    }
     if (nextIndex !== undefined) {
       pushPlaybackHistory();
       state.queueIndex = nextIndex;
@@ -5453,10 +5470,25 @@ function playNext(direction = 1) {
       state.currentQueueKind = 'source';
       void loadTrack(state.currentTrack);
       renderPlayerQueue();
+    } else {
+      showToast('No hay canciones disponibles para reproducir en la cola.', true);
     }
     return;
   }
-  const nextIndex = (state.queueIndex + direction + state.queue.length) % state.queue.length;
+  let nextIndex;
+  for (let offset = 1; offset <= state.queue.length; offset += 1) {
+    const candidateIndex = (
+      state.queueIndex + direction * offset + state.queue.length * 2
+    ) % state.queue.length;
+    if (hasPlayableAudioSource(state.queue[candidateIndex])) {
+      nextIndex = candidateIndex;
+      break;
+    }
+  }
+  if (nextIndex === undefined) {
+    showToast('No hay canciones disponibles para reproducir en la cola.', true);
+    return;
+  }
   pushPlaybackHistory();
   state.queueIndex = nextIndex;
   state.currentTrack = state.queue[nextIndex];
@@ -5615,17 +5647,49 @@ async function refreshCurrentUser() {
   }
 }
 
+async function reconcilePlaybackLibrary(previousPlayback) {
+  const tracksById = new Map([
+    ...state.songs,
+    ...state.playlists.flatMap(playlist => playlist.tracks || []),
+    ...state.profilePlaylists.flatMap(playlist => playlist.tracks || [])
+  ].map(song => [getSongId(song), song]));
+  const refreshTrack = song => tracksById.get(getSongId(song)) || song;
+  state.queue = previousPlayback.queue.map(refreshTrack);
+  state.upcomingQueue = state.upcomingQueue.map(refreshTrack);
+  state.currentTrack = previousPlayback.currentTrack
+    ? refreshTrack(previousPlayback.currentTrack)
+    : null;
+  if (previousPlayback.currentTrack && state.currentQueueKind === 'source') {
+    const currentIndex = state.queue.findIndex(song => (
+      getSongId(song) === getSongId(previousPlayback.currentTrack)
+    ));
+    if (currentIndex >= 0) state.queueIndex = currentIndex;
+  }
+  const refreshedAudioSource = state.currentTrack?.path || state.currentTrack?.audioUrl || '';
+  if (
+    state.currentTrack
+    && refreshedAudioSource !== previousPlayback.audioSource
+    && !getRemotePlaybackSession()
+    && !state.followingUserId
+  ) {
+    await loadTrack(state.currentTrack, {
+      autoplay: previousPlayback.wasPlaying,
+      restoreTime: previousPlayback.currentTime
+    });
+  }
+}
+
 async function refreshRealtimeLibrary() {
   if (!state.user?._id || !navigator.onLine) return;
   const requestSequence = ++libraryRequestSequence;
   const userId = String(state.user._id);
-  const previousQueue = [...state.queue];
-  const previousUpcoming = [...state.upcomingQueue];
-  const previousCurrent = getCurrentSong();
-  const previousIndex = state.queueIndex;
-  const previousAudioSource = previousCurrent?.path || previousCurrent?.audioUrl || '';
-  const previousPlaybackTime = Number(elements.audio.currentTime) || 0;
-  const previousWasPlaying = !elements.audio.paused && !elements.audio.ended;
+  const previousPlayback = {
+    queue: [...state.queue],
+    currentTrack: getCurrentSong(),
+    audioSource: getCurrentSong()?.path || getCurrentSong()?.audioUrl || '',
+    currentTime: Number(elements.audio.currentTime) || 0,
+    wasPlaying: !elements.audio.paused && !elements.audio.ended
+  };
   try {
     const [songResult, playlists, user] = await Promise.all([
       request('/songs'),
@@ -5645,26 +5709,7 @@ async function refreshRealtimeLibrary() {
     state.maxVolume = Math.min(10, Math.max(1, Number(user.settings?.maxVolume) / 100 || 2));
     elements.playerVolume.max = String(state.maxVolume);
     setPlayerVolume(state.volume);
-    const tracksById = new Map([
-      ...state.songs,
-      ...state.playlists.flatMap(playlist => playlist.tracks || []),
-      ...state.profilePlaylists.flatMap(playlist => playlist.tracks || [])
-    ].map(song => [getSongId(song), song]));
-    const refreshTrack = song => tracksById.get(getSongId(song)) || song;
-    state.queue = previousQueue.map(refreshTrack);
-    state.upcomingQueue = previousUpcoming.map(refreshTrack);
-    state.currentTrack = previousCurrent ? refreshTrack(previousCurrent) : null;
-    if (previousCurrent) {
-      const currentIndex = state.queue.findIndex(song => getSongId(song) === getSongId(previousCurrent));
-      state.queueIndex = currentIndex >= 0 ? currentIndex : previousIndex;
-    }
-    const refreshedAudioSource = state.currentTrack?.path || state.currentTrack?.audioUrl || '';
-    if (state.currentTrack && refreshedAudioSource !== previousAudioSource) {
-      await loadTrack(state.currentTrack, {
-        autoplay: previousWasPlaying,
-        restoreTime: previousPlaybackTime
-      });
-    }
+    await reconcilePlaybackLibrary(previousPlayback);
     localStorage.setItem(STORAGE_KEYS.user, JSON.stringify(user));
     updateNavigationState();
     renderCurrentView();
@@ -6126,23 +6171,13 @@ function connectRealtime() {
       acknowledge({ success: false, error: 'La cola contiene canciones que ya no están disponibles.' });
       return;
     }
-    const currentSong = getCurrentSong();
     const previousQueue = [...state.upcomingQueue];
-    const previousSourceQueue = [...state.queue];
-    const previousQueueIndex = state.queueIndex;
-    const previousShuffleQueue = [...state.shuffleQueue];
     state.upcomingQueue = tracks;
-    state.queue = currentSong ? [currentSong] : [];
-    state.queueIndex = currentSong ? 0 : -1;
-    state.shuffleQueue = [];
     persistUpcomingQueue();
     renderPlayerQueue({ syncAccount: false });
     const synchronized = await publishAccountQueueSnapshot(false, false, true);
     if (!synchronized) {
       state.upcomingQueue = previousQueue;
-      state.queue = previousSourceQueue;
-      state.queueIndex = previousQueueIndex;
-      state.shuffleQueue = previousShuffleQueue;
       persistUpcomingQueue();
       renderPlayerQueue({ syncAccount: false });
       acknowledge({ success: false, error: 'No se pudo confirmar la actualización de la cola.' });
@@ -6299,6 +6334,10 @@ async function applyFriendPlayback(friend, playback) {
       index = 0;
     }
     const setRemotePosition = () => {
+      if (
+        state.followingUserId !== String(friend._id)
+        || getSongId(getCurrentSong()) !== songId
+      ) return;
       if (!Number.isFinite(elements.audio.duration)) return;
       const age = Math.max(0, (Date.now() - Date.parse(playback.updatedAt || '')) / 1000);
       const elapsed = playback.isPlaying === false ? 0 : (Number.isFinite(age) ? age : 0);
@@ -6313,6 +6352,10 @@ async function applyFriendPlayback(friend, playback) {
     if (!started) return;
     setRemotePosition();
   }
+  if (
+    state.followingUserId !== String(friend._id)
+    || getSongId(getCurrentSong()) !== songId
+  ) return;
   const serverAge = (Date.now() - Date.parse(playback.updatedAt || '')) / 1000;
   const expectedTime = Math.max(0, Number(playback.currentTime) || 0)
     + (playback.isPlaying === false ? 0 : (Number.isFinite(serverAge) ? Math.max(0, serverAge) : 0));
@@ -6554,7 +6597,15 @@ function handlePlaybackNotificationAction(action) {
 
 async function loadLibrary(initialUser = null) {
   const requestSequence = ++libraryRequestSequence;
+  libraryRevision += 1;
   const userId = String(state.user?._id || '');
+  const previousPlayback = {
+    queue: [...state.queue],
+    currentTrack: getCurrentSong(),
+    audioSource: getCurrentSong()?.path || getCurrentSong()?.audioUrl || '',
+    currentTime: Number(elements.audio.currentTime) || 0,
+    wasPlaying: !elements.audio.paused && !elements.audio.ended
+  };
   try {
     const [songResult, playlistResult, user] = await Promise.all([
       request('/songs'),
@@ -6567,7 +6618,7 @@ async function loadLibrary(initialUser = null) {
     state.user = user;
     restoreAccountQueueSnapshot(String(user?._id || ''));
     restorePendingAccountQueueIds(String(user?._id || ''));
-    libraryRevision += 1;
+    await reconcilePlaybackLibrary(previousPlayback);
     state.seekSeconds = Math.max(1, Number(user.settings?.seekSeconds) || 5);
     state.maxVolume = Math.min(10, Math.max(1, Number(user.settings?.maxVolume) / 100 || 2));
     state.offlineEnabled = localStorage.getItem(`amgc-offline-enabled-${user._id}`) === 'true';
@@ -6614,6 +6665,7 @@ async function loadLibrary(initialUser = null) {
           state.playlists = offlinePlaylists?.playlists || [];
           state.friends = offlineFriends?.friends || [];
           restorePendingAccountQueueIds(String(state.user._id));
+          await reconcilePlaybackLibrary(previousPlayback);
           state.offlineEnabled = localStorage.getItem(`amgc-offline-enabled-${state.user._id}`) === 'true';
           await hydrateCurrentOfflineImages();
           updateNavigationState();
@@ -6660,12 +6712,20 @@ async function restoreCachedLibrary(userId) {
       getOfflinePlaylists(userId),
       getOfflineFriends(userId)
     ]);
-    if (revision !== libraryRevision || (!offlineLibrary?.songs && !offlinePlaylists?.playlists)) return;
+    if (
+      revision !== libraryRevision
+      || String(state.user?._id || '') !== String(userId)
+      || (!offlineLibrary?.songs && !offlinePlaylists?.playlists)
+    ) return;
     state.songs = offlineLibrary?.songs || [];
     state.playlists = offlinePlaylists?.playlists || [];
     state.friends = offlineFriends?.friends || [];
     state.offlineEnabled = localStorage.getItem(`amgc-offline-enabled-${userId}`) === 'true';
     await hydrateCurrentOfflineImages();
+    if (
+      revision !== libraryRevision
+      || String(state.user?._id || '') !== String(userId)
+    ) return;
     updateNavigationState();
     renderDrawerFriends();
     renderCurrentView();
@@ -7500,22 +7560,6 @@ elements.audio.addEventListener('error', () => {
     void loadTrack(song, {
       autoplay: true,
       bypassOfflineCache: true,
-      fallbackState: activeTrackFallbackState
-    });
-    return;
-  }
-  if (
-    song
-    && currentTrackShouldAutoplay
-    && [2, 4].includes(errorCode)
-    && activeTrackIsRemoteStream
-    && !activeTrackFallbackState.apiProxy
-    && navigator.onLine
-  ) {
-    activeTrackFallbackState.apiProxy = true;
-    void loadTrack(song, {
-      autoplay: true,
-      forceApiProxy: true,
       fallbackState: activeTrackFallbackState
     });
     return;

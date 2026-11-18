@@ -41,7 +41,7 @@ public class AMGCMediaService extends Service {
     private static final String ACTION_SHUFFLE = "com.fran57444.amgc.MEDIA_SHUFFLE";
     private static final String CHANNEL_ID = "amgc_media_playback";
     private static final int NOTIFICATION_ID = 7001;
-    private static final int MAX_ARTWORK_DIMENSION = 512;
+    private static final int MAX_ARTWORK_DIMENSION = 1000;
     private static final int MAX_ARTWORK_BYTES = 8 * 1024 * 1024;
     private static final String TAG = "AMGCMediaService";
 
