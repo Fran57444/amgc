@@ -1,12 +1,20 @@
 export function getPlaybackLastHeardAt(playback, fallbackPlayback = null) {
-  const candidates = [
+  const lastHeardCandidates = [
     playback?.lastHeardAt,
-    fallbackPlayback?.lastHeardAt,
+    fallbackPlayback?.lastHeardAt
+  ].filter(value => Number.isFinite(Date.parse(value || '')));
+  if (lastHeardCandidates.length) {
+    return lastHeardCandidates.reduce((latest, candidate) => (
+      Date.parse(candidate) > Date.parse(latest) ? candidate : latest
+    ));
+  }
+
+  const stoppedPlaybackCandidates = [
     playback?.isPlaying === false ? playback.updatedAt : '',
     fallbackPlayback?.isPlaying === false ? fallbackPlayback.updatedAt : ''
   ].filter(value => Number.isFinite(Date.parse(value || '')));
-  if (candidates.length) {
-    return candidates.reduce((latest, candidate) => (
+  if (stoppedPlaybackCandidates.length) {
+    return stoppedPlaybackCandidates.reduce((latest, candidate) => (
       Date.parse(candidate) > Date.parse(latest) ? candidate : latest
     ));
   }

@@ -8413,12 +8413,20 @@ export function initMusicPlayer() {
                 imagePlaceholder
             );
             const spotifyCoverLoadPromise = suggestion.coverUrl
-                ? Promise.resolve().then(() => {
+                ? Promise.resolve().then(async () => {
                     if (imageInput.files?.[0]) return true;
                     imagePreview.src = suggestion.coverUrl;
                     imagePreview.hidden = false;
                     imagePlaceholder.hidden = true;
                     imageStatus.textContent = 'Portada de Spotify. Puedes reemplazarla.';
+                    try {
+                        const response = await fetch(suggestion.coverUrl);
+                        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                        const coverColor = await getDominantImageColor(await response.blob());
+                        if (!imageInput.files?.[0]) colorInput.value = coverColor;
+                    } catch (error) {
+                        console.error('No se pudo determinar el color de la portada de Spotify.', error);
+                    }
                     return true;
                 })
                 : Promise.resolve(true);
