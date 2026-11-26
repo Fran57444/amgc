@@ -560,8 +560,7 @@ input, textarea, select {
 .profile-friend-remove-btn:hover { color: #ffd1d3; }
 .playback-device-row { display: flex; min-width: 0; align-items: center; gap: 5px; }
 .playback-device-row .playback-device-option { flex: 1; }
-.playback-device-remove { display: grid; width: 32px; height: 32px; flex: 0 0 32px; place-items: center; border: 1px solid rgba(255,154,158,.22); border-radius: 50%; background: transparent; color: #ff9a9e; font-size: 1rem; cursor: pointer; }
-.playback-device-remove:hover { background: rgba(255,154,158,.12); }
+.playback-device-remove { display: grid; width: 32px; height: 32px; flex: 0 0 32px; place-items: center; border: none; background: transparent; color: #ff9a9e; font-size: 1rem; cursor: pointer; }
 .playback-device-remove:disabled { opacity: .35; cursor: not-allowed; }
 
 #settings-panel { align-items: flex-start !important; padding-left: 80px; background: transparent !important; }
@@ -1056,6 +1055,13 @@ img.no-image { font-size: 0.65rem; object-fit: none; }
 .spotify-like-info strong, .spotify-like-info span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .spotify-like-info strong { font-size: 0.83rem; }
 .spotify-like-info span { color: rgba(255,255,255,0.6); font-size: 0.72rem; }
+.spotify-playlist-import { margin: 18px 0; padding: 14px; border: 1px solid rgba(255,255,255,0.12); border-radius: 12px; background: rgba(0,0,0,0.35); }
+.spotify-playlist-import h3 { margin: 0 0 6px; font-size: 0.95rem; }
+.spotify-playlist-import > p { color: rgba(255,255,255,0.65); font-size: 0.78rem; }
+.spotify-playlist-import .spotify-likes-list { max-height: 260px; }
+.spotify-unavailable-track { opacity: 0.82; }
+.spotify-track-open { color: #9de0b5; font-size: 0.75rem; }
+.spotify-track-suggest { grid-column: 2; justify-self: start; }
 .spotify-like-badges { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 4px; }
 .spotify-like-info .spotify-like-badge { width: fit-content; padding: 2px 6px; border-radius: 999px; background: rgba(255,154,92,0.12); color: #ffba90; font-size: 0.63rem; }
 .spotify-like-info .spotify-like-badge.is-in-program { background: rgba(90,190,130,0.12); color: #9de0b5; }

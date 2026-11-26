@@ -111,9 +111,15 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--track-color); o
 .song-play { display: flex; min-width: 0; flex: 1; align-items: center; gap: 11px; padding: 0; border: 0; background: transparent; text-align: left; cursor: pointer; }
 .song-cover { width: 48px; height: 48px; flex: 0 0 48px; border: 1px solid rgba(255,255,255,.14); border-radius: 4px; background: #111; object-fit: cover; }
 .song-cover-loading { position: relative; display: inline-flex; width: 48px; height: 48px; flex: 0 0 48px; align-items: center; justify-content: center; border-radius: 4px; }
+.song-cover-loading.is-cover-loading .song-cover, .queue-cover-loading.is-cover-loading img { visibility: hidden; }
 .song-loading-spinner { position: absolute; inset: 0; display: grid; place-items: center; border-radius: inherit; background: rgba(0,0,0,.55); }
 .song-loading-spinner::after { width: 21px; height: 21px; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; content: ""; animation: song-loading-spin .75s linear infinite; }
 .song-loading-spinner.syncing::after { border-top-color: #ffbf78; }
+.artwork-frame { position: relative; display: block; overflow: hidden; }
+.artwork-loading-spinner { position: absolute; z-index: 1; inset: 0; display: none; place-items: center; background: rgba(0,0,0,.62); }
+.artwork-loading-spinner::after { width: 28px; height: 28px; border: 2px solid rgba(255,255,255,.28); border-top-color: #fff; border-radius: 50%; content: ""; animation: song-loading-spin .75s linear infinite; }
+.artwork-frame.is-loading .artwork-loading-spinner { display: grid; }
+.artwork-frame.is-loading > img { visibility: hidden; }
 .sync-spinner { display: inline-grid; width: 11px; height: 11px; flex: 0 0 11px; place-items: center; vertical-align: middle; }
 .sync-spinner::after { width: 9px; height: 9px; border: 1.5px solid rgba(255,255,255,.25); border-top-color: #ffbf78; border-radius: 50%; content: ""; animation: song-loading-spin .75s linear infinite; }
 .sync-spinner[hidden] { display: none; }
@@ -131,7 +137,8 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--track-color); o
 .empty-state { padding: 28px 16px; border: 1px dashed var(--border); border-radius: 8px; color: var(--muted); font-size: .86rem; text-align: center; }
 .mini-player { position: fixed; z-index: 5; right: 0; bottom: 0; left: 0; display: flex; height: calc(69px + var(--safe-bottom)); align-items: center; padding: 7px 9px calc(10px + var(--safe-bottom)); border-top: 1px solid rgba(255,255,255,.12); background: rgba(10,10,10,.96); box-shadow: 0 -7px 24px rgba(0,0,0,.35); }
 .mini-track { display: flex; min-width: 0; flex: 1; align-items: center; gap: 9px; padding: 0; border: 0; background: transparent; text-align: left; }
-.mini-track img { width: 48px; height: 48px; flex: 0 0 48px; border: 1px solid rgba(255,255,255,.14); border-radius: 3px; background: #111; object-fit: cover; }
+.mini-cover-frame { width: 48px; height: 48px; flex: 0 0 48px; border: 1px solid rgba(255,255,255,.14); border-radius: 3px; background: #111; }
+.mini-cover-frame img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .mini-track-copy { display: block; min-width: 0; }
 .mini-track-copy strong, .mini-track-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mini-track-copy strong { font-size: .78rem; }
@@ -246,7 +253,8 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--track-color); o
 .player-header-spacer { width: 42px; }
 .lyrics-screen .lyrics-header-spacer { height: 42px; flex: 0 0 42px; }
 .image-icon-button img { width: 21px; height: 21px; object-fit: contain; }
-.player-cover { width: min(76vw, 330px); aspect-ratio: 1; margin: auto 0 24px; border: 1px solid rgba(255,255,255,.18); border-radius: 5px; background: #111; object-fit: cover; box-shadow: 0 10px 35px rgba(0,0,0,.55),0 0 22px color-mix(in srgb,var(--track-color) 14%,transparent); }
+.player-cover-frame { width: min(76vw, 330px); aspect-ratio: 1; margin: auto 0 24px; border: 1px solid rgba(255,255,255,.18); border-radius: 5px; background: #111; box-shadow: 0 10px 35px rgba(0,0,0,.55),0 0 22px color-mix(in srgb,var(--track-color) 14%,transparent); }
+.player-cover { display: block; width: 100%; height: 100%; object-fit: cover; }
 .player-track-copy { position: relative; width: min(100%, 430px); }
 .player-title-row { display: flex; min-width: 0; align-items: center; gap: 7px; }
 .player-track-copy h1 { min-width: 0; flex: 1; overflow: hidden; margin: 0; font-size: clamp(1.35rem,6vw,1.8rem); letter-spacing: -.02em; text-overflow: ellipsis; white-space: nowrap; }
@@ -305,6 +313,15 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--track-color); o
 .spotify-like-copy strong { font-size: .78rem; }
 .spotify-like-copy small { color: var(--muted); font-size: .68rem; }
 .spotify-like-copy .spotify-like-badge { color: #9c9; }
+.spotify-playlist-import { margin: 10px 0; padding: 12px; border: 1px solid var(--border); border-radius: 9px; background: rgba(0,0,0,.2); }
+.spotify-playlist-import h3 { margin: 0 0 6px; font-size: .9rem; }
+.spotify-playlists-status { min-height: 1.3em; color: var(--muted); font-size: .76rem; line-height: 1.45; }
+.spotify-playlists-list { display: grid; gap: 8px; max-height: 30vh; overflow-y: auto; }
+.spotify-playlist-row { display: flex; min-width: 0; align-items: center; gap: 10px; padding: 8px; border-radius: 7px; background: rgba(255,255,255,.05); }
+.spotify-playlist-cover { width: 42px; height: 42px; flex: 0 0 42px; border-radius: 4px; object-fit: cover; }
+.spotify-unavailable-song-row { opacity: .8; }
+.spotify-unavailable-label { color: var(--muted); font-size: .68rem; }
+.spotify-track-open { color: #9c9; font-size: .74rem; }
 .player-source { display: flex; align-items: center; gap: 7px; margin: auto 0 4px; color: #85898f; font-size: .68rem; letter-spacing: .06em; }
 .player-source-stop { padding: 2px 6px; border: 0; background: transparent; color: inherit; font-size: inherit; letter-spacing: inherit; text-decoration: underline; }
 .player-source-stop:hover { color: #fff; }
@@ -459,11 +476,11 @@ html.android-native .mobile-drawer { inset: max(var(--safe-top),28px) auto max(v
 .chat-form button { width: 42px; height: 42px; flex: 0 0 42px; border: 0; border-radius: 50%; background: #fff; color: #000; font-size: 1rem; }
 
 @media (max-width: 360px) {
-  .mini-track img { width: 40px; height: 40px; flex-basis: 40px; }
+  .mini-cover-frame { width: 40px; height: 40px; flex-basis: 40px; }
   .mini-track { gap: 6px; }
   .mini-control { width: 33px; flex-basis: 33px; }
   .player-screen { padding-right: 16px; padding-left: 16px; }
-  .player-cover { width: min(72vw, 300px); }
+  .player-cover-frame { width: min(72vw, 300px); }
 }
 
 @media (min-width: 700px) {

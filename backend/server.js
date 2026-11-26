@@ -206,7 +206,8 @@ const userSchema = new mongoose.Schema({
   friends: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   profilePhoto: { type: String, default: '' },
   spotify: {
-    refreshTokenEncrypted: { type: String, select: false }
+    refreshTokenEncrypted: { type: String, select: false },
+    scopes: { type: [String], default: [] }
   }
 }, { timestamps: true });
 
@@ -397,6 +398,97 @@ async function getSpotifyAccessToken(user, forceRefresh = false) {
 const SPOTIFY_TRACKS_PER_PAGE = 1000;
 const SPOTIFY_API_PAGE_SIZE = 50;
 const SPOTIFY_API_PAGES_PER_BATCH = 5;
+const SPOTIFY_PLAYLISTS_PER_PAGE = 50;
+const SPOTIFY_PLAYLIST_TRACKS_MAX = 5000;
+const SPOTIFY_PLAYLIST_SCOPES = ['playlist-read-private', 'playlist-read-collaborative'];
+
+async function requestSpotifyApi(user, path, params = {}) {
+  let accessToken = await getSpotifyAccessToken(user);
+  let refreshed = false;
+  let rateLimitRetries = 0;
+  while (true) {
+    try {
+      return await axios.get(`https://api.spotify.com/v1/${path}`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        params,
+        timeout: 15000
+      });
+    } catch (error) {
+      if (error.response?.status === 401 && !refreshed) {
+        accessToken = await getSpotifyAccessToken(user, true);
+        refreshed = true;
+        continue;
+      }
+      if (error.response?.status !== 429 || rateLimitRetries >= 2) throw error;
+      const retryAfterSeconds = Number(error.response.headers?.['retry-after']);
+      const waitMs = Number.isFinite(retryAfterSeconds)
+        ? Math.min(30_000, Math.max(1000, retryAfterSeconds * 1000))
+        : 1000 * (rateLimitRetries + 1);
+      rateLimitRetries += 1;
+      await new Promise(resolve => setTimeout(resolve, waitMs));
+    }
+  }
+}
+
+async function fetchSpotifyPlaylistItems(user, playlistId, total) {
+  if (total > SPOTIFY_PLAYLIST_TRACKS_MAX) {
+    const error = new Error(`La playlist supera el límite de ${SPOTIFY_PLAYLIST_TRACKS_MAX} canciones admitidas.`);
+    error.statusCode = 413;
+    throw error;
+  }
+  const items = [];
+  const itemCount = Math.max(0, Math.min(total, SPOTIFY_PLAYLIST_TRACKS_MAX));
+  const batchSize = SPOTIFY_API_PAGE_SIZE * SPOTIFY_API_PAGES_PER_BATCH;
+  for (let batchOffset = 0; batchOffset < itemCount; batchOffset += batchSize) {
+    const offsets = Array.from(
+      { length: Math.min(SPOTIFY_API_PAGES_PER_BATCH, Math.ceil((itemCount - batchOffset) / SPOTIFY_API_PAGE_SIZE)) },
+      (_value, index) => batchOffset + index * SPOTIFY_API_PAGE_SIZE
+    );
+    const pages = await Promise.all(offsets.map(offset => requestSpotifyApi(
+      user,
+      `playlists/${encodeURIComponent(playlistId)}/items`,
+      { limit: SPOTIFY_API_PAGE_SIZE, offset, additional_types: 'track,episode' }
+    )));
+    pages.forEach((page, pageIndex) => {
+      const offset = offsets[pageIndex];
+      (Array.isArray(page.data.items) ? page.data.items : []).forEach((item, index) => {
+        const track = item?.item || item?.track || null;
+        const rawCover = track?.album?.images?.[0]?.url || track?.images?.[0]?.url || '';
+        let coverUrl = '';
+        if (rawCover) {
+          try {
+            const parsedCover = new URL(rawCover);
+            if (parsedCover.protocol === 'https:' && parsedCover.hostname === 'i.scdn.co') {
+              coverUrl = parsedCover.toString().slice(0, 2048);
+            }
+          } catch {
+            coverUrl = '';
+          }
+        }
+        items.push({
+          spotifyTrackId: typeof track?.id === 'string' && /^[A-Za-z0-9]{10,40}$/.test(track.id)
+            ? track.id
+            : '',
+          uri: typeof track?.uri === 'string' ? track.uri.slice(0, 300) : '',
+          position: offset + index,
+          name: typeof track?.name === 'string' ? track.name.trim().slice(0, 200) : 'Contenido no disponible',
+          artist: (track?.artists || []).map(artist => artist?.name).filter(Boolean).join(', ').slice(0, 200)
+            || track?.show?.name?.slice(0, 200)
+            || 'Artista desconocido',
+          album: typeof track?.album?.name === 'string' ? track.album.name.slice(0, 200) : '',
+          coverUrl,
+          externalUrl: typeof track?.external_urls?.spotify === 'string'
+            && /^https:\/\/open\.spotify\.com\/(?:track|episode)\//i.test(track.external_urls.spotify)
+            ? track.external_urls.spotify.slice(0, 2048)
+            : '',
+          duration: Math.max(0, Math.round((Number(track?.duration_ms) || 0) / 1000)),
+          local: item?.is_local === true || track?.is_local === true
+        });
+      });
+    });
+  }
+  return items.slice(0, itemCount);
+}
 
 async function fetchSpotifyLikedTracks(accessToken, offset, limit = SPOTIFY_API_PAGE_SIZE) {
   let response;
@@ -582,12 +674,33 @@ const playlistSchema = new mongoose.Schema({
     editedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     editedAt: { type: Date }
   }],
+  spotifyPlaylistId: { type: String, default: undefined },
+  spotifyOwnerId: { type: String, default: '' },
+  spotifySnapshotId: { type: String, default: '' },
+  spotifyCheckedAt: { type: Date },
+  spotifyTracks: [{
+    spotifyTrackId: { type: String, default: '' },
+    uri: { type: String, default: '' },
+    songId: { type: mongoose.Schema.Types.ObjectId, ref: 'Song' },
+    position: { type: Number, required: true },
+    name: { type: String, default: '' },
+    artist: { type: String, default: '' },
+    album: { type: String, default: '' },
+    coverUrl: { type: String, default: '' },
+    externalUrl: { type: String, default: '' },
+    duration: { type: Number, default: 0 },
+    local: { type: Boolean, default: false }
+  }],
   duration: { type: Number, default: 0 },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 });
 playlistSchema.index({ userId: 1 });
 playlistSchema.index({ sharedWith: 1 });
+playlistSchema.index(
+  { userId: 1, spotifyPlaylistId: 1 },
+  { unique: true, partialFilterExpression: { spotifyPlaylistId: { $type: 'string' } } }
+);
 const Playlist = mongoose.model('Playlist', playlistSchema);
 
 function normalizeUserId(value) {
@@ -695,7 +808,7 @@ const playbackTransferInProgressByUser = new Map();
 const accountQueueByUser = new Map();
 const accountQueueUpdateSequenceByUser = new Map();
 const accountQueueLoadPromisesByUser = new Map();
-const accountQueueMutationInProgressByUser = new Set();
+const accountQueueMutationPromisesByUser = new Map();
 const listenTogetherQueueSessions = new Map();
 const listenTogetherQueueSessionByUser = new Map();
 
@@ -754,17 +867,18 @@ async function getAccountQueueSnapshot(userId) {
 }
 
 async function runAccountQueueMutation(userId, operation) {
-  if (accountQueueMutationInProgressByUser.has(userId)) {
-    return { success: false, error: 'La cola se está actualizando en otro dispositivo. Vuelve a intentarlo.' };
-  }
-  accountQueueMutationInProgressByUser.add(userId);
+  const previousMutation = accountQueueMutationPromisesByUser.get(userId) || Promise.resolve();
+  const currentMutation = previousMutation.catch(() => {}).then(operation);
+  accountQueueMutationPromisesByUser.set(userId, currentMutation);
   try {
-    return await operation();
+    return await currentMutation;
   } catch (error) {
     console.error('No se pudo completar una operación de cola de la cuenta.', error);
     return { success: false, error: 'No se pudo actualizar la cola de la cuenta.' };
   } finally {
-    accountQueueMutationInProgressByUser.delete(userId);
+    if (accountQueueMutationPromisesByUser.get(userId) === currentMutation) {
+      accountQueueMutationPromisesByUser.delete(userId);
+    }
   }
 }
 
@@ -2403,10 +2517,13 @@ app.post('/api/discord/artwork-url', async (req, res) => {
 
 app.get('/api/spotify/status', async (req, res) => {
   try {
-    const user = await User.findById(req.user._id).select('+spotify.refreshTokenEncrypted').lean();
+    const user = await User.findById(req.user._id)
+      .select('+spotify.refreshTokenEncrypted spotify.scopes')
+      .lean();
     res.json({
       configured: Boolean(getSpotifyConfiguration()),
-      connected: Boolean(user?.spotify?.refreshTokenEncrypted)
+      connected: Boolean(user?.spotify?.refreshTokenEncrypted),
+      playlistScopesGranted: SPOTIFY_PLAYLIST_SCOPES.every(scope => user?.spotify?.scopes?.includes(scope))
     });
   } catch (error) {
     console.error('No se pudo consultar la conexión de Spotify.', error);
@@ -2443,7 +2560,7 @@ app.post('/api/spotify/connect', async (req, res) => {
     client_id: configuration.clientId,
     response_type: 'code',
     redirect_uri: configuration.redirectUri,
-    scope: 'user-library-read',
+    scope: ['user-library-read', ...SPOTIFY_PLAYLIST_SCOPES].join(' '),
     state
   }).toString();
   res.json({ authorizationUrl: authorizationUrl.toString() });
@@ -2487,7 +2604,10 @@ app.get('/api/spotify/callback', async (req, res) => {
     const user = await User.findById(userId).select('+spotify.refreshTokenEncrypted');
     if (!user) return redirectToApp('error');
     user.spotify = {
-      refreshTokenEncrypted: encryptSpotifyRefreshToken(tokenResponse.data.refresh_token)
+      refreshTokenEncrypted: encryptSpotifyRefreshToken(tokenResponse.data.refresh_token),
+      scopes: typeof tokenResponse.data.scope === 'string'
+        ? tokenResponse.data.scope.split(/\s+/).filter(Boolean)
+        : []
     };
     await user.save();
     spotifyLikedTracksCache.delete(String(user._id));
@@ -2568,6 +2688,231 @@ app.get('/api/spotify/liked-tracks', async (req, res) => {
   }
 });
 
+app.get('/api/spotify/playlists', async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id).select('spotify.scopes').lean();
+    if (!SPOTIFY_PLAYLIST_SCOPES.every(scope => user?.spotify?.scopes?.includes(scope))) {
+      return res.status(403).json({ error: 'Actualiza los permisos de Spotify para importar playlists.' });
+    }
+    const offset = Number.parseInt(req.query.offset, 10) || 0;
+    if (offset < 0 || offset > 100_000 || offset % SPOTIFY_PLAYLISTS_PER_PAGE !== 0) {
+      return res.status(400).json({ error: 'La posición de la lista de playlists de Spotify no es válida.' });
+    }
+    const response = await requestSpotifyApi(req.user, 'me/playlists', {
+      limit: SPOTIFY_PLAYLISTS_PER_PAGE,
+      offset
+    });
+    const spotifyPlaylists = Array.isArray(response.data.items) ? response.data.items : [];
+    const linkedPlaylists = await Playlist.find({
+      userId: req.user._id,
+      spotifyPlaylistId: { $in: spotifyPlaylists.map(item => item.id).filter(Boolean) }
+    }).select('id spotifyPlaylistId spotifyCheckedAt').lean();
+    const linkedBySpotifyId = new Map(linkedPlaylists.map(item => [item.spotifyPlaylistId, item]));
+    res.json({
+      playlists: spotifyPlaylists.filter(item => item?.id && item.name).map(item => {
+        const linked = linkedBySpotifyId.get(item.id);
+        const rawImage = item.images?.find(candidate => typeof candidate?.url === 'string')?.url || '';
+        let image = '';
+        if (rawImage) {
+          try {
+            const parsedImage = new URL(rawImage);
+            if (parsedImage.protocol === 'https:' && parsedImage.hostname === 'i.scdn.co') {
+              image = parsedImage.toString().slice(0, 2048);
+            }
+          } catch {
+            image = '';
+          }
+        }
+        return {
+          id: item.id,
+          name: String(item.name).slice(0, 200),
+          description: typeof item.description === 'string' ? item.description.slice(0, 1000) : '',
+          image,
+          ownerName: item.owner?.display_name || item.owner?.id || 'Spotify',
+          totalTracks: Math.max(0, Number(item.items?.total ?? item.tracks?.total) || 0),
+          linkedPlaylistId: linked?.id || '',
+          checkedAt: linked?.spotifyCheckedAt || null
+        };
+      }),
+      total: Math.max(0, Number(response.data.total) || 0),
+      hasMore: Boolean(response.data.next),
+      nextOffset: offset + spotifyPlaylists.length
+    });
+  } catch (error) {
+    const statusCode = error.statusCode || (error.response ? 502 : 500);
+    console.error('No se pudieron cargar las playlists de Spotify.', error.message || error);
+    res.status(statusCode).json({
+      error: error.statusCode
+        ? error.message
+        : error.response?.status === 403
+          ? 'Spotify no permitió leer esta cuenta. Actualiza los permisos de Spotify e inténtalo de nuevo.'
+          : 'No se pudieron cargar las playlists de Spotify.'
+    });
+  }
+});
+
+app.post('/api/spotify/playlists/:spotifyPlaylistId/import', async (req, res) => {
+  try {
+    const spotifyPlaylistId = String(req.params.spotifyPlaylistId || '');
+    if (!/^[A-Za-z0-9]{10,40}$/.test(spotifyPlaylistId)) {
+      return res.status(400).json({ error: 'La playlist de Spotify no es válida.' });
+    }
+    const user = await User.findById(req.user._id).select('spotify.scopes').lean();
+    if (!SPOTIFY_PLAYLIST_SCOPES.every(scope => user?.spotify?.scopes?.includes(scope))) {
+      return res.status(403).json({ error: 'Actualiza los permisos de Spotify para importar playlists.' });
+    }
+    const [playlistResponse, existingPlaylist] = await Promise.all([
+      requestSpotifyApi(req.user, `playlists/${encodeURIComponent(spotifyPlaylistId)}`),
+      Playlist.findOne({ userId: req.user._id, spotifyPlaylistId })
+    ]);
+    const spotifyPlaylist = playlistResponse.data;
+    if (String(spotifyPlaylist.id || '') !== spotifyPlaylistId) {
+      return res.status(502).json({ error: 'Spotify devolvió otra playlist.' });
+    }
+    const spotifyTotal = Math.max(0, Number(spotifyPlaylist.items?.total ?? spotifyPlaylist.tracks?.total) || 0);
+    if (spotifyTotal > SPOTIFY_PLAYLIST_TRACKS_MAX) {
+      return res.status(413).json({
+        error: `La playlist supera el límite de ${SPOTIFY_PLAYLIST_TRACKS_MAX} canciones admitidas.`
+      });
+    }
+    const sameSnapshot = Boolean(
+      existingPlaylist
+      && spotifyPlaylist.snapshot_id
+      && existingPlaylist.spotifySnapshotId === spotifyPlaylist.snapshot_id
+      && existingPlaylist.spotifyTracks.length === spotifyTotal
+    );
+    const sourceEntries = sameSnapshot
+      ? existingPlaylist.spotifyTracks.map(entry => entry.toObject())
+      : await fetchSpotifyPlaylistItems(req.user, spotifyPlaylistId, spotifyTotal);
+    if (sourceEntries.length !== spotifyTotal) {
+      const error = new Error('Spotify no devolvió todos los elementos de la playlist. Inténtalo de nuevo.');
+      error.statusCode = 502;
+      throw error;
+    }
+    if (!sameSnapshot && spotifyPlaylist.snapshot_id) {
+      const currentPlaylist = await requestSpotifyApi(
+        req.user,
+        `playlists/${encodeURIComponent(spotifyPlaylistId)}`
+      );
+      if (currentPlaylist.data.snapshot_id !== spotifyPlaylist.snapshot_id) {
+        const error = new Error('La playlist cambió durante la importación. Inténtalo de nuevo.');
+        error.statusCode = 409;
+        throw error;
+      }
+    }
+    const artists = [...new Set(sourceEntries.map(entry => entry.artist).filter(Boolean))];
+    const candidates = artists.length
+      ? await Song.find({ artist: { $in: artists } })
+        .select('_id name artist')
+        .collation(songMetadataCollation())
+        .lean()
+      : [];
+    const songsByArtist = groupSongsByArtist(candidates);
+    const spotifyTracks = sourceEntries.map(entry => {
+      const artistSongs = songsByArtist.get(normalizeSongMetadata(entry.artist)) || [];
+      const matchingSong = entry.spotifyTrackId
+        ? artistSongs.find(song => isSimilarSongMetadata(entry.name, entry.artist, song))
+        : null;
+      return {
+        spotifyTrackId: entry.spotifyTrackId || '',
+        uri: entry.uri || '',
+        songId: matchingSong?._id,
+        position: Number(entry.position) || 0,
+        name: entry.name || 'Contenido no disponible',
+        artist: entry.artist || 'Artista desconocido',
+        album: entry.album || '',
+        coverUrl: entry.coverUrl || '',
+        externalUrl: entry.externalUrl || '',
+        duration: Math.max(0, Number(entry.duration) || 0),
+        local: entry.local === true
+      };
+    });
+    const matchedSongIds = spotifyTracks.filter(track => track.songId).map(track => track.songId);
+    const nextDuration = spotifyTracks.reduce((total, track) => total + track.duration, 0);
+    const mappedIdsChanged = !existingPlaylist
+      || existingPlaylist.spotifyTracks.length !== spotifyTracks.length
+      || spotifyTracks.some((track, index) => (
+        String(existingPlaylist.spotifyTracks[index]?.songId || '') !== String(track.songId || '')
+      ));
+    const checkedAt = new Date();
+    const spotifyImage = spotifyPlaylist.images?.find(candidate => typeof candidate?.url === 'string')?.url || '';
+    let photo = '';
+    if (spotifyImage) {
+      try {
+        const parsedImage = new URL(spotifyImage);
+        if (parsedImage.protocol === 'https:' && parsedImage.hostname === 'i.scdn.co') {
+          photo = parsedImage.toString().slice(0, 2048);
+        }
+      } catch {
+        photo = '';
+      }
+    }
+    const nextName = String(spotifyPlaylist.name || 'Playlist de Spotify').trim().slice(0, 200);
+    const nextDescription = typeof spotifyPlaylist.description === 'string'
+      ? spotifyPlaylist.description.slice(0, 1000)
+      : '';
+    const nextOwnerId = String(spotifyPlaylist.owner?.id || '').slice(0, 100);
+    const changed = !sameSnapshot
+      || mappedIdsChanged
+      || Boolean(existingPlaylist && (
+        existingPlaylist.name !== nextName
+        || existingPlaylist.desc !== nextDescription
+        || existingPlaylist.photo !== photo
+        || existingPlaylist.spotifyOwnerId !== nextOwnerId
+        || Number(existingPlaylist.duration) !== nextDuration
+      ));
+    const playlistId = existingPlaylist?.id || new mongoose.Types.ObjectId().toString();
+    const savedPlaylist = await Playlist.findOneAndUpdate(
+      { userId: req.user._id, spotifyPlaylistId },
+      {
+        $set: {
+          name: nextName,
+          desc: nextDescription,
+          photo,
+          tracks: matchedSongIds,
+          trackDetails: [],
+          spotifyOwnerId: nextOwnerId,
+          spotifySnapshotId: String(spotifyPlaylist.snapshot_id || ''),
+          spotifyCheckedAt: checkedAt,
+          spotifyTracks,
+          duration: nextDuration,
+          updatedAt: changed ? checkedAt : existingPlaylist?.updatedAt || checkedAt
+        },
+        $setOnInsert: {
+          id: playlistId,
+          userId: req.user._id,
+          sharedWith: [],
+          createdAt: checkedAt
+        }
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+    if (!existingPlaylist) {
+      await User.findByIdAndUpdate(req.user._id, { $inc: { 'stats.playlistsCreated': 1 } });
+      emitUserStatsChanged(req.user._id);
+    }
+    if (changed) emitPlaylistChanged(savedPlaylist, req.user._id);
+    res.json({
+      success: true,
+      playlistId: savedPlaylist.id,
+      changed,
+      totalTracks: spotifyTracks.length,
+      unavailableTracks: spotifyTracks.filter(track => !track.songId && track.spotifyTrackId).length,
+      checkedAt
+    });
+  } catch (error) {
+    const statusCode = error.statusCode || (error.response ? 502 : 500);
+    console.error('No se pudo importar o sincronizar la playlist de Spotify.', error.message || error);
+    res.status(statusCode).json({
+      error: error.statusCode
+        ? error.message
+        : error.response?.status === 403
+          ? 'Spotify no permitió leer esta playlist. Actualiza los permisos o verifica que tengas acceso.'
+          : 'No se pudo importar o sincronizar la playlist de Spotify.'
+    });
+  }
+});
+
 app.post('/api/spotify/track-status', async (req, res) => {
   const tracks = req.body?.tracks;
   if (!Array.isArray(tracks) || tracks.length > SPOTIFY_TRACKS_PER_PAGE
@@ -2639,7 +2984,53 @@ app.post('/api/spotify/import', async (req, res) => {
   try {
     let trackIds = [];
     let selectedTracks = [];
-    if (Array.isArray(req.body?.tracks)) {
+    if (typeof req.body?.spotifyPlaylistId === 'string') {
+      if (
+        !Array.isArray(req.body.trackIds)
+        || !req.body.trackIds.length
+        || req.body.trackIds.length > 100
+        || req.body.trackIds.some(id => typeof id !== 'string' || !/^[A-Za-z0-9]{10,40}$/.test(id))
+      ) {
+        return res.status(400).json({ error: 'Selecciona entre 1 y 100 canciones de la playlist.' });
+      }
+      const requestedIds = [...new Set(req.body.trackIds)];
+      if (requestedIds.length > 100) {
+        return res.status(400).json({ error: 'Selecciona entre 1 y 100 canciones de la playlist.' });
+      }
+      const linkedPlaylist = await Playlist.findOne({
+        id: req.body.spotifyPlaylistId,
+        userId: req.user._id,
+        spotifyPlaylistId: { $type: 'string' }
+      }).select('spotifyTracks');
+      if (!linkedPlaylist) {
+        return res.status(404).json({ error: 'No se encontró la playlist de Spotify vinculada.' });
+      }
+      const unavailableById = new Map(
+        linkedPlaylist.spotifyTracks
+          .filter(track => (
+            track.spotifyTrackId
+            && !track.songId
+            && !track.local
+            && track.name
+            && track.artist
+            && normalizeSongMetadata(track.artist) !== 'artista desconocido'
+          ))
+          .map(track => [track.spotifyTrackId, track])
+      );
+      selectedTracks = requestedIds
+        .map(id => unavailableById.get(id))
+        .filter(Boolean)
+        .map(track => ({
+          id: track.spotifyTrackId,
+          name: track.name,
+          artists: [{ name: track.artist }],
+          album: { images: track.coverUrl ? [{ url: track.coverUrl }] : [] }
+        }));
+      if (selectedTracks.length !== requestedIds.length) {
+        return res.status(400).json({ error: 'Una o varias canciones ya no están disponibles para sugerir.' });
+      }
+      trackIds = requestedIds;
+    } else if (Array.isArray(req.body?.tracks)) {
       if (!req.body.tracks.length || req.body.tracks.length > 100
         || req.body.tracks.some(track => (
           !track
@@ -3176,9 +3567,17 @@ app.get('/api/playlists', async (req, res) => {
         }
         : {};
     const playlists = await Playlist.find(playlistQuery)
-      .select('id name desc photo tracks trackDetails duration userId sharedWith createdAt updatedAt')
+      .select('id name desc photo tracks trackDetails duration userId sharedWith createdAt updatedAt spotifyPlaylistId spotifyOwnerId spotifySnapshotId spotifyCheckedAt spotifyTracks')
       .populate({
         path: 'tracks',
+        select: 'name artist cover path color duration addedBy editedBy addedAt editedAt',
+        populate: [
+          { path: 'addedBy', select: 'username profilePhoto' },
+          { path: 'editedBy', select: 'username profilePhoto' }
+        ]
+      })
+      .populate({
+        path: 'spotifyTracks.songId',
         select: 'name artist cover path color duration addedBy editedBy addedAt editedAt',
         populate: [
           { path: 'addedBy', select: 'username profilePhoto' },
@@ -3207,7 +3606,9 @@ app.get('/api/playlists', async (req, res) => {
     });
     
     await Promise.all(playlists.map(async pl => {
-      const calculatedDuration = (pl.tracks || []).reduce((total, song) => (
+      const calculatedDuration = pl.spotifyPlaylistId
+        ? (pl.spotifyTracks || []).reduce((total, track) => total + Math.max(0, Number(track.duration) || 0), 0)
+        : (pl.tracks || []).reduce((total, song) => (
         total + Math.max(0, Number(song.duration) || 0)
       ), 0);
       if (calculatedDuration !== Number(pl.duration) || (calculatedDuration > 0 && !pl.duration)) {
@@ -3232,6 +3633,33 @@ app.get('/api/playlists', async (req, res) => {
           return { _id: String(u._id), username: u.username, profilePhoto };
         })
         : [];
+      if (plObj.spotifyPlaylistId) {
+        plObj.playlistItems = (plObj.spotifyTracks || [])
+          .slice()
+          .sort((left, right) => Number(left.position) - Number(right.position))
+          .map(entry => {
+            const song = entry.songId?._id ? entry.songId : null;
+            if (song) {
+              return {
+                ...song,
+                spotifyTrackId: entry.spotifyTrackId,
+                spotifyPosition: entry.position
+              };
+            }
+            return {
+              _id: `spotify-${plObj.id}-${entry.position}`,
+              name: entry.name,
+              artist: entry.artist,
+              album: entry.album,
+              cover: entry.coverUrl,
+              duration: entry.duration,
+              externalUrl: entry.externalUrl,
+              spotifyTrackId: entry.spotifyTrackId,
+              spotifyPosition: entry.position,
+              spotifyUnavailable: true
+            };
+          });
+      }
       
       if (plObj.photo && plObj.photo.includes('drive.google.com')) {
         plObj.photo = `${req.protocol}://${req.get('host')}/api/media/${extractDriveId(plObj.photo)}`;
@@ -3258,6 +3686,21 @@ app.get('/api/playlists', async (req, res) => {
             }
           }
           return song;
+        });
+      }
+      if (Array.isArray(plObj.playlistItems)) {
+        plObj.playlistItems.forEach(item => {
+          if (item.path && item.path.includes('drive.google.com')) {
+            item.path = `${req.protocol}://${req.get('host')}/api/media/${extractDriveId(item.path)}`;
+          }
+          if (item.cover && item.cover.includes('drive.google.com')) {
+            item.cover = `${req.protocol}://${req.get('host')}/api/media/${extractDriveId(item.cover)}`;
+          }
+          for (const contributor of [item.addedBy, item.editedBy]) {
+            if (contributor?.profilePhoto && contributor.profilePhoto.includes('drive.google.com')) {
+              contributor.profilePhoto = `${req.protocol}://${req.get('host')}/api/media/${extractDriveId(contributor.profilePhoto)}`;
+            }
+          }
         });
       }
       return plObj;
@@ -3299,7 +3742,12 @@ app.post('/api/playlists', upload.single('photo'), async (req, res) => {
     if (!userId || !isValidObjectId(userId) || !(await requireUser(userId))) {
       return res.status(401).json({ error: 'Usuario no válido' });
     }
-    const existingPlaylist = id ? await Playlist.findOne({ id }).select('userId sharedWith tracks trackDetails') : null;
+    const existingPlaylist = id
+      ? await Playlist.findOne({ id }).select('userId sharedWith tracks trackDetails spotifyPlaylistId')
+      : null;
+    if (existingPlaylist?.spotifyPlaylistId) {
+      return res.status(409).json({ error: 'Esta playlist se mantiene sincronizada desde Spotify y no se puede editar aquí.' });
+    }
     const canEditExisting = existingPlaylist && (
       String(existingPlaylist.userId) === String(userId)
       || existingPlaylist.sharedWith.some(sharedUserId => String(sharedUserId) === String(userId))
@@ -3407,6 +3855,18 @@ app.post('/api/playlists/:id/tracks', async (req, res) => {
     if (!isValidObjectId(userId) || !isValidObjectId(songId)) {
       return res.status(400).json({ error: 'Usuario o canción no válidos' });
     }
+    const targetPlaylist = await Playlist.findOne({ id: req.params.id })
+      .select('userId sharedWith spotifyPlaylistId');
+    if (!targetPlaylist) return res.status(404).json({ error: 'Playlist no encontrada' });
+    if (targetPlaylist.spotifyPlaylistId) {
+      return res.status(409).json({ error: 'Esta playlist se mantiene sincronizada desde Spotify.' });
+    }
+    if (
+      String(targetPlaylist.userId) !== String(userId)
+      && !targetPlaylist.sharedWith.some(memberId => String(memberId) === String(userId))
+    ) {
+      return res.status(403).json({ error: 'No tienes permiso para editar esta playlist' });
+    }
     const song = await Song.findById(songId).select('duration').lean();
     if (!song) return res.status(404).json({ error: 'Canción no encontrada' });
     const addedAt = new Date();
@@ -3449,8 +3909,12 @@ app.delete('/api/playlists/:id/tracks/:songId', async (req, res) => {
     if (!isValidObjectId(userId) || !isValidObjectId(songId)) {
       return res.status(400).json({ error: 'Usuario o canción no válidos' });
     }
-    const playlist = await Playlist.findOne({ id: req.params.id }).select('userId sharedWith tracks');
+    const playlist = await Playlist.findOne({ id: req.params.id })
+      .select('userId sharedWith tracks spotifyPlaylistId');
     if (!playlist) return res.status(404).json({ error: 'Playlist no encontrada' });
+    if (playlist.spotifyPlaylistId) {
+      return res.status(409).json({ error: 'Esta playlist se mantiene sincronizada desde Spotify.' });
+    }
     const canEdit = String(playlist.userId) === String(userId)
       || playlist.sharedWith.some(memberId => String(memberId) === String(userId));
     if (!canEdit) return res.status(403).json({ error: 'No tienes permiso para editar esta playlist' });
@@ -4289,7 +4753,7 @@ if (isMainModule) {
       }
     });
 
-    socket.on('accountQueueSnapshot', async ({ songIds, sourceSongIds, queueName } = {}, acknowledge = () => {}) => {
+    socket.on('accountQueueSnapshot', async ({ revision, songIds, sourceSongIds, queueName } = {}, acknowledge = () => {}) => {
       const playback = playbackStateByUser.get(authenticatedUserId);
       if (
         !playback?.deviceId
@@ -4316,6 +4780,11 @@ if (isMainModule) {
       accountQueueUpdateSequenceByUser.set(authenticatedUserId, updateSequence);
       try {
         const previousQueue = await getAccountQueueSnapshot(authenticatedUserId);
+        if (Number.isInteger(revision) && revision < previousQueue.revision) {
+          socket.emit('accountQueueSnapshot', previousQueue);
+          acknowledge({ success: true, stale: true, revision: previousQueue.revision });
+          return;
+        }
         const normalizedSongIds = songIds.map(id => String(id).toLowerCase());
         const normalizedSourceSongIds = Array.isArray(sourceSongIds)
           ? sourceSongIds.map(id => String(id).toLowerCase())
@@ -4365,7 +4834,7 @@ if (isMainModule) {
             .select('accountQueue accountQueueSourceSongIds accountQueueName accountQueueRevision')
             .lean();
           if (persistedQueue) {
-            accountQueueByUser.set(authenticatedUserId, {
+            const latestQueue = {
               revision: Math.max(0, Number(persistedQueue.accountQueueRevision) || 0),
               songIds: Array.isArray(persistedQueue.accountQueue)
                 ? persistedQueue.accountQueue.map(String)
@@ -4376,7 +4845,11 @@ if (isMainModule) {
               queueName: typeof persistedQueue.accountQueueName === 'string' && persistedQueue.accountQueueName.trim()
                 ? persistedQueue.accountQueueName.trim()
                 : 'GENERAL'
-            });
+            };
+            accountQueueByUser.set(authenticatedUserId, latestQueue);
+            io.to(`user:${authenticatedUserId}`).emit('accountQueueSnapshot', latestQueue);
+            acknowledge({ success: true, stale: true, revision: latestQueue.revision });
+            return;
           }
           acknowledge({ success: false, error: 'La cola cambió. Vuelve a sincronizarla.' });
           return;
@@ -4401,13 +4874,16 @@ if (isMainModule) {
           return { success: false, error: 'Solo el dispositivo que reproduce puede avanzar la cola.' };
         }
         const queue = await getAccountQueueSnapshot(authenticatedUserId);
+        if (queue.revision !== revision) {
+          io.to(`user:${authenticatedUserId}`).emit('accountQueueSnapshot', queue);
+          return { success: true, stale: true, revision: queue.revision };
+        }
         if (
-          queue.revision !== revision
-          || !Number.isInteger(count)
+          !Number.isInteger(count)
           || count < 1
           || count > queue.songIds.length
         ) {
-          return { success: false, error: 'La cola cambió. Vuelve a sincronizarla.' };
+          return { success: false, error: 'No se pudo avanzar la cola de la cuenta.' };
         }
         const nextQueue = {
           ...queue,
@@ -4437,7 +4913,7 @@ if (isMainModule) {
               .select('accountQueue accountQueueSourceSongIds accountQueueName accountQueueRevision')
               .lean();
             if (persistedQueue) {
-              accountQueueByUser.set(authenticatedUserId, {
+              const latestQueue = {
                 revision: Math.max(0, Number(persistedQueue.accountQueueRevision) || 0),
                 songIds: Array.isArray(persistedQueue.accountQueue)
                   ? persistedQueue.accountQueue.map(String)
@@ -4448,9 +4924,12 @@ if (isMainModule) {
                 queueName: typeof persistedQueue.accountQueueName === 'string' && persistedQueue.accountQueueName.trim()
                   ? persistedQueue.accountQueueName.trim()
                   : 'GENERAL'
-              });
+              };
+              accountQueueByUser.set(authenticatedUserId, latestQueue);
+              io.to(`user:${authenticatedUserId}`).emit('accountQueueSnapshot', latestQueue);
+              return { success: true, stale: true, revision: latestQueue.revision };
             }
-            return { success: false, error: 'La cola cambió. Vuelve a sincronizarla.' };
+            return { success: false, error: 'No se pudo sincronizar la cola de la cuenta.' };
           }
           accountQueueByUser.set(authenticatedUserId, nextQueue);
           io.to(`user:${authenticatedUserId}`).emit('accountQueueSnapshot', nextQueue);
@@ -4503,25 +4982,14 @@ if (isMainModule) {
       acknowledge(result);
     });
 
-    socket.on('accountQueueUpdateRequest', async ({ revision, songIds } = {}, acknowledge = () => {}) => {
+    socket.on('accountQueueUpdateRequest', async ({ songIds } = {}, acknowledge = () => {}) => {
       const result = await runAccountQueueMutation(authenticatedUserId, async () => {
-        const queue = await getAccountQueueSnapshot(authenticatedUserId);
         if (
-          queue.revision !== revision
-          || !Array.isArray(songIds)
+          !Array.isArray(songIds)
           || songIds.length > 5000
           || songIds.some(id => !isValidObjectId(String(id)))
         ) {
-          return { success: false, error: 'La cola cambió. Vuelve a intentarlo.' };
-        }
-        const playback = playbackStateByUser.get(authenticatedUserId);
-        const ownerSocket = playback?.deviceId ? getPlaybackOwnerSocket(playback) : null;
-        if (!ownerSocket) {
-          return {
-            success: false,
-            ownerDisconnected: true,
-            error: 'El dispositivo que reproduce no está conectado.'
-          };
+          return { success: false, error: 'La cola contiene canciones no válidas.' };
         }
         try {
           const normalizedSongIds = songIds.map(id => String(id).toLowerCase());
@@ -4531,22 +4999,34 @@ if (isMainModule) {
           if (normalizedSongIds.some(id => !existingSongIds.has(id))) {
             return { success: false, error: 'La cola contiene canciones que ya no están disponibles.' };
           }
-          if (accountQueueByUser.get(authenticatedUserId)?.revision !== revision) {
-            return { success: false, error: 'La cola cambió. Vuelve a intentarlo.' };
+          const persistedQueue = await User.findOneAndUpdate(
+            { _id: authenticatedUserId },
+            {
+              $set: { accountQueue: normalizedSongIds },
+              $inc: { accountQueueRevision: 1 }
+            },
+            { new: true }
+          )
+            .select('accountQueue accountQueueSourceSongIds accountQueueName accountQueueRevision')
+            .lean();
+          if (!persistedQueue) {
+            return { success: false, error: 'No se pudo encontrar la cuenta para guardar la cola.' };
           }
-          return await new Promise(resolve => {
-            ownerSocket.timeout(5000).emit(
-              'accountQueueReplaceCommand',
-              { revision, songIds: normalizedSongIds },
-              (deliveryError, response) => resolve(deliveryError
-                ? {
-                  success: false,
-                  ownerUnresponsive: true,
-                  error: 'El dispositivo que reproduce no respondió.'
-                }
-                : response || { success: false, error: 'No se pudo actualizar la cola.' })
-            );
-          });
+          const queue = {
+            revision: Math.max(0, Number(persistedQueue.accountQueueRevision) || 0),
+            songIds: Array.isArray(persistedQueue.accountQueue)
+              ? persistedQueue.accountQueue.map(String)
+              : [],
+            sourceSongIds: Array.isArray(persistedQueue.accountQueueSourceSongIds)
+              ? persistedQueue.accountQueueSourceSongIds.map(String)
+              : [],
+            queueName: typeof persistedQueue.accountQueueName === 'string' && persistedQueue.accountQueueName.trim()
+              ? persistedQueue.accountQueueName.trim()
+              : 'GENERAL'
+          };
+          accountQueueByUser.set(authenticatedUserId, queue);
+          io.to(`user:${authenticatedUserId}`).emit('accountQueueSnapshot', queue);
+          return { success: true, revision: queue.revision };
         } catch (error) {
           console.error('No se pudo actualizar la cola de la cuenta.', error);
           return { success: false, error: 'No se pudo actualizar la cola de la cuenta.' };

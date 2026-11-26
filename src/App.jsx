@@ -306,7 +306,7 @@ function App() {
 
             <div className="settings-section">
               <h3>Atajos de teclado</h3>
-              <p>Asigna combinaciones para buscar, reproducir o cambiar de canción. No se activan al escribir.</p>
+              <p>Asigna combinaciones para buscar, reproducir o cambiar de canción.</p>
               <div className="keyboard-shortcuts">
                 <div className="keyboard-shortcut-row">
                   <span>Buscar canciones</span>
@@ -620,6 +620,17 @@ function App() {
                 </div>
               </div>
             </div>
+
+            <section id="spotify-playlist-import" className="spotify-playlist-import">
+              <h3>Importar desde Spotify</h3>
+              <p id="spotify-playlist-import-status" className="lyrics-editor-status" aria-live="polite">Conecta Spotify para importar una playlist de tu cuenta.</p>
+              <div className="spotify-likes-toolbar">
+                <button id="spotify-playlist-connect-button" className="modal-btn-text" type="button">Conectar Spotify</button>
+                <button id="spotify-playlist-load-button" className="modal-btn-text" type="button" hidden>Cargar playlists</button>
+                <button id="spotify-playlist-more-button" className="modal-btn-text" type="button" hidden>Cargar más</button>
+              </div>
+              <ul id="spotify-playlist-list" className="spotify-likes-list"></ul>
+            </section>
 
             <div className="edit-song-actions">
               <button id="btn-delete-pl" className="modal-btn-text" style={{color: '#ff4d4d', display: 'none'}}>Eliminar Playlist</button>

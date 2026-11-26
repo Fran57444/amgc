@@ -51,11 +51,16 @@ const state = {
   suggestions: [],
   spotifyConnected: false,
   spotifyConfigured: false,
+  spotifyPlaylistScopesGranted: false,
   spotifyTracks: [],
   spotifyTracksLoaded: false,
   spotifyNextOffset: 0,
   spotifyTotal: 0,
   spotifyHasMore: false,
+  spotifyPlaylists: [],
+  spotifyPlaylistsLoaded: false,
+  spotifyPlaylistsNextOffset: 0,
+  spotifyPlaylistsHasMore: false,
   spotifySelectedTrackIds: new Set(),
   spotifySearch: '',
   spotifySectionOpen: false,
@@ -133,6 +138,7 @@ const state = {
   customNotificationEnabled: localStorage.getItem('amgc-mobile-custom-notification') === 'true',
   notificationPermissionGranted: false
 };
+const spotifyPlaylistSyncs = new Set();
 let accountQueuePublishChain = Promise.resolve();
 let pendingPlaybackTakeoverPromise = null;
 let pendingPlaybackTakeoverRetryTimer = null;
@@ -1369,15 +1375,34 @@ function observeNativeImage(image, source) {
   ));
 }
 
+function setArtworkLoading(image, loading) {
+  const frame = image.closest('.artwork-frame');
+  if (!frame) return;
+  frame.classList.toggle('is-loading', loading);
+  frame.setAttribute('aria-busy', String(loading));
+}
+
+function watchArtworkLoading(image) {
+  if (image.dataset.artworkLoadingInstalled === 'true') return;
+  image.dataset.artworkLoadingInstalled = 'true';
+  image.addEventListener('load', () => setArtworkLoading(image, false));
+  image.addEventListener('error', () => {
+    if (!image.hasAttribute('src')) setArtworkLoading(image, false);
+  });
+}
+
 function setImageSource(image, source, { lazy = false, size = 'small' } = {}) {
   deferredNativeImages.delete(image);
   nativeImageObserver?.unobserve(image);
   if (!source) {
+    setArtworkLoading(image, false);
     delete image.dataset.nativeDriveImage;
     image.removeAttribute('src');
     return;
   }
   installImageFallback(image);
+  watchArtworkLoading(image);
+  setArtworkLoading(image, true);
   image.dataset.nativeImageFallback = '0';
   image.dataset.nativeImageSize = size;
   const fileId = isAndroidNative
@@ -1386,6 +1411,7 @@ function setImageSource(image, source, { lazy = false, size = 'small' } = {}) {
   if (!fileId) {
     delete image.dataset.nativeDriveImage;
     image.src = resolveImageUrl(source, size);
+    if (image.complete && image.naturalWidth > 0) setArtworkLoading(image, false);
     return;
   }
 
@@ -1393,6 +1419,7 @@ function setImageSource(image, source, { lazy = false, size = 'small' } = {}) {
   const cachedUrl = getCachedImageUrl(source, '', size);
   if (cachedUrl) {
     image.src = cachedUrl;
+    if (image.complete && image.naturalWidth > 0) setArtworkLoading(image, false);
   } else {
     image.removeAttribute('src');
     if (lazy) observeNativeImage(image, source);
@@ -1449,7 +1476,9 @@ function renderPlaylistCard(playlist) {
   const copy = makeElement('span', 'playlist-copy');
   copy.append(
     makeElement('strong', '', playlist.name || 'Playlist'),
-    makeElement('small', '', `${playlist.tracks?.length || 0} canciones`)
+    makeElement('small', '', `${playlist.spotifyPlaylistId
+      ? playlist.playlistItems?.length || 0
+      : playlist.tracks?.length || 0} canciones`)
   );
   card.append(art, copy);
   return card;
@@ -1510,6 +1539,7 @@ function updateSongLoadingIndicator(row) {
 function watchSongCoverLoading(row, cover, image) {
   if (!image) return;
   const hasSource = Boolean(image.dataset.nativeDriveImage || image.hasAttribute('src'));
+  cover.classList.toggle('is-cover-loading', hasSource);
   row.dataset.coverLoading = String(hasSource);
   updateSongLoadingIndicator(row);
   if (!hasSource) return;
@@ -1518,6 +1548,7 @@ function watchSongCoverLoading(row, cover, image) {
   const finishLoading = () => {
     if (finished) return;
     finished = true;
+    cover.classList.remove('is-cover-loading');
     row.dataset.coverLoading = 'false';
     image.removeEventListener('load', finishLoading);
     image.removeEventListener('error', finishFailedLoad);
@@ -1536,6 +1567,38 @@ function watchSongCoverLoading(row, cover, image) {
 }
 
 function renderSongRow(song, options = {}) {
+  if (song.spotifyUnavailable) {
+    const row = makeElement('article', `song-row detail-song-row spotify-unavailable-song-row`);
+    const coverWrap = makeElement('span', 'song-cover-loading');
+    const coverImage = imageElement(song.cover || '', 'song-cover', '');
+    coverWrap.append(coverImage);
+    row.append(coverWrap);
+    const copy = makeElement('span', 'song-copy');
+    copy.append(
+      makeElement('strong', '', song.name || 'Contenido no disponible'),
+      makeElement('small', '', song.artist || 'Artista desconocido'),
+      makeElement('small', 'spotify-unavailable-label', 'No disponible en AMGC')
+    );
+    row.append(copy);
+    if (song.externalUrl) {
+      const spotifyLink = makeElement('a', 'spotify-track-open', 'Spotify');
+      spotifyLink.href = song.externalUrl;
+      spotifyLink.target = '_blank';
+      spotifyLink.rel = 'noopener noreferrer';
+      row.append(spotifyLink);
+    }
+    if (
+      options.playlist?.spotifyPlaylistId
+      && String(options.playlist.ownerId) === String(state.user?._id)
+      && song.spotifyTrackId
+      && String(song.artist || '').toLocaleLowerCase() !== 'artista desconocido'
+    ) {
+      row.append(makeButton('song-action', 'Sugerir para el catálogo', button => {
+        void suggestSpotifyPlaylistTrack(options.playlist, song, button);
+      }, '＋'));
+    }
+    return row;
+  }
   const songId = getSongId(song);
   const row = makeElement('article', `song-row${options.detail ? ' detail-song-row' : ''}`);
   row.dataset.songId = songId;
@@ -1546,7 +1609,9 @@ function renderSongRow(song, options = {}) {
   if (isLoading || isSyncing) row.classList.add(isSyncing ? 'is-syncing' : 'is-loading');
   const play = makeButton('song-play', `Reproducir ${song.name || 'canción'}`, () => {
     const sourceQueue = options.queue || state.songs;
-    const index = sourceQueue.findIndex(entry => getSongId(entry) === songId);
+    const index = options.playlist?.spotifyPlaylistId
+      ? sourceQueue.findIndex(entry => entry.spotifyPosition === song.spotifyPosition)
+      : sourceQueue.findIndex(entry => getSongId(entry) === songId);
     if (index >= 0) void playTrack(sourceQueue, index, { queueTitle: options.queueTitle || 'GENERAL' });
   });
   const coverWrap = makeElement('span', 'song-cover-loading');
@@ -1753,7 +1818,11 @@ function renderSpotifyLikesSection() {
   const connectButton = makeButton('secondary-button', 'Conectar Spotify', () => {
     void connectSpotify(connectButton);
   }, 'Conectar Spotify');
-  connectButton.hidden = state.spotifyConnected;
+  connectButton.dataset.spotifyConnect = 'true';
+  connectButton.textContent = state.spotifyConnected
+    ? 'Actualizar permisos de Spotify'
+    : 'Conectar Spotify';
+  connectButton.hidden = state.spotifyConnected && state.spotifyPlaylistScopesGranted;
   connectButton.disabled = !state.spotifyConfigured;
   const refreshButton = makeButton('text-button', 'Actualizar lista', () => {
     void loadSpotifyLikedTracks({ refresh: true });
@@ -1799,6 +1868,149 @@ function renderSpotifyLikesSection() {
     void loadSpotifyLikedTracks();
   }
   return section;
+}
+
+function updateSpotifyPlaylistImportForm() {
+  const status = document.getElementById('spotify-playlist-import-status');
+  const connectButton = document.getElementById('spotify-playlist-connect-button');
+  const loadButton = document.getElementById('spotify-playlist-load-button');
+  const moreButton = document.getElementById('spotify-playlist-more-button');
+  if (!status || !connectButton || !loadButton || !moreButton) return;
+  connectButton.textContent = state.spotifyConnected
+    ? 'Actualizar permisos de Spotify'
+    : 'Conectar Spotify';
+  connectButton.hidden = state.spotifyConnected && state.spotifyPlaylistScopesGranted;
+  connectButton.disabled = !state.spotifyConfigured;
+  loadButton.textContent = state.spotifyPlaylistsLoaded ? 'Actualizar playlists' : 'Cargar playlists';
+  loadButton.hidden = !state.spotifyConnected || !state.spotifyPlaylistScopesGranted;
+  moreButton.hidden = !state.spotifyPlaylistsHasMore;
+  status.textContent = !state.spotifyConnected
+    ? 'Conecta Spotify para importar una playlist vinculada.'
+    : !state.spotifyPlaylistScopesGranted
+      ? 'Actualiza los permisos de Spotify para permitir la lectura de playlists.'
+      : state.spotifyPlaylistsLoaded
+        ? `${state.spotifyPlaylists.length} playlists cargadas.`
+        : 'Carga las playlists de tu cuenta de Spotify.';
+  renderSpotifyPlaylistRows(document.getElementById('spotify-playlist-list'));
+}
+
+function renderSpotifyPlaylistRows(list) {
+  if (!list) return;
+  list.replaceChildren();
+  for (const spotifyPlaylist of state.spotifyPlaylists) {
+    const row = makeElement('article', 'spotify-playlist-row');
+    const image = imageElement(spotifyPlaylist.image, 'spotify-playlist-cover', '');
+    const info = makeElement('span', 'spotify-like-info');
+    info.append(
+      makeElement('strong', '', spotifyPlaylist.name),
+      makeElement('small', '', `${spotifyPlaylist.ownerName} · ${spotifyPlaylist.totalTracks} canciones`)
+    );
+    const action = makeButton(
+      'secondary-button',
+      spotifyPlaylist.linkedPlaylistId ? 'Sincronizar' : 'Importar',
+      button => void importSpotifyPlaylist(spotifyPlaylist, button)
+    );
+    action.disabled = !state.spotifyConnected || !state.spotifyPlaylistScopesGranted;
+    row.append(image, info, action);
+    list.append(row);
+  }
+}
+
+async function loadSpotifyPlaylists({ append = false } = {}) {
+  if (!state.spotifyConnected || !state.spotifyPlaylistScopesGranted) return;
+  const offset = append ? state.spotifyPlaylistsNextOffset : 0;
+  const loadButton = document.getElementById('spotify-playlist-load-button');
+  const moreButton = document.getElementById('spotify-playlist-more-button');
+  const status = document.getElementById('spotify-playlist-import-status');
+  if (loadButton) loadButton.disabled = true;
+  if (moreButton) moreButton.disabled = true;
+  if (status) status.textContent = append ? 'Cargando más playlists...' : 'Cargando playlists de Spotify...';
+  try {
+    const result = await request(`/spotify/playlists?offset=${offset}`);
+    const rows = Array.isArray(result.playlists) ? result.playlists : [];
+    state.spotifyPlaylists = append ? [...state.spotifyPlaylists, ...rows] : rows;
+    state.spotifyPlaylistsNextOffset = Number(result.nextOffset) || offset;
+    state.spotifyPlaylistsHasMore = result.hasMore === true;
+    state.spotifyPlaylistsLoaded = true;
+    updateSpotifyPlaylistImportForm();
+    if (status) status.textContent = `${state.spotifyPlaylists.length} de ${Number(result.total) || 0} playlists cargadas.`;
+  } catch (error) {
+    console.error('No se pudieron cargar las playlists de Spotify.', error);
+    if (status) status.textContent = error.message || 'No se pudieron cargar las playlists de Spotify.';
+    showToast(error.message || 'No se pudieron cargar las playlists de Spotify.', true);
+  } finally {
+    if (loadButton) loadButton.disabled = false;
+    if (moreButton) moreButton.disabled = false;
+  }
+}
+
+async function importSpotifyPlaylist(spotifyPlaylist, button) {
+  button.disabled = true;
+  try {
+    const result = await request(
+      `/spotify/playlists/${encodeURIComponent(spotifyPlaylist.id)}/import`,
+      { method: 'POST' }
+    );
+    closeDialog();
+    state.pendingSongId = null;
+    state.selectedSongId = null;
+    await loadLibrary();
+    spotifyPlaylistSyncs.add(String(result.playlistId));
+    openPlaylist(result.playlistId);
+    spotifyPlaylistSyncs.delete(String(result.playlistId));
+    showToast(result.changed ? `Playlist “${spotifyPlaylist.name}” importada o sincronizada.` : `“${spotifyPlaylist.name}” ya está sincronizada.`);
+    spotifyPlaylist.linkedPlaylistId = result.playlistId;
+  } catch (error) {
+    console.error('No se pudo importar o sincronizar la playlist de Spotify.', error);
+    showToast(error.message || 'No se pudo importar la playlist de Spotify.', true);
+    button.disabled = false;
+  }
+}
+
+async function syncSpotifyPlaylist(playlist) {
+  const playlistId = String(playlist?.id || '');
+  if (
+    !playlistId
+    || !playlist.spotifyPlaylistId
+    || !state.spotifyConnected
+    || !state.spotifyPlaylistScopesGranted
+    || !navigator.onLine
+    || spotifyPlaylistSyncs.has(playlistId)
+  ) return;
+  spotifyPlaylistSyncs.add(playlistId);
+  try {
+    const result = await request(
+      `/spotify/playlists/${encodeURIComponent(playlist.spotifyPlaylistId)}/import`,
+      { method: 'POST' }
+    );
+    if (result.changed) await loadLibrary();
+  } catch (error) {
+    console.error('No se pudo comprobar la sincronización de Spotify.', error);
+    showToast(error.message || 'No se pudo sincronizar la playlist de Spotify.', true);
+  } finally {
+    spotifyPlaylistSyncs.delete(playlistId);
+  }
+}
+
+async function suggestSpotifyPlaylistTrack(playlist, track, button) {
+  button.disabled = true;
+  try {
+    const result = await request('/spotify/import', {
+      method: 'POST',
+      body: JSON.stringify({
+        spotifyPlaylistId: playlist.id,
+        trackIds: [track.spotifyTrackId]
+      })
+    });
+    showToast(result.imported
+      ? `“${track.name}” se añadió a sugerencias para el catálogo.`
+      : `“${track.name}” ya está en el catálogo o en sugerencias.`);
+  } catch (error) {
+    console.error('No se pudo sugerir la canción de Spotify.', error);
+    showToast(error.message || 'No se pudo enviar la canción a sugerencias.', true);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function renderSpotifyLikedTracks(list) {
@@ -1857,9 +2069,12 @@ function updateSpotifyLikesSection() {
   const status = section.querySelector('#spotify-likes-status');
   if (status) status.textContent = state.spotifyStatusMessage;
   const button = label => section.querySelector(`[aria-label="${label}"]`);
-  const connectButton = button('Conectar Spotify');
+  const connectButton = section.querySelector('[data-spotify-connect]');
   if (connectButton) {
-    connectButton.hidden = state.spotifyConnected;
+    connectButton.textContent = state.spotifyConnected
+      ? 'Actualizar permisos de Spotify'
+      : 'Conectar Spotify';
+    connectButton.hidden = state.spotifyConnected && state.spotifyPlaylistScopesGranted;
     connectButton.disabled = !state.spotifyConfigured;
   }
   const refreshButton = button('Actualizar');
@@ -1872,6 +2087,7 @@ function updateSpotifyLikesSection() {
   if (loadMoreButton) loadMoreButton.hidden = !state.spotifyHasMore;
   const list = section.querySelector('.spotify-likes-list');
   if (list) renderSpotifyLikedTracks(list);
+  updateSpotifyPlaylistImportForm();
 }
 
 async function loadSpotifyStatus(loadTracks = false) {
@@ -1884,8 +2100,10 @@ async function loadSpotifyStatus(loadTracks = false) {
       if (String(state.user?._id || '') !== userId) return;
       const wasConnected = state.spotifyConnected;
       const wasConfigured = state.spotifyConfigured;
+      const hadPlaylistScopes = state.spotifyPlaylistScopesGranted;
       state.spotifyConfigured = result.configured === true;
       state.spotifyConnected = result.connected === true;
+      state.spotifyPlaylistScopesGranted = result.playlistScopesGranted === true;
       if (!state.spotifyConnected) {
         spotifyApiAccessToken = '';
         spotifyApiAccessTokenExpiresAt = 0;
@@ -1899,20 +2117,39 @@ async function loadSpotifyStatus(loadTracks = false) {
         state.spotifyNextOffset = 0;
         state.spotifyTotal = 0;
         state.spotifyHasMore = false;
+        state.spotifyPlaylists = [];
+        state.spotifyPlaylistsLoaded = false;
+        state.spotifyPlaylistsNextOffset = 0;
+        state.spotifyPlaylistsHasMore = false;
       }
       state.spotifyStatusMessage = state.spotifyConnected
         ? state.spotifyTracksLoaded
-          ? `${state.spotifyTracks.length} de ${state.spotifyTotal} canciones cargadas.`
-          : 'Spotify conectado. Abre esta sección para cargar tus Me gusta.'
+          ? `${state.spotifyTracks.length} de ${state.spotifyTotal} canciones cargadas.${state.spotifyPlaylistScopesGranted ? '' : ' Actualiza permisos para importar playlists.'}`
+          : `Spotify conectado.${state.spotifyPlaylistScopesGranted ? ' Abre esta sección para cargar tus Me gusta.' : ' Actualiza permisos para importar playlists.'}`
         : state.spotifyConfigured
           ? 'Conecta Spotify para cargar tus canciones guardadas.'
           : 'Spotify requiere configuración del servidor.';
       if (state.currentTab === 'songs' && !state.currentPlaylistId) {
-        if (wasConnected !== state.spotifyConnected || wasConfigured !== state.spotifyConfigured) {
+        if (
+          wasConnected !== state.spotifyConnected
+          || wasConfigured !== state.spotifyConfigured
+          || hadPlaylistScopes !== state.spotifyPlaylistScopesGranted
+        ) {
           renderCurrentView();
         } else {
           updateSpotifyLikesSection();
         }
+      }
+      updateSpotifyPlaylistImportForm();
+      if (
+        state.spotifyConnected
+        && state.spotifyPlaylistScopesGranted
+        && (wasConnected !== state.spotifyConnected || hadPlaylistScopes !== state.spotifyPlaylistScopesGranted)
+        && state.currentPlaylistId
+      ) {
+        const activePlaylist = [...state.playlists, ...state.profilePlaylists]
+          .find(playlist => String(playlist.id) === String(state.currentPlaylistId));
+        if (activePlaylist?.spotifyPlaylistId) void syncSpotifyPlaylist(activePlaylist);
       }
       if (state.spotifyConnected && (loadTracks || state.spotifySectionOpen)) {
         await loadSpotifyLikedTracks();
@@ -2049,6 +2286,7 @@ async function disconnectSpotify(button) {
   try {
     await request('/spotify/disconnect', { method: 'POST' });
     state.spotifyConnected = false;
+    state.spotifyPlaylistScopesGranted = false;
     spotifyApiAccessToken = '';
     spotifyApiAccessTokenExpiresAt = 0;
     spotifyApiAccessTokenUserId = '';
@@ -2059,8 +2297,13 @@ async function disconnectSpotify(button) {
     state.spotifyNextOffset = 0;
     state.spotifyTotal = 0;
     state.spotifyHasMore = false;
+    state.spotifyPlaylists = [];
+    state.spotifyPlaylistsLoaded = false;
+    state.spotifyPlaylistsNextOffset = 0;
+    state.spotifyPlaylistsHasMore = false;
     state.spotifySearch = '';
     state.spotifyStatusMessage = 'Spotify desconectado.';
+    updateSpotifyPlaylistImportForm();
     renderCurrentView();
     showToast('Spotify desconectado.');
   } catch (error) {
@@ -2120,12 +2363,16 @@ function renderPlaylistDetail() {
   const copy = makeElement('div', 'playlist-detail-copy');
   const isOwner = String(playlist.ownerId || '') === String(state.user?._id || '');
   const isShared = (playlist.sharedWith || []).some(member => String(member?._id || member) === String(state.user?._id || ''));
+  const isSpotifyLinked = Boolean(playlist.spotifyPlaylistId);
+  const displayTracks = isSpotifyLinked && Array.isArray(playlist.playlistItems)
+    ? playlist.playlistItems
+    : playlist.tracks || [];
   const creator = { _id: playlist.ownerId, username: playlist.ownerName || 'Desconocido', profilePhoto: playlist.ownerPhoto || '' };
   copy.append(
     makeElement('p', 'eyebrow', 'PLAYLIST'),
     makeElement('h1', '', playlist.name || 'Playlist'),
     makeElement('p', '', playlist.desc || ''),
-    makeElement('p', 'playlist-track-count', `${playlist.tracks?.length || 0} canciones · ${formatPlaylistDuration(
+    makeElement('p', 'playlist-track-count', `${displayTracks.length} canciones · ${formatPlaylistDuration(
       playlist.duration || (playlist.tracks || []).reduce((total, song) => total + (Number(song.duration) || 0), 0)
     )}`),
     makeElement('p', 'playlist-owner', 'De ')
@@ -2153,8 +2400,13 @@ function renderPlaylistDetail() {
     if (tracks.length) void playTrack(tracks, 0, { queueTitle: playlist.name || 'PLAYLIST' });
     else showToast('Esta playlist aún no tiene canciones.');
   }, '▶'));
-  const canEdit = isOwner || isShared;
-  if (canEdit) {
+  const canEdit = (isOwner || isShared) && !isSpotifyLinked;
+  if (isSpotifyLinked && isOwner) {
+    actions.append(makeButton('round-action', 'Sincronizar desde Spotify', () => void syncSpotifyPlaylist(playlist), '⟳'));
+    actions.append(makeButton('round-action', 'Eliminar playlist', () => void deletePlaylist(playlist), '⌫'));
+  } else if (isSpotifyLinked && isShared) {
+    actions.append(makeButton('round-action', 'Salir de la playlist', () => void leavePlaylist(playlist), '↩'));
+  } else if (canEdit) {
     actions.append(makeButton('round-action', 'Editar playlist', () => openPlaylistForm(playlist), '✎'));
     actions.append(makeButton('round-action', 'Agregar canciones', () => openAddToPlaylist(null, playlist.id), '＋'));
     if (isOwner) {
@@ -2171,14 +2423,17 @@ function renderPlaylistDetail() {
     }, isSaved ? '✓' : '＋'));
   }
   view.append(actions);
-  view.append(renderSongList(playlist.tracks || [], 'Esta playlist todavía no tiene canciones.', {
-    queue: playlist.tracks || [],
+  view.append(renderSongList(displayTracks, 'Esta playlist todavía no tiene canciones.', {
+    queue: isSpotifyLinked
+      ? displayTracks.filter(track => !track.spotifyUnavailable)
+      : playlist.tracks || [],
     queueTitle: playlist.name || 'PLAYLIST',
     detail: true,
     onRemove: canEdit ? song => void removeSongFromPlaylist(playlist, song) : null,
     playlist,
     canReorder: canEdit
   }));
+  if (isOwner && isSpotifyLinked) void syncSpotifyPlaylist(playlist);
 }
 
 function renderSettings() {
@@ -5047,10 +5302,15 @@ function publishAccountQueueSnapshot(force = false, retried = false, allowPendin
       const eventName = removedCount ? 'accountQueueAdvance' : 'accountQueueSnapshot';
       const payload = removedCount
         ? { revision: state.accountQueueRevision, count: removedCount }
-        : { songIds, sourceSongIds, queueName };
+        : { revision: state.accountQueueRevision, songIds, sourceSongIds, queueName };
       const socket = state.socket;
       socket.timeout(7000).emit(eventName, payload, (timeoutError, response) => {
         if (response?.success) {
+          if (response.stale) {
+            if (Number.isInteger(response.revision)) state.accountQueueRevision = response.revision;
+            resolve(true);
+            return;
+          }
           state.accountQueueIds = songIds;
           state.accountQueueSourceIds = sourceSongIds;
           state.accountQueueName = queueName;
@@ -7008,6 +7268,20 @@ function connectRealtime() {
   });
   socket.on('accountQueueSnapshot', ({ revision, songIds, sourceSongIds, queueName } = {}) => {
     if (!Number.isInteger(revision) || revision < state.accountQueueRevision || !Array.isArray(songIds)) return;
+    const shouldReconcileLocalQueue = state.playbackOwnerConfirmed
+      && state.ownPlayback?.deviceId === playbackDeviceId
+      && !getRemotePlaybackSession()
+      && !state.followingUserId
+      && !state.sharedQueueSessionId
+      && !Array.isArray(state.accountQueuePendingIds);
+    if (shouldReconcileLocalQueue) {
+      const tracksById = new Map(state.songs.map(song => [getSongId(song), song]));
+      const tracks = songIds.map(songId => tracksById.get(String(songId)));
+      if (tracks.every(Boolean)) {
+        state.upcomingQueue = tracks;
+        persistUpcomingQueue();
+      }
+    }
     state.accountQueueRevision = revision;
     state.accountQueueIds = songIds.map(String);
     if (Array.isArray(sourceSongIds)) state.accountQueueSourceIds = sourceSongIds.map(String);
@@ -7904,6 +8178,8 @@ function openPlaylistForm(playlist = null) {
   document.getElementById('playlist-form-title').textContent = playlist ? 'Editar playlist' : 'Nueva playlist';
   document.getElementById('playlist-name').value = playlist?.name || '';
   document.getElementById('playlist-description').value = playlist?.desc || '';
+  const spotifyImport = document.getElementById('spotify-playlist-import');
+  if (spotifyImport) spotifyImport.hidden = Boolean(playlist?.spotifyPlaylistId);
   const preview = document.getElementById('playlist-photo-preview');
   if (playlistPreviewObjectUrl) {
     URL.revokeObjectURL(playlistPreviewObjectUrl);
@@ -7916,6 +8192,7 @@ function openPlaylistForm(playlist = null) {
     preview.removeAttribute('src');
     preview.hidden = true;
   }
+  updateSpotifyPlaylistImportForm();
   openDialog(elements.playlistForm);
 }
 
@@ -8562,6 +8839,15 @@ elements.dialog.addEventListener('click', event => {
   if (event.target === elements.dialog) closeDialog();
 });
 elements.playlistForm.addEventListener('submit', event => void savePlaylist(event));
+document.getElementById('spotify-playlist-connect-button').addEventListener('click', event => {
+  void connectSpotify(event.currentTarget);
+});
+document.getElementById('spotify-playlist-load-button').addEventListener('click', () => {
+  void loadSpotifyPlaylists();
+});
+document.getElementById('spotify-playlist-more-button').addEventListener('click', () => {
+  void loadSpotifyPlaylists({ append: true });
+});
 elements.suggestionForm.addEventListener('submit', event => void submitSongSuggestion(event));
 document.getElementById('playlist-photo').addEventListener('change', event => {
   const file = event.target.files?.[0];

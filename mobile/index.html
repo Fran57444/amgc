@@ -88,7 +88,10 @@
           <span id="player-screen-status">PAUSADO</span>
           <button id="player-queue-open-button" class="icon-button queue-open-button" type="button" aria-label="Abrir cola" aria-expanded="false">＝</button>
         </header>
-        <img id="player-cover" class="player-cover" alt="" />
+        <div class="artwork-frame player-cover-frame">
+          <img id="player-cover" class="player-cover" alt="" />
+          <span class="artwork-loading-spinner" role="status" aria-label="Cargando portada"></span>
+        </div>
         <div class="player-track-copy">
           <div class="player-title-row">
             <h1 id="player-title">Elige una canción</h1>
@@ -180,7 +183,10 @@
 
       <section id="mini-player" class="mini-player">
         <button id="mini-track-button" class="mini-track" type="button" aria-label="Abrir reproductor">
-          <img id="mini-cover" alt="" />
+          <span class="artwork-frame mini-cover-frame">
+            <img id="mini-cover" alt="" />
+            <span class="artwork-loading-spinner" role="status" aria-label="Cargando portada"></span>
+          </span>
           <span class="mini-track-copy">
             <strong id="mini-title"></strong>
             <small id="mini-artist"></small>
@@ -229,6 +235,16 @@
         <label for="playlist-photo">Portada (opcional)</label>
         <input id="playlist-photo" name="photo" type="file" accept="image/*" />
         <img id="playlist-photo-preview" class="playlist-photo-preview" alt="" hidden />
+        <section id="spotify-playlist-import" class="spotify-playlist-import">
+          <h3>Importar desde Spotify</h3>
+          <p id="spotify-playlist-import-status" class="spotify-playlists-status" aria-live="polite">Conecta Spotify para importar una playlist vinculada.</p>
+          <div class="spotify-likes-toolbar">
+            <button id="spotify-playlist-connect-button" class="secondary-button" type="button">Conectar Spotify</button>
+            <button id="spotify-playlist-load-button" class="secondary-button" type="button" hidden>Cargar playlists</button>
+            <button id="spotify-playlist-more-button" class="secondary-button" type="button" hidden>Cargar más</button>
+          </div>
+          <div id="spotify-playlist-list" class="spotify-playlists-list"></div>
+        </section>
         <p id="playlist-form-error" class="form-error" aria-live="polite"></p>
         <button class="primary-button" type="submit">Guardar playlist <span aria-hidden="true">→</span></button>
       </form>

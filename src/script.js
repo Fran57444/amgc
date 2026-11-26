@@ -696,6 +696,11 @@ export function initMusicPlayer() {
     const spotifyLikesStatus = document.getElementById('spotify-likes-status');
     const spotifyLikesList = document.getElementById('spotify-likes-list');
     const spotifyLikesSection = document.getElementById('spotify-likes-section');
+    const spotifyPlaylistImportStatus = document.getElementById('spotify-playlist-import-status');
+    const spotifyPlaylistConnectButton = document.getElementById('spotify-playlist-connect-button');
+    const spotifyPlaylistsLoadButton = document.getElementById('spotify-playlist-load-button');
+    const spotifyPlaylistsMoreButton = document.getElementById('spotify-playlist-more-button');
+    const spotifyPlaylistsList = document.getElementById('spotify-playlist-list');
     const inputSeekSeconds = document.getElementById("input-seek-seconds");
     const inputMaxVolume = document.getElementById("input-max-volume");
     const discordPresenceImageTextInput = document.getElementById("discord-presence-image-text");
@@ -734,10 +739,16 @@ export function initMusicPlayer() {
     let spotifyLikedTracks = [];
     let spotifySelectedTrackIds = new Set();
     let spotifyIsConnected = false;
+    let spotifyPlaylistScopesGranted = false;
     let spotifyNextOffset = 0;
     let spotifyTotal = 0;
     let spotifyHasMore = false;
     let spotifyLikedTracksLoaded = false;
+    let spotifyPlaylists = [];
+    let spotifyPlaylistsNextOffset = 0;
+    let spotifyPlaylistsHasMore = false;
+    let spotifyPlaylistsLoaded = false;
+    const spotifyPlaylistSyncs = new Set();
     let spotifyApiAccessToken = '';
     let spotifyApiAccessTokenExpiresAt = 0;
     let spotifyApiAccessTokenUserId = '';
@@ -2158,7 +2169,10 @@ export function initMusicPlayer() {
                 const details = document.createElement('small');
                 const isMine = String(playlistItem.ownerId) === String(currentUser?._id);
                 const creator = isMine ? 'ti' : (playlistItem.ownerName || 'desconocido');
-                details.textContent = `${playlistItem.tracks?.length || 0} canciones · Hecho por: ${creator}`;
+                const playlistTrackCount = playlistItem.spotifyPlaylistId
+                    ? playlistItem.playlistItems?.length || 0
+                    : playlistItem.tracks?.length || 0;
+                details.textContent = `${playlistTrackCount} canciones · Hecho por: ${creator}`;
                 item.append(cover, name, details);
                 item.addEventListener('click', () => openPlaylistView(playlistItem.id));
                 profilePlaylists.appendChild(item);
@@ -4577,6 +4591,18 @@ export function initMusicPlayer() {
             queueName
         } = {}) => {
             if (!Number.isInteger(revision) || revision < accountQueueRevision || !Array.isArray(songIds)) return;
+            const shouldReconcileLocalQueue = playbackOwnerConfirmed
+                && !getRemotePlaybackSession()
+                && !listeningTogetherUserId
+                && !accountQueuePendingIds;
+            if (shouldReconcileLocalQueue) {
+                const tracksById = new Map(playlist.map(track => [
+                    String(track?._id || track?.id || ''),
+                    track
+                ]));
+                const tracks = songIds.map(songId => tracksById.get(String(songId)));
+                if (tracks.every(Boolean)) customQueue = tracks;
+            }
             accountQueueRevision = revision;
             accountQueueIds = songIds.map(String);
             if (Array.isArray(sourceSongIds)) accountQueueSourceIds = sourceSongIds.map(String);
@@ -7884,8 +7910,18 @@ export function initMusicPlayer() {
         if (!force && signature === accountQueueSnapshotSignature) return Promise.resolve(true);
         accountQueueSnapshotSignature = signature;
         return new Promise(resolve => {
-            socket.emit('accountQueueSnapshot', { songIds, sourceSongIds, queueName: sourceQueueName }, response => {
+            socket.emit('accountQueueSnapshot', {
+                revision: accountQueueRevision,
+                songIds,
+                sourceSongIds,
+                queueName: sourceQueueName
+            }, response => {
                 if (response?.success) {
+                    if (response.stale) {
+                        if (Number.isInteger(response.revision)) accountQueueRevision = response.revision;
+                        resolve(true);
+                        return;
+                    }
                     if (Number.isInteger(response.revision)) accountQueueRevision = response.revision;
                     accountQueueIds = songIds;
                     accountQueueSourceIds = sourceSongIds;
@@ -8780,6 +8816,159 @@ export function initMusicPlayer() {
         }
     }
 
+    function renderSpotifyPlaylists() {
+        if (!spotifyPlaylistsList) return;
+        const fragment = document.createDocumentFragment();
+        if (!spotifyPlaylists.length) {
+            const empty = document.createElement('li');
+            empty.className = 'spotify-likes-empty';
+            empty.textContent = 'No se encontraron playlists en Spotify.';
+            fragment.appendChild(empty);
+        }
+        for (const spotifyPlaylist of spotifyPlaylists) {
+            const item = document.createElement('li');
+            item.className = 'spotify-like-item';
+            const imageUrl = spotifyPlaylist.image || '';
+            if (imageUrl) {
+                const image = document.createElement('img');
+                image.src = imageUrl;
+                image.alt = '';
+                image.loading = 'lazy';
+                item.appendChild(image);
+            }
+            const info = document.createElement('span');
+            info.className = 'spotify-like-info';
+            const name = document.createElement('strong');
+            name.textContent = spotifyPlaylist.name;
+            const detail = document.createElement('span');
+            detail.textContent = `${spotifyPlaylist.ownerName} · ${spotifyPlaylist.totalTracks} canciones`;
+            info.append(name, detail);
+            item.appendChild(info);
+            const action = document.createElement('button');
+            action.type = 'button';
+            action.className = 'modal-btn-text';
+            action.textContent = spotifyPlaylist.linkedPlaylistId ? 'Sincronizar' : 'Importar';
+            action.disabled = !spotifyIsConnected || !spotifyPlaylistScopesGranted;
+            action.setAttribute(
+                'aria-label',
+                `${spotifyPlaylist.linkedPlaylistId ? 'Sincronizar' : 'Importar'} playlist ${spotifyPlaylist.name}`
+            );
+            action.addEventListener('click', async () => {
+                action.disabled = true;
+                spotifyPlaylistImportStatus.textContent = `Sincronizando “${spotifyPlaylist.name}”...`;
+                try {
+                    const response = await apiFetch(
+                        `${API_URL}/spotify/playlists/${encodeURIComponent(spotifyPlaylist.id)}/import`,
+                        { method: 'POST' }
+                    );
+                    const result = await response.json().catch(() => null);
+                    if (!response.ok) throw new Error(result?.error || 'No se pudo importar esta playlist.');
+                    await loadPlaylists();
+                    spotifyPlaylistSyncs.add(String(result.playlistId));
+                    openPlaylistView(result.playlistId);
+                    spotifyPlaylistSyncs.delete(String(result.playlistId));
+                    spotifyPlaylistImportStatus.textContent = result.changed
+                        ? `“${spotifyPlaylist.name}” se importó o sincronizó correctamente.`
+                        : `“${spotifyPlaylist.name}” ya está sincronizada.`;
+                    spotifyPlaylist.linkedPlaylistId = result.playlistId;
+                    action.textContent = 'Sincronizar';
+                } catch (error) {
+                    console.error('No se pudo importar o sincronizar la playlist de Spotify.', error);
+                    spotifyPlaylistImportStatus.textContent = error.message || 'No se pudo sincronizar la playlist.';
+                    showToast(spotifyPlaylistImportStatus.textContent, true);
+                } finally {
+                    action.disabled = false;
+                }
+            });
+            item.appendChild(action);
+            fragment.appendChild(item);
+        }
+        spotifyPlaylistsList.replaceChildren(fragment);
+    }
+
+    function updateSpotifyPlaylistImportForm() {
+        if (!spotifyPlaylistImportStatus || !spotifyPlaylistConnectButton) return;
+        spotifyPlaylistConnectButton.textContent = spotifyIsConnected
+            ? 'Actualizar permisos de Spotify'
+            : 'Conectar Spotify';
+        spotifyPlaylistConnectButton.hidden = spotifyIsConnected && spotifyPlaylistScopesGranted;
+        spotifyPlaylistConnectButton.disabled = spotifyConnectButton?.disabled ?? true;
+        if (spotifyPlaylistsLoadButton) {
+            spotifyPlaylistsLoadButton.hidden = !spotifyIsConnected || !spotifyPlaylistScopesGranted;
+            spotifyPlaylistsLoadButton.textContent = spotifyPlaylistsLoaded
+                ? 'Actualizar playlists'
+                : 'Cargar playlists';
+        }
+        if (spotifyPlaylistsMoreButton) {
+            spotifyPlaylistsMoreButton.hidden = !spotifyIsConnected
+                || !spotifyPlaylistScopesGranted
+                || !spotifyPlaylistsHasMore;
+        }
+        if (!spotifyIsConnected) {
+            spotifyPlaylistImportStatus.textContent = 'Conecta Spotify para importar una playlist vinculada.';
+        } else if (!spotifyPlaylistScopesGranted) {
+            spotifyPlaylistImportStatus.textContent = 'Actualiza los permisos de Spotify para permitir la lectura de playlists.';
+        } else if (!spotifyPlaylistsLoaded) {
+            spotifyPlaylistImportStatus.textContent = 'Carga las playlists de tu cuenta de Spotify.';
+        } else {
+            spotifyPlaylistImportStatus.textContent = `${spotifyPlaylists.length} playlists cargadas.`;
+        }
+        renderSpotifyPlaylists();
+    }
+
+    async function suggestSpotifyPlaylistTrack(playlistData, track, button) {
+        button.disabled = true;
+        try {
+            const response = await apiFetch(`${API_URL}/spotify/import`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    spotifyPlaylistId: playlistData.id,
+                    trackIds: [track.spotifyTrackId]
+                })
+            });
+            const result = await response.json().catch(() => null);
+            if (!response.ok) throw new Error(result?.error || 'No se pudo enviar la canción a sugerencias.');
+            showToast(result.imported
+                ? `“${track.name}” se añadió a sugerencias para el catálogo.`
+                : `“${track.name}” ya está en el catálogo o en sugerencias.`);
+        } catch (error) {
+            console.error('No se pudo sugerir la canción de Spotify.', error);
+            showToast(error.message || 'No se pudo enviar la canción a sugerencias.', true);
+        } finally {
+            button.disabled = false;
+        }
+    }
+
+    async function loadSpotifyPlaylists(append = false) {
+        if (!spotifyIsConnected || !spotifyPlaylistScopesGranted || !spotifyPlaylistImportStatus) return;
+        const offset = append ? spotifyPlaylistsNextOffset : 0;
+        if (spotifyPlaylistsLoadButton) spotifyPlaylistsLoadButton.disabled = true;
+        if (spotifyPlaylistsMoreButton) spotifyPlaylistsMoreButton.disabled = true;
+        spotifyPlaylistImportStatus.textContent = append ? 'Cargando más playlists...' : 'Cargando playlists de Spotify...';
+        try {
+            const response = await apiFetch(`${API_URL}/spotify/playlists?offset=${offset}`);
+            const result = await response.json().catch(() => null);
+            if (!response.ok) throw new Error(result?.error || 'No se pudieron cargar las playlists.');
+            const rows = Array.isArray(result?.playlists) ? result.playlists : [];
+            spotifyPlaylists = append ? [...spotifyPlaylists, ...rows] : rows;
+            spotifyPlaylistsNextOffset = Number(result.nextOffset) || offset;
+            spotifyPlaylistsHasMore = result.hasMore === true;
+            spotifyPlaylistsLoaded = true;
+            renderSpotifyPlaylists();
+            spotifyPlaylistImportStatus.textContent = `${spotifyPlaylists.length} de ${Number(result.total) || 0} playlists cargadas.`;
+            if (spotifyPlaylistsMoreButton) spotifyPlaylistsMoreButton.hidden = !spotifyPlaylistsHasMore;
+            if (spotifyPlaylistsLoadButton) spotifyPlaylistsLoadButton.hidden = spotifyPlaylistsHasMore || spotifyPlaylists.length > 0;
+        } catch (error) {
+            console.error('No se pudieron cargar las playlists de Spotify.', error);
+            spotifyPlaylistImportStatus.textContent = error.message || 'No se pudieron cargar las playlists de Spotify.';
+            showToast(spotifyPlaylistImportStatus.textContent, true);
+        } finally {
+            if (spotifyPlaylistsLoadButton) spotifyPlaylistsLoadButton.disabled = false;
+            if (spotifyPlaylistsMoreButton) spotifyPlaylistsMoreButton.disabled = false;
+        }
+    }
+
     async function loadSpotifyStatus(loadTracks = false) {
         if (!getStoredUser()?._id || !accessToken || !navigator.onLine) return;
         try {
@@ -8787,16 +8976,26 @@ export function initMusicPlayer() {
             const result = await response.json().catch(() => null);
             if (!response.ok) throw new Error(result?.error || 'No se pudo consultar Spotify.');
             const connectionChanged = spotifyIsConnected !== result.connected;
+            const playlistScopesChanged = spotifyPlaylistScopesGranted !== (result.playlistScopesGranted === true);
             spotifyIsConnected = result.connected;
+            spotifyPlaylistScopesGranted = result.playlistScopesGranted === true;
             if (!result.connected) {
                 spotifyApiAccessToken = '';
                 spotifyApiAccessTokenExpiresAt = 0;
                 spotifyApiAccessTokenUserId = '';
                 spotifyApiAccessTokenRequest = null;
+                spotifyPlaylists = [];
+                spotifyPlaylistsNextOffset = 0;
+                spotifyPlaylistsHasMore = false;
+                spotifyPlaylistsLoaded = false;
+                spotifyPlaylistsList?.replaceChildren();
             }
             if (spotifyConnectButton) {
-                spotifyConnectButton.hidden = result.connected;
+                spotifyConnectButton.hidden = result.connected && spotifyPlaylistScopesGranted;
                 spotifyConnectButton.disabled = !result.configured;
+                spotifyConnectButton.textContent = result.connected
+                    ? 'Actualizar permisos de Spotify'
+                    : 'Conectar Spotify';
                 if (!result.configured) spotifyConnectButton.title = 'Configura Spotify en el servidor.';
             }
             if (spotifyRefreshButton) spotifyRefreshButton.hidden = !result.connected;
@@ -8805,10 +9004,20 @@ export function initMusicPlayer() {
             if (spotifyLikesSearch) spotifyLikesSearch.hidden = !result.connected;
             if (spotifyLikesStatus) {
                 spotifyLikesStatus.textContent = result.connected
-                    ? `Conectado${result.displayName ? ` como ${result.displayName}` : ''}.`
+                    ? `Conectado${result.displayName ? ` como ${result.displayName}` : ''}.${spotifyPlaylistScopesGranted ? '' : ' Actualiza los permisos para acceder a playlists.'}`
                     : result.configured
                         ? 'Conecta Spotify para cargar tus canciones guardadas.'
                         : 'Spotify requiere configuración del servidor.';
+            }
+            updateSpotifyPlaylistImportForm();
+            if (
+                result.connected
+                && result.playlistScopesGranted
+                && (connectionChanged || playlistScopesChanged)
+                && isPlaylistViewMode
+                && activePlaylistId
+            ) {
+                openPlaylistView(activePlaylistId);
             }
             if (result.connected && (
                 loadTracks
@@ -8823,8 +9032,8 @@ export function initMusicPlayer() {
         }
     }
 
-    spotifyConnectButton?.addEventListener('click', async () => {
-        spotifyConnectButton.disabled = true;
+    async function startSpotifyAuthorization(button) {
+        button.disabled = true;
         try {
             const response = await apiFetch(`${API_URL}/spotify/connect`, { method: 'POST' });
             const result = await response.json().catch(() => null);
@@ -8833,9 +9042,12 @@ export function initMusicPlayer() {
         } catch (error) {
             console.error('No se pudo iniciar la conexión con Spotify.', error);
             showToast(error.message || 'No se pudo conectar Spotify.', true);
-            spotifyConnectButton.disabled = false;
+            button.disabled = false;
         }
-    });
+    }
+
+    spotifyConnectButton?.addEventListener('click', () => startSpotifyAuthorization(spotifyConnectButton));
+    spotifyPlaylistConnectButton?.addEventListener('click', () => startSpotifyAuthorization(spotifyPlaylistConnectButton));
 
     spotifyRefreshButton?.addEventListener('click', () => loadSpotifyLikedTracks(true));
     spotifyLoadMoreButton?.addEventListener('click', () => loadSpotifyLikedTracks(false, true));
@@ -8846,6 +9058,7 @@ export function initMusicPlayer() {
             const result = await response.json().catch(() => null);
             if (!response.ok) throw new Error(result?.error || 'No se pudo desconectar Spotify.');
             spotifyIsConnected = false;
+            spotifyPlaylistScopesGranted = false;
             spotifyApiAccessToken = '';
             spotifyApiAccessTokenExpiresAt = 0;
             spotifyApiAccessTokenUserId = '';
@@ -8856,6 +9069,11 @@ export function initMusicPlayer() {
             spotifyTotal = 0;
             spotifyHasMore = false;
             spotifyLikedTracksLoaded = false;
+            spotifyPlaylists = [];
+            spotifyPlaylistsNextOffset = 0;
+            spotifyPlaylistsHasMore = false;
+            spotifyPlaylistsLoaded = false;
+            spotifyPlaylistsList?.replaceChildren();
             spotifyLikesList?.replaceChildren();
             if (spotifyLikesSearch) {
                 spotifyLikesSearch.value = '';
@@ -8866,7 +9084,12 @@ export function initMusicPlayer() {
             spotifyLoadMoreButton.hidden = true;
             spotifyImportButton.hidden = true;
             spotifyConnectButton.hidden = false;
+            spotifyConnectButton.textContent = 'Conectar Spotify';
             if (spotifyLikesStatus) spotifyLikesStatus.textContent = 'Spotify desconectado.';
+            if (spotifyPlaylistImportStatus) spotifyPlaylistImportStatus.textContent = 'Spotify desconectado.';
+            if (spotifyPlaylistsLoadButton) spotifyPlaylistsLoadButton.hidden = true;
+            if (spotifyPlaylistsMoreButton) spotifyPlaylistsMoreButton.hidden = true;
+            updateSpotifyPlaylistImportForm();
         } catch (error) {
             console.error('No se pudo desconectar Spotify.', error);
             showToast(error.message || 'No se pudo desconectar Spotify.', true);
@@ -8875,6 +9098,8 @@ export function initMusicPlayer() {
         }
     });
     spotifyLikesSearch?.addEventListener('input', renderSpotifyLikedTracks);
+    spotifyPlaylistsLoadButton?.addEventListener('click', () => loadSpotifyPlaylists());
+    spotifyPlaylistsMoreButton?.addEventListener('click', () => loadSpotifyPlaylists(true));
     spotifyLikesSection?.addEventListener('toggle', () => {
         if (spotifyLikesSection.open && spotifyIsConnected && !spotifyLikedTracksLoaded) {
             void loadSpotifyLikedTracks();
@@ -10293,6 +10518,9 @@ export function initMusicPlayer() {
                     editPlDisplayCover.removeAttribute('src');
                     editPlDisplayCover.style.display = 'none';
                 }
+                const spotifyImportPanel = document.getElementById('spotify-playlist-import');
+                if (spotifyImportPanel) spotifyImportPanel.hidden = Boolean(editingPlaylistId);
+                updateSpotifyPlaylistImportForm();
             }
         } else {
             editPlName.value = '';
@@ -10559,7 +10787,8 @@ export function initMusicPlayer() {
         const isOwner = Boolean(currentUser?._id && String(pl.ownerId) === String(currentUser._id));
         const isSharedPlaylist = !isOwner && (pl.sharedWith || []).some(user => String(user?._id || user) === String(currentUser?._id));
         const isSavedPlaylist = !isOwner && (currentUser?.savedPlaylists || []).some(savedId => String(savedId) === String(pl.id));
-        const canEditPlaylist = isOwner || isSharedPlaylist;
+        const isSpotifyLinked = Boolean(pl.spotifyPlaylistId);
+        const canEditPlaylist = (isOwner || isSharedPlaylist) && !isSpotifyLinked;
         const canDeletePlaylistTracks = canEditPlaylist;
         
         const coverUrl = getPlaylistCover(pl);
@@ -10570,8 +10799,8 @@ export function initMusicPlayer() {
             btnEditPlaylist.style.display = canEditPlaylist ? '' : 'none';
         }
         if (btnSharePlaylist) {
-            btnSharePlaylist.hidden = !isOwner;
-            btnSharePlaylist.style.display = isOwner ? '' : 'none';
+            btnSharePlaylist.hidden = !isOwner || isSpotifyLinked;
+            btnSharePlaylist.style.display = isOwner && !isSpotifyLinked ? '' : 'none';
         }
         if (btnSavePlaylist) {
             btnSavePlaylist.hidden = false;
@@ -10607,6 +10836,9 @@ export function initMusicPlayer() {
         plViewName.textContent = pl.name;
         plViewDesc.textContent = pl.desc || 'Sin descripción';
         const playlistTracks = Array.isArray(pl.tracks) ? pl.tracks : [];
+        const playlistDisplayTracks = isSpotifyLinked && Array.isArray(pl.playlistItems)
+            ? pl.playlistItems
+            : playlistTracks;
         const playlistDuration = Number(pl.duration) || playlistTracks.reduce((total, track) => (
             total + Math.max(0, Number(track.duration) || 0)
         ), 0);
@@ -10633,7 +10865,7 @@ export function initMusicPlayer() {
 
             plViewOwner.innerHTML = `
                 <span id="pl-view-stats" class="pl-view-stats">
-                    ${playlistTracks.length} canciones, ${formatPlaylistDuration(playlistDuration)}
+                    ${playlistDisplayTracks.length} canciones, ${formatPlaylistDuration(playlistDuration)}
                     <button id="pl-view-saved-count" class="pl-view-saved-count" type="button" data-playlist-id="${escapeHtml(pl.id)}" aria-label="Ver quién guardó esta playlist">
                         guardada ${savedCount} ${savedCount === 1 ? 'vez' : 'veces'}
                     </button>
@@ -10761,7 +10993,29 @@ export function initMusicPlayer() {
         }
         
         plViewTracks.innerHTML = '';
-        pl.tracks.forEach((trackItem, arrayIndex) => {
+        playlistDisplayTracks.forEach((trackItem, arrayIndex) => {
+            const isSpotifyUnavailable = trackItem.spotifyUnavailable === true;
+            if (isSpotifyUnavailable) {
+                const li = document.createElement('li');
+                li.className = 'playlist-track-row spotify-unavailable-track';
+                li.innerHTML = `
+                    <span class="song-cover-loading">${createImageMarkup(trackItem.cover || '', 'item-cover')}</span>
+                    <div class="all-songs-item-info">
+                        <span class="all-songs-item-name">${escapeHtml(trackItem.name)}</span>
+                        <span class="all-songs-item-artist">${escapeHtml(trackItem.artist)}</span>
+                        <small class="playlist-track-meta">No disponible en AMGC · ${formatTrackTime(Number(trackItem.duration) || 0)}</small>
+                    </div>
+                    ${trackItem.externalUrl ? `<a class="spotify-track-open" href="${escapeHtml(trackItem.externalUrl)}" target="_blank" rel="noopener noreferrer">Abrir en Spotify</a>` : ''}
+                    ${isOwner && trackItem.spotifyTrackId && trackItem.artist?.toLocaleLowerCase() !== 'artista desconocido' ? '<button class="spotify-track-suggest modal-btn-text" type="button">Sugerir para el catálogo</button>' : ''}
+                `;
+                li.querySelector('.spotify-track-suggest')?.addEventListener('click', event => {
+                    event.stopPropagation();
+                    void suggestSpotifyPlaylistTrack(pl, trackItem, event.currentTarget);
+                });
+                li.addEventListener('click', event => event.stopPropagation());
+                plViewTracks.appendChild(li);
+                return;
+            }
             const detail = pl.trackDetails?.find(item => String(item.songId) === String(trackItem._id)) || {};
             const track = {
                 ...(playlist.find(t => String(t._id || t.id) === String(trackItem._id || trackItem.id)) || {}),
@@ -10870,18 +11124,27 @@ export function initMusicPlayer() {
                         });
                     return;
                 }
-                if (playlistIndex !== -1) {
-                    activeQueueTracks = pl.tracks
+                const playableDisplayTracks = isSpotifyLinked
+                    ? playlistDisplayTracks.filter(item => !item.spotifyUnavailable)
+                    : pl.tracks;
+                const playableIndex = isSpotifyLinked
+                    ? playlistDisplayTracks.slice(0, arrayIndex)
+                        .filter(item => !item.spotifyUnavailable).length
+                    : pl.tracks.findIndex(item => (
+                        String(item._id || item.id || '') === playlistTrackId
+                    ));
+                if (playableIndex !== -1) {
+                    activeQueueTracks = playableDisplayTracks
                         .map(item => {
                             const songId = String(item._id || item.id || '');
-                            return playlist.find(main => String(main._id || main.id) === songId);
+                            return playlist.find(main => String(main._id || main.id) === songId) || item;
                         })
                         .filter(Boolean);
                     queueName = pl.name || 'GENERAL';
                     resetPlaybackHistory();
                     if (isShuffle) unplayedIndices = buildShuffleQueue();
                     renderQueue();
-                    loadAndPlayTrack(playlistIndex, 'regular');
+                    loadAndPlayTrack(playableIndex, 'regular');
                 }
             });
             let queueGesture;
@@ -10891,6 +11154,32 @@ export function initMusicPlayer() {
             queueGesture = setupQueueAddSwipe(li, track);
             plViewTracks.appendChild(li);
         });
+
+        if (
+            isOwner
+            && isSpotifyLinked
+            && spotifyIsConnected
+            && spotifyPlaylistScopesGranted
+            && navigator.onLine
+            && !spotifyPlaylistSyncs.has(String(pl.id))
+        ) {
+            const syncId = String(pl.id);
+            spotifyPlaylistSyncs.add(syncId);
+            apiFetch(`${API_URL}/spotify/playlists/${encodeURIComponent(pl.spotifyPlaylistId)}/import`, { method: 'POST' })
+                .then(async response => {
+                    const result = await response.json().catch(() => null);
+                    if (!response.ok) throw new Error(result?.error || 'No se pudo sincronizar la playlist de Spotify.');
+                    if (result.changed) {
+                        await loadPlaylists();
+                        if (activePlaylistId === pl.id) openPlaylistView(pl.id);
+                    }
+                })
+                .catch(error => {
+                    console.error('No se pudo comprobar la sincronización de Spotify.', error);
+                    showToast(error.message || 'No se pudo sincronizar la playlist de Spotify.', true);
+                })
+                .finally(() => spotifyPlaylistSyncs.delete(syncId));
+        }
         
         updateBackgroundAndViews();
     }
