@@ -22,6 +22,7 @@ import { Server as SocketIOServer } from 'socket.io';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import {
+  createHash,
   createCipheriv,
   createDecipheriv,
   randomBytes,
@@ -303,6 +304,7 @@ const songSuggestionSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true, maxlength: 200 },
   artist: { type: String, required: true, trim: true, maxlength: 200 },
   coverUrl: { type: String, trim: true, maxlength: 2048, default: '' },
+  duration: { type: Number, min: 0, max: 86400, default: 0 },
   spotifyTrackId: { type: String, trim: true, maxlength: 64, default: undefined },
   suggestedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   suggestedByName: { type: String, required: true }
@@ -475,6 +477,7 @@ async function fetchSpotifyPlaylistItems(user, playlistId, total) {
           artist: (track?.artists || []).map(artist => artist?.name).filter(Boolean).join(', ').slice(0, 200)
             || track?.show?.name?.slice(0, 200)
             || 'Artista desconocido',
+          primaryArtist: (track?.artists || []).find(artist => artist?.name)?.name?.slice(0, 200) || '',
           album: typeof track?.album?.name === 'string' ? track.album.name.slice(0, 200) : '',
           coverUrl,
           externalUrl: typeof track?.external_urls?.spotify === 'string'
@@ -598,6 +601,8 @@ function normalizeSongMetadata(value) {
 
 function normalizeSongTitle(value) {
   return normalizeSongMetadata(value)
+    .replace(/\s*(?:\(\s*|\[\s*)(?:feat(?:uring)?|ft)\.?\s+.*?(?:\)|\])\s*$/iu, '')
+    .replace(/\s+(?:[-–—]\s+)?(?:feat(?:uring)?|ft)\.?\s+.*$/iu, '')
     .replace(/\s*(?:[-–—]\s*)?(?:\(?\s*)?(?:\d{4}\s+)?(?:remaster(?:ed)?|live|radio edit|deluxe(?: edition)?|single version|album version|version)\b[^)]*\)?\s*$/i, '')
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim();
@@ -609,15 +614,19 @@ function isSimilarSongTitle(first, second) {
   if (!left || !right) return false;
   if (left === right) return true;
 
-  const leftWords = left.split(' ');
-  const rightWords = right.split(' ');
-  const shorterWords = leftWords.length <= rightWords.length ? leftWords : rightWords;
-  const longerWords = leftWords.length > rightWords.length ? leftWords : rightWords;
-  if (shorterWords.length >= 2 && shorterWords.every(word => longerWords.includes(word))) return true;
-
   const shorter = left.length <= right.length ? left : right;
   const longer = left.length > right.length ? left : right;
-  if (shorter.length < 6) return false;
+  const shorterWords = shorter.split(' ');
+  const longerWords = longer.split(' ');
+  const isContiguousTitle = shorter.length >= 8
+    && (shorterWords.length > 1 || shorter.length >= 10)
+    && longerWords.some((_word, startIndex) => (
+      shorterWords.every((word, wordIndex) => longerWords[startIndex + wordIndex] === word)
+    ));
+  if (isContiguousTitle) return true;
+
+  const maxDistance = shorter.length >= 24 ? 2 : shorter.length >= 12 ? 1 : 0;
+  if (!maxDistance || longer.length - shorter.length > maxDistance) return false;
   let previous = Array.from({ length: shorter.length + 1 }, (_value, index) => index);
   for (let row = 1; row <= longer.length; row += 1) {
     const current = [row];
@@ -630,24 +639,100 @@ function isSimilarSongTitle(first, second) {
     }
     previous = current;
   }
-  return 1 - previous[shorter.length] / longer.length >= 0.8;
+  return previous[shorter.length] <= maxDistance;
 }
 
-function isSimilarSongMetadata(name, artist, candidate) {
-  return normalizeSongMetadata(artist) === normalizeSongMetadata(candidate.artist)
-    && isSimilarSongTitle(name, candidate.name);
+function getArtistCreditNames(artist) {
+  return [...new Set(
+    String(artist || '')
+      .split(/\s*(?:[,;]|\b(?:feat(?:uring)?|ft)\.?)\s*|\s+[&×]\s+/iu)
+      .map(name => normalizeSongMetadata(name))
+      .filter(Boolean)
+  )];
+}
+
+function getPrimaryArtistName(artist) {
+  return String(artist || '')
+    .split(/\s*(?:[,;]|\b(?:feat(?:uring)?|ft)\.?)\s*|\s+[&×]\s+/iu)[0]
+    .trim();
+}
+
+function isSimilarSongMetadata(name, artist, candidate, primaryArtist = '') {
+  if (!isSimilarSongTitle(name, candidate?.name)) return false;
+  const sourceArtists = new Set([
+    ...getArtistCreditNames(artist),
+    normalizeSongMetadata(primaryArtist)
+  ].filter(Boolean));
+  return getArtistCreditNames(candidate?.artist)
+    .some(candidateArtist => sourceArtists.has(candidateArtist));
 }
 
 function groupSongsByArtist(songs) {
   const songsByArtist = new Map();
   for (const song of songs) {
-    const artist = normalizeSongMetadata(song.artist);
-    if (!artist) continue;
-    const matchingSongs = songsByArtist.get(artist) || [];
-    matchingSongs.push(song);
-    songsByArtist.set(artist, matchingSongs);
+    for (const artist of getArtistCreditNames(song.artist)) {
+      const matchingSongs = songsByArtist.get(artist) || [];
+      matchingSongs.push(song);
+      songsByArtist.set(artist, matchingSongs);
+    }
   }
   return songsByArtist;
+}
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function buildArtistSearchConditions(metadata) {
+  const artists = new Set();
+  for (const item of metadata) {
+    const credits = typeof item === 'string'
+      ? getArtistCreditNames(item)
+      : [
+        ...getArtistCreditNames(item.artist),
+        normalizeSongMetadata(item.primaryArtist)
+      ].filter(Boolean);
+    for (const artist of credits) artists.add(artist);
+  }
+  return Array.from(artists, artist => ({
+    artist: {
+      $regex: `(?:^|[,;&×]\\s*|\\b(?:feat(?:uring)?|ft)\\.?\\s+)${escapeRegex(artist)}`,
+      $options: 'i'
+    }
+  }));
+}
+
+function getSongCandidatesByArtists(songsByArtist, artist, primaryArtist = '') {
+  const artistNames = new Set([
+    ...getArtistCreditNames(artist),
+    normalizeSongMetadata(primaryArtist)
+  ].filter(Boolean));
+  return [...new Set([...artistNames].flatMap(name => songsByArtist.get(name) || []))];
+}
+
+function addSongToArtistGroups(songsByArtist, song, artist, primaryArtist = '') {
+  const artistNames = new Set([
+    ...getArtistCreditNames(artist),
+    normalizeSongMetadata(primaryArtist)
+  ].filter(Boolean));
+  for (const artistName of artistNames) {
+    const matchingSongs = songsByArtist.get(artistName) || [];
+    matchingSongs.push(song);
+    songsByArtist.set(artistName, matchingSongs);
+  }
+}
+
+function findUniqueSongMatch(candidates, name, artist, primaryArtist = '') {
+  const matches = candidates.filter(candidate =>
+    isSimilarSongMetadata(name, artist, candidate, primaryArtist)
+  );
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function hasSongMatch(candidates, name, artist, primaryArtist = '') {
+  return candidates.some(candidate =>
+    isSimilarSongMetadata(name, artist, candidate, primaryArtist)
+  );
 }
 
 function isSongSuggestionPlaceholder(name, artist) {
@@ -677,6 +762,7 @@ const playlistSchema = new mongoose.Schema({
   spotifyPlaylistId: { type: String, default: undefined },
   spotifyOwnerId: { type: String, default: '' },
   spotifySnapshotId: { type: String, default: '' },
+  spotifyImageKey: { type: String, default: '' },
   spotifyCheckedAt: { type: Date },
   spotifyTracks: [{
     spotifyTrackId: { type: String, default: '' },
@@ -685,6 +771,7 @@ const playlistSchema = new mongoose.Schema({
     position: { type: Number, required: true },
     name: { type: String, default: '' },
     artist: { type: String, default: '' },
+    primaryArtist: { type: String, default: '' },
     album: { type: String, default: '' },
     coverUrl: { type: String, default: '' },
     externalUrl: { type: String, default: '' },
@@ -1087,6 +1174,71 @@ async function uploadToDrive(fileObject) {
   });
   
   return data.webContentLink;
+}
+
+function getSpotifyPlaylistImageKey(imageUrl) {
+  if (typeof imageUrl !== 'string' || !imageUrl) return '';
+  try {
+    const parsedUrl = new URL(imageUrl);
+    if (
+      parsedUrl.protocol !== 'https:'
+      || (parsedUrl.hostname !== 'i.scdn.co' && !parsedUrl.hostname.endsWith('.spotifycdn.com'))
+      || parsedUrl.username
+      || parsedUrl.password
+      || (parsedUrl.port && parsedUrl.port !== '443')
+      || !parsedUrl.pathname.startsWith('/image/')
+    ) return '';
+    return parsedUrl.pathname.slice(0, 500);
+  } catch {
+    return '';
+  }
+}
+
+function getSpotifyPlaylistImageUrl(imageUrl) {
+  if (!getSpotifyPlaylistImageKey(imageUrl)) return '';
+  return new URL(imageUrl).toString().slice(0, 2048);
+}
+
+async function persistSpotifyPlaylistImage(playlistId, imageUrl) {
+  const imageKey = getSpotifyPlaylistImageKey(imageUrl);
+  if (!imageKey) {
+    const error = new Error('Spotify no devolvió una URL de portada válida.');
+    error.statusCode = 502;
+    throw error;
+  }
+  const response = await axios.get(imageUrl, {
+    responseType: 'arraybuffer',
+    maxContentLength: 5 * 1024 * 1024,
+    maxBodyLength: 5 * 1024 * 1024,
+    maxRedirects: 0,
+    timeout: 15000
+  });
+  const mimeType = String(response.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+  const extension = {
+    'image/jpeg': 'jpg',
+    'image/png': 'png',
+    'image/webp': 'webp',
+    'image/gif': 'gif'
+  }[mimeType];
+  if (!extension) {
+    const error = new Error('Spotify no devolvió una portada en un formato de imagen admitido.');
+    error.statusCode = 502;
+    throw error;
+  }
+  const buffer = Buffer.from(response.data);
+  const digest = createHash('sha256').update(buffer).digest('hex');
+  const photo = await uploadToDrive({
+    originalname: `spotify-playlist-${playlistId}-${digest}.${extension}`,
+    mimetype: mimeType,
+    buffer,
+    size: buffer.length
+  });
+  if (!photo) {
+    const error = new Error('Google Drive no devolvió una URL para la portada de Spotify.');
+    error.statusCode = 502;
+    throw error;
+  }
+  return photo;
 }
 
 async function saveMp3Locally(title, buffer, requestedName = '', outputDirectory) {
@@ -2634,9 +2786,9 @@ app.get('/api/spotify/liked-tracks', async (req, res) => {
     );
     const metadataPairs = page.tracks.map(track => ({
       name: (track.name || '').slice(0, 200),
-      artist: track.artists?.map(artist => artist.name).filter(Boolean).join(', ').slice(0, 200) || ''
+      artist: track.artists?.map(artist => artist.name).filter(Boolean).join(', ').slice(0, 200) || '',
+      primaryArtist: track.artists?.find(artist => artist?.name)?.name?.slice(0, 200) || ''
     })).filter(pair => pair.name && pair.artist);
-    const artistNames = [...new Set(metadataPairs.map(pair => pair.artist))];
     const uniquePairs = new Map(metadataPairs.map(pair => [
       `${normalizeSongMetadata(pair.name)}\u0000${normalizeSongMetadata(pair.artist)}`,
       pair
@@ -2645,8 +2797,7 @@ app.get('/api/spotify/liked-tracks', async (req, res) => {
       name: pair.name,
       artist: pair.artist
     }));
-    const artistCondition = artistNames.length ? [{ artist: { $in: artistNames } }] : [];
-    const matchingConditions = [...pairConditions, ...artistCondition];
+    const matchingConditions = [...pairConditions, ...buildArtistSearchConditions(metadataPairs)];
     const [existingSongs, existingSuggestions] = matchingConditions.length
       ? await Promise.all([
         Song.find({ $or: matchingConditions }).collation(songMetadataCollation()).select('name artist').lean(),
@@ -2661,18 +2812,20 @@ app.get('/api/spotify/liked-tracks', async (req, res) => {
     res.json({
       tracks: page.tracks.map(track => {
         const artist = track.artists?.map(item => item.name).filter(Boolean).join(', ') || 'Artista desconocido';
-        const programCandidates = programSongsByArtist.get(normalizeSongMetadata(artist)) || [];
-        const suggestionCandidates = suggestedSongsByArtist.get(normalizeSongMetadata(artist)) || [];
+        const primaryArtist = track.artists?.find(item => item?.name)?.name || '';
+        const programCandidates = getSongCandidatesByArtists(programSongsByArtist, artist, primaryArtist);
+        const suggestionCandidates = getSongCandidatesByArtists(suggestedSongsByArtist, artist, primaryArtist);
         return {
           id: track.id,
           name: track.name,
           artist,
+          primaryArtist,
           coverUrl: track.album?.images?.[0]?.url || '',
           album: track.album?.name || '',
           externalUrl: track.external_urls?.spotify || '',
-          isInProgram: programCandidates.some(candidate => isSimilarSongMetadata(track.name, artist, candidate)),
+          isInProgram: hasSongMatch(programCandidates, track.name, artist, primaryArtist),
           isSuggested: suggestedTrackIds.has(track.id)
-            || suggestionCandidates.some(candidate => isSimilarSongMetadata(track.name, artist, candidate))
+            || hasSongMatch(suggestionCandidates, track.name, artist, primaryArtist)
         };
       }),
       total: page.total,
@@ -2712,17 +2865,7 @@ app.get('/api/spotify/playlists', async (req, res) => {
       playlists: spotifyPlaylists.filter(item => item?.id && item.name).map(item => {
         const linked = linkedBySpotifyId.get(item.id);
         const rawImage = item.images?.find(candidate => typeof candidate?.url === 'string')?.url || '';
-        let image = '';
-        if (rawImage) {
-          try {
-            const parsedImage = new URL(rawImage);
-            if (parsedImage.protocol === 'https:' && parsedImage.hostname === 'i.scdn.co') {
-              image = parsedImage.toString().slice(0, 2048);
-            }
-          } catch {
-            image = '';
-          }
-        }
+        const image = getSpotifyPlaylistImageUrl(rawImage);
         return {
           id: item.id,
           name: String(item.name).slice(0, 200),
@@ -2800,18 +2943,19 @@ app.post('/api/spotify/playlists/:spotifyPlaylistId/import', async (req, res) =>
         throw error;
       }
     }
-    const artists = [...new Set(sourceEntries.map(entry => entry.artist).filter(Boolean))];
-    const candidates = artists.length
-      ? await Song.find({ artist: { $in: artists } })
+    const artistConditions = buildArtistSearchConditions(sourceEntries);
+    const candidates = artistConditions.length
+      ? await Song.find({ $or: artistConditions })
         .select('_id name artist')
         .collation(songMetadataCollation())
         .lean()
       : [];
     const songsByArtist = groupSongsByArtist(candidates);
     const spotifyTracks = sourceEntries.map(entry => {
-      const artistSongs = songsByArtist.get(normalizeSongMetadata(entry.artist)) || [];
+      const primaryArtist = entry.primaryArtist || getPrimaryArtistName(entry.artist);
+      const artistSongs = getSongCandidatesByArtists(songsByArtist, entry.artist, primaryArtist);
       const matchingSong = entry.spotifyTrackId
-        ? artistSongs.find(song => isSimilarSongMetadata(entry.name, entry.artist, song))
+        ? findUniqueSongMatch(artistSongs, entry.name, entry.artist, primaryArtist)
         : null;
       return {
         spotifyTrackId: entry.spotifyTrackId || '',
@@ -2820,6 +2964,7 @@ app.post('/api/spotify/playlists/:spotifyPlaylistId/import', async (req, res) =>
         position: Number(entry.position) || 0,
         name: entry.name || 'Contenido no disponible',
         artist: entry.artist || 'Artista desconocido',
+        primaryArtist,
         album: entry.album || '',
         coverUrl: entry.coverUrl || '',
         externalUrl: entry.externalUrl || '',
@@ -2835,16 +2980,19 @@ app.post('/api/spotify/playlists/:spotifyPlaylistId/import', async (req, res) =>
         String(existingPlaylist.spotifyTracks[index]?.songId || '') !== String(track.songId || '')
       ));
     const checkedAt = new Date();
-    const spotifyImage = spotifyPlaylist.images?.find(candidate => typeof candidate?.url === 'string')?.url || '';
+    const spotifyImage = spotifyPlaylist.images?.find(candidate => (
+      typeof candidate?.url === 'string' && getSpotifyPlaylistImageKey(candidate.url)
+    ))?.url || '';
     let photo = '';
-    if (spotifyImage) {
-      try {
-        const parsedImage = new URL(spotifyImage);
-        if (parsedImage.protocol === 'https:' && parsedImage.hostname === 'i.scdn.co') {
-          photo = parsedImage.toString().slice(0, 2048);
-        }
-      } catch {
-        photo = '';
+    const spotifyImageKey = getSpotifyPlaylistImageKey(spotifyImage);
+    if (spotifyImageKey) {
+      if (
+        existingPlaylist?.spotifyImageKey === spotifyImageKey
+        && existingPlaylist.photo?.includes('drive.google.com')
+      ) {
+        photo = existingPlaylist.photo;
+      } else {
+        photo = await persistSpotifyPlaylistImage(spotifyPlaylistId, spotifyImage);
       }
     }
     const nextName = String(spotifyPlaylist.name || 'Playlist de Spotify').trim().slice(0, 200);
@@ -2859,6 +3007,7 @@ app.post('/api/spotify/playlists/:spotifyPlaylistId/import', async (req, res) =>
         || existingPlaylist.desc !== nextDescription
         || existingPlaylist.photo !== photo
         || existingPlaylist.spotifyOwnerId !== nextOwnerId
+        || existingPlaylist.spotifyImageKey !== spotifyImageKey
         || Number(existingPlaylist.duration) !== nextDuration
       ));
     const playlistId = existingPlaylist?.id || new mongoose.Types.ObjectId().toString();
@@ -2873,6 +3022,7 @@ app.post('/api/spotify/playlists/:spotifyPlaylistId/import', async (req, res) =>
           trackDetails: [],
           spotifyOwnerId: nextOwnerId,
           spotifySnapshotId: String(spotifyPlaylist.snapshot_id || ''),
+          spotifyImageKey,
           spotifyCheckedAt: checkedAt,
           spotifyTracks,
           duration: nextDuration,
@@ -2926,6 +3076,8 @@ app.post('/api/spotify/track-status', async (req, res) => {
       || typeof track.artist !== 'string'
       || !track.artist.trim()
       || track.artist.length > 200
+      || (track.primaryArtist !== undefined
+        && (typeof track.primaryArtist !== 'string' || track.primaryArtist.length > 200))
     ))) {
     return res.status(400).json({ error: 'La lista de canciones de Spotify no es válida.' });
   }
@@ -2933,16 +3085,16 @@ app.post('/api/spotify/track-status', async (req, res) => {
     const metadataPairs = tracks.map(track => ({
       id: track.id,
       name: track.name.trim(),
-      artist: track.artist.trim()
+      artist: track.artist.trim(),
+      primaryArtist: track.primaryArtist?.trim() || getPrimaryArtistName(track.artist)
     }));
     const uniquePairs = new Map(metadataPairs.map(pair => [
       `${normalizeSongMetadata(pair.name)}\u0000${normalizeSongMetadata(pair.artist)}`,
       pair
     ]));
-    const artistNames = [...new Set(metadataPairs.map(pair => pair.artist))];
     const matchingConditions = [
       ...[...uniquePairs.values()].map(pair => ({ name: pair.name, artist: pair.artist })),
-      ...(artistNames.length ? [{ artist: { $in: artistNames } }] : [])
+      ...buildArtistSearchConditions(metadataPairs)
     ];
     const [existingSongs, existingSuggestions] = matchingConditions.length
       ? await Promise.all([
@@ -2960,16 +3112,30 @@ app.post('/api/spotify/track-status', async (req, res) => {
     const suggestedTrackIds = new Set(existingSuggestions.map(item => item.spotifyTrackId).filter(Boolean));
     res.json({
       statuses: metadataPairs.map(track => {
-        const programCandidates = programSongsByArtist.get(normalizeSongMetadata(track.artist)) || [];
-        const suggestionCandidates = suggestedSongsByArtist.get(normalizeSongMetadata(track.artist)) || [];
+        const programCandidates = getSongCandidatesByArtists(
+          programSongsByArtist,
+          track.artist,
+          track.primaryArtist
+        );
+        const suggestionCandidates = getSongCandidatesByArtists(
+          suggestedSongsByArtist,
+          track.artist,
+          track.primaryArtist
+        );
         return {
           id: track.id,
-          isInProgram: programCandidates.some(candidate =>
-            isSimilarSongMetadata(track.name, track.artist, candidate)
+          isInProgram: hasSongMatch(
+            programCandidates,
+            track.name,
+            track.artist,
+            track.primaryArtist
           ),
           isSuggested: suggestedTrackIds.has(track.id)
-            || suggestionCandidates.some(candidate =>
-              isSimilarSongMetadata(track.name, track.artist, candidate)
+            || hasSongMatch(
+              suggestionCandidates,
+              track.name,
+              track.artist,
+              track.primaryArtist
             )
         };
       })
@@ -3024,6 +3190,8 @@ app.post('/api/spotify/import', async (req, res) => {
           id: track.spotifyTrackId,
           name: track.name,
           artists: [{ name: track.artist }],
+          primaryArtist: track.primaryArtist || getPrimaryArtistName(track.artist),
+          duration: Math.max(0, Number(track.duration) || 0),
           album: { images: track.coverUrl ? [{ url: track.coverUrl }] : [] }
         }));
       if (selectedTracks.length !== requestedIds.length) {
@@ -3042,6 +3210,10 @@ app.post('/api/spotify/import', async (req, res) => {
           || typeof track.artist !== 'string'
           || !track.artist.trim()
           || track.artist.length > 200
+          || (track.primaryArtist !== undefined
+            && (typeof track.primaryArtist !== 'string' || track.primaryArtist.length > 200))
+          || (track.duration !== undefined
+            && (!Number.isFinite(track.duration) || track.duration < 0 || track.duration > 86400))
           || (track.coverUrl !== undefined && typeof track.coverUrl !== 'string')
           || (typeof track.coverUrl === 'string' && track.coverUrl.length > 2048)
         ))) {
@@ -3067,6 +3239,8 @@ app.post('/api/spotify/import', async (req, res) => {
           id: track.id,
           name: track.name.trim(),
           artists: [{ name: track.artist.trim() }],
+          primaryArtist: track.primaryArtist?.trim() || getPrimaryArtistName(track.artist),
+          duration: track.duration === undefined ? 0 : track.duration,
           album: { images: coverUrl ? [{ url: coverUrl }] : [] }
         });
       }
@@ -3093,13 +3267,15 @@ app.post('/api/spotify/import', async (req, res) => {
 
     const metadataPairs = selectedTracks.map(track => ({
       name: track.name.slice(0, 200),
-      artist: track.artists.map(artist => artist.name).filter(Boolean).join(', ').slice(0, 200)
+      artist: track.artists.map(artist => artist.name).filter(Boolean).join(', ').slice(0, 200),
+      primaryArtist: track.primaryArtist
+        || track.artists.find(artist => artist?.name)?.name
+        || ''
     }));
     const pairConditions = metadataPairs.map(pair => ({ name: pair.name, artist: pair.artist }));
-    const artistNames = [...new Set(metadataPairs.map(pair => pair.artist))];
     const matchingConditions = [
       ...pairConditions,
-      ...(artistNames.length ? [{ artist: { $in: artistNames } }] : [])
+      ...buildArtistSearchConditions(metadataPairs)
     ];
     const [existingSongs, existingSuggestions] = await Promise.all([
       Song.find({ $or: matchingConditions }).collation(songMetadataCollation()).select('name artist').lean(),
@@ -3117,21 +3293,25 @@ app.post('/api/spotify/import', async (req, res) => {
     for (const track of selectedTracks) {
       const name = track.name.trim().slice(0, 200);
       const artist = track.artists.map(item => item.name).filter(Boolean).join(', ').trim().slice(0, 200);
-      const artistKey = normalizeSongMetadata(artist);
-      const existingByArtist = existingSongsByArtist.get(artistKey) || [];
+      const primaryArtist = track.primaryArtist
+        || track.artists.find(item => item?.name)?.name
+        || getPrimaryArtistName(artist);
+      const existingByArtist = getSongCandidatesByArtists(existingSongsByArtist, artist, primaryArtist);
       if (!name || !artist || existingTrackIds.has(track.id)
-        || existingByArtist.some(candidate => isSimilarSongMetadata(name, artist, candidate))) {
+        || existingByArtist.some(candidate =>
+          isSimilarSongMetadata(name, artist, candidate, primaryArtist)
+        )) {
         duplicateCount += 1;
         continue;
       }
-      existingByArtist.push({ name, artist });
-      existingSongsByArtist.set(artistKey, existingByArtist);
+      addSongToArtistGroups(existingSongsByArtist, { name, artist }, artist, primaryArtist);
       existingTrackIds.add(track.id);
       const coverUrl = track.album?.images?.[0]?.url || '';
       pending.push({
         name,
         artist,
         coverUrl: /^https:\/\/i\.scdn\.co\//i.test(coverUrl) ? coverUrl.slice(0, 2048) : '',
+        duration: Math.max(0, Math.round(Number(track.duration) || Number(track.duration_ms) / 1000 || 0)),
         spotifyTrackId: track.id,
         suggestedBy: req.user._id,
         suggestedByName: req.user.username
@@ -3243,7 +3423,7 @@ app.get('/api/song-suggestions', async (_req, res) => {
   try {
     const suggestions = await SongSuggestion.find()
       .sort({ createdAt: -1 })
-      .select('name artist coverUrl spotifyTrackId suggestedByName createdAt')
+      .select('name artist coverUrl duration spotifyTrackId suggestedByName createdAt')
       .lean();
     res.json(suggestions);
   } catch (error) {

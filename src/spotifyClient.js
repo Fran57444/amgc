@@ -1,7 +1,7 @@
 const SPOTIFY_PAGE_SIZE = 50;
 const TRACK_BATCH_SIZE = 1000;
 const PAGE_BATCH_SIZE = 5;
-const TRACK_FIELDS = 'items(track(id,name,is_local,artists(name),album(images(url)))),next,total';
+const TRACK_FIELDS = 'items(track(id,name,duration_ms,is_local,artists(name),album(images(url)))),next,total';
 
 function wait(milliseconds) {
     return new Promise(resolve => setTimeout(resolve, milliseconds));
@@ -65,6 +65,8 @@ async function requestSpotifyPage(offset, getAccessToken, refreshAccessToken) {
                 id: track.id,
                 name: track.name,
                 artist: track.artists?.map(artist => artist.name).filter(Boolean).join(', ') || 'Artista desconocido',
+                primaryArtist: track.artists?.find(artist => artist?.name)?.name || '',
+                duration: Math.max(0, Math.round((Number(track.duration_ms) || 0) / 1000)),
                 coverUrl: track.album?.images?.[0]?.url || ''
             })).filter(track => track.id && track.name),
             total: Number(result.total) || 0,

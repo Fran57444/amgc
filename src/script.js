@@ -8779,7 +8779,12 @@ export function initMusicPlayer() {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    tracks: page.tracks.map(({ id, name, artist }) => ({ id, name, artist }))
+                    tracks: page.tracks.map(({ id, name, artist, primaryArtist }) => ({
+                        id,
+                        name,
+                        artist,
+                        primaryArtist
+                    }))
                 })
             });
             const statusResult = await statusResponse.json().catch(() => null);
@@ -9110,7 +9115,7 @@ export function initMusicPlayer() {
         if (!trackIds.length) return;
         const tracks = spotifyLikedTracks
             .filter(track => spotifySelectedTrackIds.has(track.id))
-            .map(({ id, name, artist, coverUrl }) => ({ id, name, artist, coverUrl }));
+            .map(({ id, name, artist, coverUrl, duration }) => ({ id, name, artist, coverUrl, duration }));
         spotifyImportButton.disabled = true;
         spotifyLikesStatus.textContent = 'Importando canciones como sugerencias...';
         try {
@@ -9356,8 +9361,14 @@ export function initMusicPlayer() {
             imageInput.type = 'file';
             imageInput.accept = 'image/*';
             imageInput.hidden = true;
-            imageWrapper.append(imagePreview, imagePlaceholder, imageStatus, imageInput);
-
+            imageWrapper.append(imagePreview, imagePlaceholder);
+            if (Number(suggestion.duration) > 0) {
+                const durationBadge = document.createElement('span');
+                durationBadge.className = 'quick-add-duration-badge';
+                durationBadge.textContent = `Spotify · ${formatTrackTime(Number(suggestion.duration))}`;
+                imageWrapper.appendChild(durationBadge);
+            }
+            imageWrapper.append(imageStatus, imageInput);
             const details = document.createElement('div');
             details.className = 'quick-add-details';
             const nameInput = document.createElement('input');
@@ -9519,7 +9530,7 @@ export function initMusicPlayer() {
                     formData.append('lyrics', '');
                     formData.append('lyricColors', '[]');
                     formData.append('lyricColorAssignments', '{}');
-                    formData.append('duration', '0');
+                    formData.append('duration', String(Math.max(0, Number(suggestion.duration) || 0)));
                     const currentUser = getStoredUser();
                     if (currentUser?._id) formData.append('userId', currentUser._id);
                     if (coverFile) formData.append('cover', coverFile);
@@ -9530,9 +9541,6 @@ export function initMusicPlayer() {
                         cover: coverFile || suggestion.coverUrl || '',
                         status: youtubeLink ? 'Preparando descarga de audio...' : 'Subiendo canción...'
                     });
-                    isQuickAddMode = false;
-                    isAllSongsMode = true;
-                    updateBackgroundAndViews();
                     if (youtubeLink) {
                         uploadStatus.textContent = 'Descargando audio...';
                         updatePendingCatalogSong(pendingCatalogSongId, 'Descargando audio...');

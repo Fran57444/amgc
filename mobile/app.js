@@ -2190,7 +2190,12 @@ async function loadSpotifyLikedTracks({ refresh = false, append = false } = {}) 
       const statusResult = await request('/spotify/track-status', {
         method: 'POST',
         body: JSON.stringify({
-          tracks: page.tracks.map(({ id, name, artist }) => ({ id, name, artist }))
+          tracks: page.tracks.map(({ id, name, artist, primaryArtist }) => ({
+            id,
+            name,
+            artist,
+            primaryArtist
+          }))
         })
       });
       if (String(state.user?._id || '') !== userId) return;
@@ -2318,7 +2323,7 @@ async function importSpotifySelections(button) {
   if (!trackIds.length) return;
   const tracks = state.spotifyTracks
     .filter(track => state.spotifySelectedTrackIds.has(track.id))
-    .map(({ id, name, artist, coverUrl }) => ({ id, name, artist, coverUrl }));
+    .map(({ id, name, artist, coverUrl, duration }) => ({ id, name, artist, coverUrl, duration }));
   button.disabled = true;
   state.spotifyStatusMessage = 'Importando canciones como sugerencias...';
   const status = document.getElementById('spotify-likes-status');

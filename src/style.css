@@ -1020,6 +1020,7 @@ img.no-image { font-size: 0.65rem; object-fit: none; }
 .quick-add-cover-preview[hidden], .quick-add-cover-placeholder[hidden] { display: none; }
 .quick-add-cover-placeholder { display: grid; justify-items: center; gap: 6px; padding: 12px; color: rgba(255,255,255,0.68); font-size: 0.75rem; }
 .quick-add-cover-placeholder strong { font-size: 2rem; font-weight: 400; }
+.quick-add-duration-badge { position: absolute; z-index: 4; top: 5px; right: 5px; padding: 4px 7px; border-radius: 5px; background: rgba(0,0,0,0.78); color: #fff; font-size: 0.68rem; line-height: 1.2; pointer-events: none; }
 .quick-add-cover .image-drop-hint { position: absolute; right: 5px; bottom: 5px; left: 5px; padding: 3px; border-radius: 5px; background: rgba(0,0,0,0.7); color: rgba(255,255,255,0.78); font-size: 0.64rem; }
 .quick-add-details { display: grid; align-content: start; gap: 10px; }
 .quick-add-field { display: grid; gap: 6px; min-width: 0; color: rgba(255,255,255,0.63); font-size: 0.68rem; font-weight: 700; letter-spacing: 0.08em; }

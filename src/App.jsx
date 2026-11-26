@@ -327,7 +327,7 @@ function App() {
               </div>
               <div className="lyrics-editor-actions">
                 <button id="btn-reset-keyboard-shortcuts" className="shortcut-capture-button" type="button">Restablecer</button>
-                <span id="keyboard-shortcuts-status" className="lyrics-editor-status" aria-live="polite"></span>
+                <span id="keyboard-shortcuts-status" className="lyrics-editor-status" aria-live="polite"></span><br></br>
               </div>
             </div>
 
