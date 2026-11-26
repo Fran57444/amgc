@@ -125,7 +125,8 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--track-color); o
 .song-copy strong, .song-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .song-copy strong { font-size: .86rem; font-weight: 700; }
 .song-copy small { margin-top: 4px; color: var(--muted); font-size: .74rem; }
-.offline-ready-badge { position: absolute; right: -3px; bottom: -3px; z-index: 2; display: grid; width: 15px; height: 15px; place-items: center; border: 1.5px solid  rgba(46, 12, 73, 0.72); border-radius: 50%; background: #a47ddc; color: #1f1027; font-size: 9px; font-weight: 900; line-height: 1; box-shadow: 0 1px 4px  rgba(0,0,0,.55); }
+.offline-ready-badge { position: absolute; right: -3px; bottom: -3px; z-index: 2; display: grid; width: 15px; height: 15px; place-items: center; border: 1.5px solid rgba(46,12,73,.72); border-radius: 50%; background: #a47ddc; color: #1f1027; box-shadow: 0 1px 4px rgba(0,0,0,.55); }
+.offline-ready-badge::before { width: 4px; height: 7px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; content: ""; transform: translate(-1px,-1px) rotate(45deg); }
 .song-action { width: 38px; height: 38px; flex: 0 0 38px; border: 0; border-radius: 4px; background: transparent; color: #c9c3c8; font-size: 1.2rem; cursor: pointer; }
 .empty-state { padding: 28px 16px; border: 1px dashed var(--border); border-radius: 8px; color: var(--muted); font-size: .86rem; text-align: center; }
 .mini-player { position: fixed; z-index: 5; right: 0; bottom: 0; left: 0; display: flex; height: calc(69px + var(--safe-bottom)); align-items: center; padding: 7px 9px calc(10px + var(--safe-bottom)); border-top: 1px solid rgba(255,255,255,.12); background: rgba(10,10,10,.96); box-shadow: 0 -7px 24px rgba(0,0,0,.35); }

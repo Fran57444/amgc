@@ -161,6 +161,7 @@ const userSchema = new mongoose.Schema({
     duration: Number,
     isPlaying: Boolean,
     resumeAfterTransfer: Boolean,
+    resumeSourceOnTransferFailure: Boolean,
     transferId: String,
     transferTargetDeviceId: String,
     transferPending: Boolean,
@@ -180,6 +181,8 @@ const userSchema = new mongoose.Schema({
     playedAt: Date
   }],
   accountQueue: { type: [String], default: [] },
+  accountQueueSourceSongIds: { type: [String], default: [] },
+  accountQueueName: { type: String, default: 'GENERAL' },
   accountQueueRevision: { type: Number, default: 0 },
   savedPlaylists: [{ type: String }],
   settings: {
@@ -720,7 +723,7 @@ async function getAccountQueueSnapshot(userId) {
   let loadPromise = accountQueueLoadPromisesByUser.get(userId);
   if (!loadPromise) {
     loadPromise = User.findById(userId)
-      .select('accountQueue accountQueueRevision')
+      .select('accountQueue accountQueueSourceSongIds accountQueueName accountQueueRevision')
       .lean()
       .then(user => {
         const currentQueue = accountQueueByUser.get(userId);
@@ -729,7 +732,13 @@ async function getAccountQueueSnapshot(userId) {
           revision: Math.max(0, Number(user?.accountQueueRevision) || 0),
           songIds: Array.isArray(user?.accountQueue)
             ? user.accountQueue.map(String)
-            : []
+            : [],
+          sourceSongIds: Array.isArray(user?.accountQueueSourceSongIds)
+            ? user.accountQueueSourceSongIds.map(String)
+            : [],
+          queueName: typeof user?.accountQueueName === 'string' && user.accountQueueName.trim()
+            ? user.accountQueueName.trim()
+            : 'GENERAL'
         };
         accountQueueByUser.set(userId, queue);
         return queue;
@@ -1758,6 +1767,7 @@ app.post('/api/users/status', async (req, res) => {
           transferTargetDeviceId: '',
           transferPending: false,
           resumeAfterTransfer: false,
+          resumeSourceOnTransferFailure: false,
           sourceUpdatedAt: Number.isFinite(incomingUpdatedAt) ? incomingUpdatedAt : Date.now(),
           lastHeardAt,
           color: playbackColor,
@@ -4265,7 +4275,7 @@ if (isMainModule) {
     socket.on('accountQueueRequest', async (acknowledge = () => {}) => {
       try {
         const queue = await getAccountQueueSnapshot(authenticatedUserId);
-        const hasSavedQueue = queue.revision > 0 || queue.songIds.length > 0;
+        const hasSavedQueue = queue.revision > 0 || queue.songIds.length > 0 || queue.sourceSongIds.length > 0;
         if (hasSavedQueue) socket.emit('accountQueueSnapshot', queue);
         const playback = playbackStateByUser.get(authenticatedUserId);
         const ownerSocket = playback?.deviceId ? getPlaybackOwnerSocket(playback) : null;
@@ -4279,7 +4289,7 @@ if (isMainModule) {
       }
     });
 
-    socket.on('accountQueueSnapshot', async ({ songIds } = {}, acknowledge = () => {}) => {
+    socket.on('accountQueueSnapshot', async ({ songIds, sourceSongIds, queueName } = {}, acknowledge = () => {}) => {
       const playback = playbackStateByUser.get(authenticatedUserId);
       if (
         !playback?.deviceId
@@ -4293,6 +4303,11 @@ if (isMainModule) {
         !Array.isArray(songIds)
         || songIds.length > 5000
         || songIds.some(id => !isValidObjectId(String(id)))
+        || (sourceSongIds !== undefined && (
+          !Array.isArray(sourceSongIds)
+          || sourceSongIds.length > 5000
+          || sourceSongIds.some(id => !isValidObjectId(String(id)))
+        ))
       ) {
         acknowledge({ success: false, error: 'La cola compartida contiene canciones no válidas.' });
         return;
@@ -4302,10 +4317,17 @@ if (isMainModule) {
       try {
         const previousQueue = await getAccountQueueSnapshot(authenticatedUserId);
         const normalizedSongIds = songIds.map(id => String(id).toLowerCase());
-        const existingSongIds = new Set((await Song.find({ _id: { $in: normalizedSongIds } })
+        const normalizedSourceSongIds = Array.isArray(sourceSongIds)
+          ? sourceSongIds.map(id => String(id).toLowerCase())
+          : previousQueue.sourceSongIds;
+        const normalizedQueueName = typeof queueName === 'string' && queueName.trim()
+          ? queueName.trim().slice(0, 100)
+          : previousQueue.queueName || 'GENERAL';
+        const allSongIds = [...new Set([...normalizedSongIds, ...normalizedSourceSongIds])];
+        const existingSongIds = new Set((await Song.find({ _id: { $in: allSongIds } })
           .select('_id')
           .lean()).map(song => String(song._id)));
-        if (normalizedSongIds.some(id => !existingSongIds.has(id))) {
+        if (allSongIds.some(id => !existingSongIds.has(id))) {
           acknowledge({ success: false, error: 'La cola contiene canciones que ya no están disponibles.' });
           return;
         }
@@ -4315,7 +4337,9 @@ if (isMainModule) {
         }
         const queue = {
           revision: previousQueue.revision + 1,
-          songIds: normalizedSongIds
+          songIds: normalizedSongIds,
+          sourceSongIds: normalizedSourceSongIds,
+          queueName: normalizedQueueName
         };
         const revisionFilter = previousQueue.revision === 0
           ? {
@@ -4330,20 +4354,28 @@ if (isMainModule) {
           {
             $set: {
               accountQueue: normalizedSongIds,
+              accountQueueSourceSongIds: normalizedSourceSongIds,
+              accountQueueName: normalizedQueueName,
               accountQueueRevision: queue.revision
             }
           }
         );
         if (!saved.matchedCount) {
           const persistedQueue = await User.findById(authenticatedUserId)
-            .select('accountQueue accountQueueRevision')
+            .select('accountQueue accountQueueSourceSongIds accountQueueName accountQueueRevision')
             .lean();
           if (persistedQueue) {
             accountQueueByUser.set(authenticatedUserId, {
               revision: Math.max(0, Number(persistedQueue.accountQueueRevision) || 0),
               songIds: Array.isArray(persistedQueue.accountQueue)
                 ? persistedQueue.accountQueue.map(String)
-                : []
+                : [],
+              sourceSongIds: Array.isArray(persistedQueue.accountQueueSourceSongIds)
+                ? persistedQueue.accountQueueSourceSongIds.map(String)
+                : [],
+              queueName: typeof persistedQueue.accountQueueName === 'string' && persistedQueue.accountQueueName.trim()
+                ? persistedQueue.accountQueueName.trim()
+                : 'GENERAL'
             });
           }
           acknowledge({ success: false, error: 'La cola cambió. Vuelve a sincronizarla.' });
@@ -4378,6 +4410,7 @@ if (isMainModule) {
           return { success: false, error: 'La cola cambió. Vuelve a sincronizarla.' };
         }
         const nextQueue = {
+          ...queue,
           revision: queue.revision + 1,
           songIds: queue.songIds.slice(count)
         };
@@ -4401,14 +4434,20 @@ if (isMainModule) {
           );
           if (!saved.matchedCount) {
             const persistedQueue = await User.findById(authenticatedUserId)
-              .select('accountQueue accountQueueRevision')
+              .select('accountQueue accountQueueSourceSongIds accountQueueName accountQueueRevision')
               .lean();
             if (persistedQueue) {
               accountQueueByUser.set(authenticatedUserId, {
                 revision: Math.max(0, Number(persistedQueue.accountQueueRevision) || 0),
                 songIds: Array.isArray(persistedQueue.accountQueue)
                   ? persistedQueue.accountQueue.map(String)
-                  : []
+                  : [],
+                sourceSongIds: Array.isArray(persistedQueue.accountQueueSourceSongIds)
+                  ? persistedQueue.accountQueueSourceSongIds.map(String)
+                  : [],
+                queueName: typeof persistedQueue.accountQueueName === 'string' && persistedQueue.accountQueueName.trim()
+                  ? persistedQueue.accountQueueName.trim()
+                  : 'GENERAL'
               });
             }
             return { success: false, error: 'La cola cambió. Vuelve a sincronizarla.' };
@@ -4651,8 +4690,9 @@ if (isMainModule) {
       const failedAt = Date.now();
       const failedPlayback = {
         ...currentPlayback,
-        isPlaying: false,
+        isPlaying: pendingTransfer && currentPlayback.resumeSourceOnTransferFailure === true,
         resumeAfterTransfer: false,
+        resumeSourceOnTransferFailure: false,
         transferTargetDeviceId: '',
         transferPending: false,
         sourceUpdatedAt: failedAt,
@@ -4814,8 +4854,9 @@ if (isMainModule) {
           const failedAt = Date.now();
           const failedPlayback = {
             ...currentPlayback,
-            isPlaying: false,
+            isPlaying: currentPlayback.resumeSourceOnTransferFailure === true,
             resumeAfterTransfer: false,
+            resumeSourceOnTransferFailure: false,
             transferTargetDeviceId: '',
             transferPending: false,
             sourceUpdatedAt: failedAt,
@@ -4868,6 +4909,7 @@ if (isMainModule) {
             deviceName: normalizePlaybackDeviceName(targetSocket.data.playbackDeviceName),
             isPlaying: true,
             resumeAfterTransfer: false,
+            resumeSourceOnTransferFailure: false,
             transferTargetDeviceId: '',
             transferPending: false,
             sourceUpdatedAt: transferredAt,
@@ -4952,6 +4994,9 @@ if (isMainModule) {
         const previousTransferId = pausedPlayback.transferPending === true
           ? pausedPlayback.transferId
           : null;
+        const resumeSourceOnTransferFailure = pausedPlayback.transferPending === true
+          ? pausedPlayback.resumeSourceOnTransferFailure !== false
+          : playback.isPlaying !== false;
         transferId = randomBytes(16).toString('hex');
         transferLockId = transferId;
         playbackTransferInProgressByUser.set(authenticatedUserId, transferLockId);
@@ -4960,6 +5005,7 @@ if (isMainModule) {
           cover: normalizeSharedPlaybackCover(pausedPlayback.cover),
           isPlaying: false,
           resumeAfterTransfer: true,
+          resumeSourceOnTransferFailure,
           transferId,
           transferTargetDeviceId: normalizedTargetDeviceId,
           transferPending: true,
@@ -5036,7 +5082,8 @@ if (isMainModule) {
             ...playback,
             ...result.playback,
             deviceId: playback.deviceId,
-            deviceType: playback.deviceType
+            deviceType: playback.deviceType,
+            resumeSourceOnTransferFailure: playback.isPlaying !== false
           });
         }
       );
@@ -5570,6 +5617,7 @@ if (isMainModule) {
           transferTargetDeviceId: '',
           transferPending: false,
           resumeAfterTransfer: false,
+          resumeSourceOnTransferFailure: false,
           sourceUpdatedAt: incomingSourceUpdatedAt,
           updatedAt: new Date().toISOString()
         };

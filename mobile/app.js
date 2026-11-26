@@ -111,6 +111,8 @@ const state = {
   hostJamRequestId: '',
   sharedQueueSnapshotSignature: '',
   accountQueueIds: [],
+  accountQueueSourceIds: [],
+  accountQueueName: 'GENERAL',
   accountQueueSnapshotCached: false,
   accountQueuePendingIds: null,
   accountQueueRevision: 0,
@@ -208,6 +210,7 @@ let cachedNativeNotificationCoverPath = '';
 let sharedPlaybackClockTimer = null;
 let suppressRemotePlaybackPause = false;
 let playbackTransferPending = false;
+let deferredPlaybackOwnerUpdate = null;
 let playbackDeviceRemovalPending = false;
 let activePlaybackTransferId = null;
 let activePlaybackTransferUserId = null;
@@ -752,6 +755,9 @@ async function transferPlaybackToDevice(targetDeviceId) {
     endLoading();
     playbackTransferPending = false;
     renderPlaybackDevicePicker();
+    const deferredPlaybackUpdate = deferredPlaybackOwnerUpdate;
+    deferredPlaybackOwnerUpdate = null;
+    if (deferredPlaybackUpdate) handleOwnPlaybackUpdate(deferredPlaybackUpdate);
   }
 }
 
@@ -1107,6 +1113,9 @@ function handleOwnPlaybackUpdate({ userId, playback } = {}) {
     && playback.transferId === activePlaybackTransferId
     && activePlaybackTransferUserId === ownUserId
   ) return;
+  if (playbackTransferPending && !isActivatingPlaybackTransfer) {
+    deferredPlaybackOwnerUpdate = { userId, playback };
+  }
   const pendingPlaybackSongId = getPendingPlaybackTakeoverSongId();
   if (
     playback.deviceId
@@ -1544,7 +1553,7 @@ function renderSongRow(song, options = {}) {
   const coverImage = imageElement(getSongCover(song), 'song-cover', '');
   coverWrap.append(coverImage);
   if (state.offlineAudioSongIds.has(songId)) {
-    const offlineBadge = makeElement('span', 'offline-ready-badge', '✓');
+    const offlineBadge = makeElement('span', 'offline-ready-badge');
     offlineBadge.setAttribute('role', 'img');
     offlineBadge.setAttribute('aria-label', 'Audio disponible sin conexión');
     offlineBadge.title = 'Audio guardado en este dispositivo';
@@ -3070,6 +3079,73 @@ async function refreshOfflineAudioAvailability(render = true) {
   }
 }
 
+function setOfflineAudioAvailability(songId, available) {
+  const normalizedSongId = String(songId || '');
+  if (!normalizedSongId) return;
+  if (available) state.offlineAudioSongIds.add(normalizedSongId);
+  else state.offlineAudioSongIds.delete(normalizedSongId);
+
+  document.querySelectorAll('.song-row[data-song-id]').forEach(row => {
+    if (row.dataset.songId !== normalizedSongId) return;
+    const cover = row.querySelector('.song-cover-loading');
+    if (!cover) return;
+    const badge = cover.querySelector('.offline-ready-badge');
+    if (available && !badge) {
+      const offlineBadge = makeElement('span', 'offline-ready-badge');
+      offlineBadge.setAttribute('role', 'img');
+      offlineBadge.setAttribute('aria-label', 'Audio disponible sin conexión');
+      offlineBadge.title = 'Audio guardado en este dispositivo';
+      cover.append(offlineBadge);
+    } else if (!available) {
+      badge?.remove();
+    }
+  });
+}
+
+async function recoverDriveAudioLocally(song, {
+  loadSequence,
+  autoplay,
+  sync,
+  restoreTime,
+  showError,
+  awaitPlaybackStart,
+  fallbackState
+}) {
+  const songId = getSongId(song);
+  const source = song.path || song.audioUrl || '';
+  const sourceUrl = source ? resolveMediaUrl(source) : '';
+  const fileId = getDriveFileId(sourceUrl);
+  if (!isAndroidNative || !navigator.onLine || !fileId || !songId) return false;
+
+  const mediaKey = `song:${songId}:audio`;
+  state.loadingTrackId = songId;
+  updateSongLoadingIndicators();
+  try {
+    const download = await downloadNativeDriveFile(fileId, 'audio');
+    if (!download?.path) throw new Error('Google Drive no devolvió una ruta local válida.');
+    if (loadSequence !== trackLoadSequence) return false;
+    await saveOfflineMediaFile(mediaKey, download.path, download.contentType, sourceUrl);
+    if (loadSequence !== trackLoadSequence) return false;
+    const previousUrl = offlineMediaUrls.get(mediaKey);
+    if (previousUrl?.startsWith('blob:')) URL.revokeObjectURL(previousUrl);
+    offlineMediaUrls.set(mediaKey, Capacitor.convertFileSrc(download.path));
+    setOfflineAudioAvailability(songId, true);
+    return loadTrack(song, {
+      autoplay,
+      sync,
+      restoreTime,
+      showError,
+      awaitPlaybackStart,
+      fallbackState
+    });
+  } finally {
+    if (loadSequence === trackLoadSequence && state.loadingTrackId === songId) {
+      state.loadingTrackId = '';
+      updateSongLoadingIndicators();
+    }
+  }
+}
+
 async function cacheOfflineResource(key, source) {
   const mediaType = getOfflineResourceMediaType(key);
   const imageSize = getImageSizeFromCacheKey(key);
@@ -3242,7 +3318,9 @@ async function downloadOfflineLibrary() {
           const [key, source] = missingResources[nextIndex++];
           try {
             const changed = await cacheOfflineResource(key, source);
-            if (changed && !key.endsWith(':audio')) visualCacheChanged = true;
+            const audioKey = /^song:(.+):audio$/.exec(key);
+            if (audioKey) setOfflineAudioAvailability(audioKey[1], true);
+            else if (changed) visualCacheChanged = true;
           } catch (error) {
             failed += 1;
             if (!firstFailure) firstFailure = `${key}: ${error.message || 'Error desconocido.'}`;
@@ -4269,9 +4347,7 @@ function renderPlayerQueue({ syncAccount = true, syncShared = true } = {}) {
 
   if (upcoming.length) {
     queueList.append(makeElement('p', 'queue-section-label',
-      showAccountQueue
-          ? 'A CONTINUACIÓN EN LA COLA · HEREDADA'
-          : 'A CONTINUACIÓN EN LA COLA'));
+      'A CONTINUACIÓN EN LA COLA'));
     upcoming.forEach(({ song, position }) => {
       queueList.append(renderQueueTrack(song, false, {
         position,
@@ -4298,6 +4374,22 @@ function renderPlayerQueue({ syncAccount = true, syncShared = true } = {}) {
         { sourceIndex: index, source: true, sourceQueue, queueTitle: state.queueTitle }
       ));
     });
+  } else if (showAccountQueue && state.accountQueueSourceIds.length) {
+    const accountSourceItems = state.accountQueueSourceIds
+      .map(id => state.songs.find(song => getSongId(song) === String(id)))
+      .filter(Boolean);
+    if (accountSourceItems.length) {
+      queueList.append(makeElement(
+        'p',
+        'queue-section-label',
+        state.accountQueueName || 'GENERAL'
+      ));
+      accountSourceItems.forEach(song => queueList.append(renderQueueTrack(song, false, {
+        position: -1,
+        source: true,
+        sharedSource: true
+      })));
+    }
   } else if (sharedSourceItems.length) {
     queueList.append(makeElement(
       'p',
@@ -4902,6 +4994,14 @@ function getAccountQueueTracks() {
   return state.upcomingQueue;
 }
 
+function getAccountQueueSnapshotSignature(
+  songIds = state.accountQueueIds,
+  sourceSongIds = state.accountQueueSourceIds,
+  queueName = state.accountQueueName
+) {
+  return JSON.stringify([queueName, sourceSongIds, songIds]);
+}
+
 function publishAccountQueueSnapshot(force = false, retried = false, allowPending = false) {
   if (state.accountQueuePendingIds && !allowPending) return Promise.resolve(false);
   const publish = () => {
@@ -4910,16 +5010,27 @@ function publishAccountQueueSnapshot(force = false, retried = false, allowPendin
       !state.playbackOwnerConfirmed
       || state.ownPlayback?.deviceId !== playbackDeviceId
       || getRemotePlaybackSession()
+      || state.sharedQueueSessionId
       || !state.socket?.connected
     ) return Promise.resolve(false);
     const songIds = getAccountQueueTracks().map(getSongId).filter(Boolean).slice(0, 5000);
-    const signature = songIds.join(',');
+    const sourceQueue = state.shuffle
+      ? state.shuffleQueue.map(index => state.queue[index])
+      : state.queue.slice(state.queueIndex + 1);
+    const sourceSongIds = sourceQueue
+      .filter(Boolean)
+      .map(getSongId)
+      .filter(Boolean)
+      .slice(0, 5000);
+    const queueName = state.queueTitle || 'GENERAL';
+    const signature = getAccountQueueSnapshotSignature(songIds, sourceSongIds, queueName);
     if (!force && signature === state.accountQueueSnapshotSignature) return Promise.resolve(true);
-    const previousIds = state.accountQueueSnapshotSignature
-      ? state.accountQueueSnapshotSignature.split(',')
-      : [];
+    const previousIds = state.accountQueueIds;
     let removedCount = 0;
-    if (!force && state.accountQueueRevision && previousIds.length >= songIds.length) {
+    const sameSourceQueue = queueName === state.accountQueueName
+      && sourceSongIds.length === state.accountQueueSourceIds.length
+      && sourceSongIds.every((songId, index) => songId === state.accountQueueSourceIds[index]);
+    if (!force && sameSourceQueue && state.accountQueueRevision && previousIds.length >= songIds.length) {
       for (let offset = 1; offset <= previousIds.length; offset += 1) {
         const remainingIds = previousIds.slice(offset);
         if (
@@ -4936,10 +5047,15 @@ function publishAccountQueueSnapshot(force = false, retried = false, allowPendin
       const eventName = removedCount ? 'accountQueueAdvance' : 'accountQueueSnapshot';
       const payload = removedCount
         ? { revision: state.accountQueueRevision, count: removedCount }
-        : { songIds };
+        : { songIds, sourceSongIds, queueName };
       const socket = state.socket;
       socket.timeout(7000).emit(eventName, payload, (timeoutError, response) => {
         if (response?.success) {
+          state.accountQueueIds = songIds;
+          state.accountQueueSourceIds = sourceSongIds;
+          state.accountQueueName = queueName;
+          if (Number.isInteger(response.revision)) state.accountQueueRevision = response.revision;
+          persistAccountQueueSnapshot();
           resolve(true);
           return;
         }
@@ -5438,6 +5554,34 @@ async function loadTrack(song, {
         awaitPlaybackStart
       });
     }
+    if (
+      isAndroidNative
+      && navigator.onLine
+      && !activeTrackFallbackState.nativeDrive
+      && (
+        error.name === 'NotSupportedError'
+        || error.name === 'PlaybackTimeoutError'
+        || [2, 4].includes(elements.audio.error?.code)
+      )
+      && getDriveFileId(resolveMediaUrl(source))
+    ) {
+      activeTrackFallbackState.nativeDrive = true;
+      try {
+        return await recoverDriveAudioLocally(song, {
+          loadSequence,
+          autoplay,
+          sync,
+          restoreTime,
+          showError,
+          awaitPlaybackStart,
+          fallbackState: activeTrackFallbackState
+        });
+      } catch (fallbackError) {
+        console.warn('Falló la recuperación local del audio de Drive.', fallbackError);
+        if (showError) showToast(fallbackError.message || error.message || getAudioErrorMessage(), true);
+        return false;
+      }
+    }
 
     console.error('No se pudo reproducir la canción.', error);
     if (sync && error.name === 'NotAllowedError') state.followNeedsUserGesture = true;
@@ -5519,7 +5663,9 @@ function persistAccountQueueSnapshot() {
   try {
     localStorage.setItem(getAccountQueueSnapshotStorageKey(), JSON.stringify({
       revision: state.accountQueueRevision,
-      songIds: state.accountQueueIds
+      songIds: state.accountQueueIds,
+      sourceSongIds: state.accountQueueSourceIds,
+      queueName: state.accountQueueName
     }));
     state.accountQueueSnapshotCached = true;
   } catch (error) {
@@ -5649,7 +5795,13 @@ function restoreAccountQueueSnapshot(userId) {
     state.accountQueueIds = snapshot.songIds
       .filter(id => typeof id === 'string')
       .slice(0, 5000);
-    state.accountQueueSnapshotSignature = state.accountQueueIds.join(',');
+    state.accountQueueSourceIds = Array.isArray(snapshot.sourceSongIds)
+      ? snapshot.sourceSongIds.filter(id => typeof id === 'string').slice(0, 5000)
+      : [];
+    state.accountQueueName = typeof snapshot.queueName === 'string' && snapshot.queueName.trim()
+      ? snapshot.queueName.trim().slice(0, 100)
+      : 'GENERAL';
+    state.accountQueueSnapshotSignature = getAccountQueueSnapshotSignature();
     state.accountQueueSnapshotCached = true;
   } catch (error) {
     console.warn('No se pudo restaurar la última cola de la cuenta guardada.', error);
@@ -6854,11 +7006,13 @@ function connectRealtime() {
       acknowledge({ success: false, error: error.message || 'No se pudo controlar la reproducción.' });
     }
   });
-  socket.on('accountQueueSnapshot', ({ revision, songIds } = {}) => {
-    if (!Number.isInteger(revision) || revision <= state.accountQueueRevision || !Array.isArray(songIds)) return;
+  socket.on('accountQueueSnapshot', ({ revision, songIds, sourceSongIds, queueName } = {}) => {
+    if (!Number.isInteger(revision) || revision < state.accountQueueRevision || !Array.isArray(songIds)) return;
     state.accountQueueRevision = revision;
     state.accountQueueIds = songIds.map(String);
-    state.accountQueueSnapshotSignature = state.accountQueueIds.join(',');
+    if (Array.isArray(sourceSongIds)) state.accountQueueSourceIds = sourceSongIds.map(String);
+    if (typeof queueName === 'string' && queueName.trim()) state.accountQueueName = queueName.trim().slice(0, 100);
+    state.accountQueueSnapshotSignature = getAccountQueueSnapshotSignature();
     state.accountQueueSnapshotCached = true;
     persistAccountQueueSnapshot();
     const pendingMatchesServer = state.accountQueuePendingIds
@@ -6871,7 +7025,9 @@ function connectRealtime() {
     }
   });
   socket.on('accountQueuePublishRequest', () => {
-    if (!getRemotePlaybackSession() && !state.followingUserId) publishAccountQueueSnapshot(true);
+    if (!getRemotePlaybackSession() && !state.followingUserId && !state.sharedQueueSessionId) {
+      publishAccountQueueSnapshot(true);
+    }
   });
   socket.on('accountQueueAddCommand', async ({ songId } = {}, acknowledge = () => {}) => {
     if (getRemotePlaybackSession() || state.followingUserId) {
@@ -7644,6 +7800,8 @@ function logout(showMessage) {
   state.ownPlayback = null;
   state.playbackOwnerConfirmed = false;
   state.accountQueueIds = [];
+  state.accountQueueSourceIds = [];
+  state.accountQueueName = 'GENERAL';
   state.accountQueueSnapshotCached = false;
   state.accountQueuePendingIds = null;
   state.accountQueueRevision = 0;
@@ -8575,6 +8733,32 @@ elements.audio.addEventListener('error', () => {
       autoplay: true,
       bypassOfflineCache: true,
       fallbackState: activeTrackFallbackState
+    });
+    return;
+  }
+  if (
+    song
+    && currentTrackShouldAutoplay
+    && [2, 4].includes(errorCode)
+    && !activeTrackUsingOfflineCache
+    && !activeTrackFallbackState.nativeDrive
+    && getDriveFileId(resolveMediaUrl(song.path || song.audioUrl || ''))
+  ) {
+    const loadSequence = trackLoadSequence;
+    activeTrackFallbackState.nativeDrive = true;
+    void recoverDriveAudioLocally(song, {
+      loadSequence,
+      autoplay: true,
+      sync: false,
+      restoreTime: Number(elements.audio.currentTime) || 0,
+      showError: true,
+      awaitPlaybackStart: false,
+      fallbackState: activeTrackFallbackState
+    }).catch(error => {
+      console.warn('Falló la recuperación local del audio de Drive.', error);
+      if (loadSequence === trackLoadSequence) {
+        showToast(error.message || getAudioErrorMessage(), true);
+      }
     });
     return;
   }

@@ -61,6 +61,7 @@ export function initMusicPlayer() {
     let sharedPlaybackClockTimer = null;
     let connectedPlaybackDevices = [];
     let playbackTransferPending = false;
+    let deferredPlaybackOwnerUpdate = null;
     let playbackDeviceRemovalPending = false;
     let playbackRequestLoadingCount = 0;
     let audioLoading = false;
@@ -105,8 +106,15 @@ export function initMusicPlayer() {
     const hydrateOfflinePlaylistCovers = playlists => offlineMediaManager.hydrateOfflinePlaylistCovers(playlists);
     const syncOfflineResources = async () => {
         await offlineMediaManager.syncOfflineResources();
+        await hydrateOfflineSongCovers(playlist);
+        await hydrateOfflinePlaylistCovers(userPlaylists);
+        await Promise.all([...profilePlaylistCache.values()].map(hydrateOfflinePlaylistCovers));
         await refreshOfflineAudioAvailability();
         if (isAllSongsMode) renderAllSongs();
+        else if (isPlaylistViewMode && activePlaylistId) openPlaylistView(activePlaylistId);
+        renderQueue({ syncAccount: false, syncShared: false });
+        const currentTrack = getCurrentTrack();
+        if (currentTrack) bottomBarCover.src = getSongCover(currentTrack) || '/img/vinculo.png';
     };
     let realtimeConnectedBefore = false;
     let skipNextRealtimeReconciliation = false;
@@ -997,6 +1005,8 @@ export function initMusicPlayer() {
     let hostJamRequestId = null;
     let lastSharedQueueSnapshot = null;
     let accountQueueIds = [];
+    let accountQueueSourceIds = [];
+    let accountQueueName = 'GENERAL';
     let accountQueueRevision = 0;
     let accountQueueSnapshotSignature = null;
     let accountQueueDeviceId = null;
@@ -2744,6 +2754,9 @@ export function initMusicPlayer() {
             endLoading();
             playbackTransferPending = false;
             renderPlaybackDevicePicker();
+            const deferredPlaybackUpdate = deferredPlaybackOwnerUpdate;
+            deferredPlaybackOwnerUpdate = null;
+            if (deferredPlaybackUpdate) handleOwnPlaybackUpdate(deferredPlaybackUpdate);
         }
     }
 
@@ -3186,6 +3199,9 @@ export function initMusicPlayer() {
             && playback.transferId === activePlaybackTransferId
             && activePlaybackTransferUserId === ownUserId
         ) return;
+        if (playbackTransferPending && !isActivatingPlaybackTransfer) {
+            deferredPlaybackOwnerUpdate = { userId, playback };
+        }
         const pendingPlaybackSongId = getPendingPlaybackTakeoverSongId();
         const localTrackId = String(getCurrentTrack()?._id || getCurrentTrack()?.id || '');
         if (
@@ -4554,11 +4570,18 @@ export function initMusicPlayer() {
                 acknowledge({ success: false, error: error.message || 'No se pudo controlar la reproducción.' });
             }
         });
-        socket.off('accountQueueSnapshot').on('accountQueueSnapshot', ({ revision, songIds } = {}) => {
+        socket.off('accountQueueSnapshot').on('accountQueueSnapshot', ({
+            revision,
+            songIds,
+            sourceSongIds,
+            queueName
+        } = {}) => {
             if (!Number.isInteger(revision) || revision < accountQueueRevision || !Array.isArray(songIds)) return;
             accountQueueRevision = revision;
             accountQueueIds = songIds.map(String);
-            accountQueueSnapshotSignature = accountQueueIds.join(',');
+            if (Array.isArray(sourceSongIds)) accountQueueSourceIds = sourceSongIds.map(String);
+            if (typeof queueName === 'string' && queueName.trim()) accountQueueName = queueName.trim();
+            accountQueueSnapshotSignature = getAccountQueueSnapshotSignature();
             accountQueueSnapshotCached = true;
             accountQueueDeviceId = getRemotePlaybackSession()?.deviceId || null;
             persistAccountQueueSnapshot();
@@ -4802,6 +4825,8 @@ export function initMusicPlayer() {
         }
         sharedDevicePlayback = null;
         accountQueueIds = [];
+        accountQueueSourceIds = [];
+        accountQueueName = 'GENERAL';
         accountQueueRevision = 0;
         accountQueueSnapshotSignature = null;
         accountQueueDeviceId = null;
@@ -7676,6 +7701,15 @@ export function initMusicPlayer() {
             .slice(0, 5000);
     }
 
+    function getAccountQueueSourceSongIds() {
+        const sourceIndices = isShuffle ? [...unplayedIndices] : getSequentialQueueIndices();
+        return sourceIndices
+            .map(index => playlist[index])
+            .map(track => String(track?._id || track?.id || ''))
+            .filter(Boolean)
+            .slice(0, 5000);
+    }
+
     function getAccountQueueStorageKey(kind) {
         const userId = String(getStoredUser()?._id || 'guest');
         return `amgc-desktop-account-queue-${kind}-${userId}`;
@@ -7685,11 +7719,21 @@ export function initMusicPlayer() {
         return accountQueuePendingIds || accountQueueIds;
     }
 
+    function getAccountQueueSnapshotSignature(
+        songIds = accountQueueIds,
+        sourceSongIds = accountQueueSourceIds,
+        sourceQueueName = accountQueueName
+    ) {
+        return JSON.stringify([sourceQueueName, sourceSongIds, songIds]);
+    }
+
     function persistAccountQueueSnapshot() {
         try {
             localStorage.setItem(getAccountQueueStorageKey('snapshot'), JSON.stringify({
                 revision: accountQueueRevision,
-                songIds: accountQueueIds
+                songIds: accountQueueIds,
+                sourceSongIds: accountQueueSourceIds,
+                queueName: accountQueueName
             }));
         } catch (error) {
             console.error('No se pudo guardar la instantánea de la cola de la cuenta.', error);
@@ -7707,7 +7751,14 @@ export function initMusicPlayer() {
             ) {
                 accountQueueRevision = snapshot.revision;
                 accountQueueIds = snapshot.songIds.slice(0, 5000);
-                accountQueueSnapshotSignature = accountQueueIds.join(',');
+                accountQueueSourceIds = Array.isArray(snapshot.sourceSongIds)
+                    && snapshot.sourceSongIds.every(songId => typeof songId === 'string')
+                    ? snapshot.sourceSongIds.slice(0, 5000)
+                    : [];
+                accountQueueName = typeof snapshot.queueName === 'string' && snapshot.queueName.trim()
+                    ? snapshot.queueName.trim().slice(0, 100)
+                    : 'GENERAL';
+                accountQueueSnapshotSignature = getAccountQueueSnapshotSignature();
                 accountQueueSnapshotCached = true;
             }
             const pendingIds = JSON.parse(localStorage.getItem(getAccountQueueStorageKey('pending')) || 'null');
@@ -7795,7 +7846,7 @@ export function initMusicPlayer() {
                     accountQueueRevision = response.revision;
                 }
                 accountQueueSnapshotCached = true;
-                accountQueueSnapshotSignature = songIds.join(',');
+                accountQueueSnapshotSignature = getAccountQueueSnapshotSignature(songIds);
                 persistAccountQueueSnapshot();
                 if (accountQueuePendingIds?.join(',') === songIds.join(',')) clearPendingAccountQueueIds();
                 renderQueue();
@@ -7820,20 +7871,25 @@ export function initMusicPlayer() {
         if (
             !playbackOwnerConfirmed
             || getRemotePlaybackSession()
+            || sharedQueueSessionId
             || (accountQueuePendingIds && !allowPending)
             || !socket.connected
         ) {
             return Promise.resolve(false);
         }
         const songIds = getAccountQueueSongIds();
-        const signature = songIds.join(',');
+        const sourceSongIds = getAccountQueueSourceSongIds();
+        const sourceQueueName = queueName || 'GENERAL';
+        const signature = getAccountQueueSnapshotSignature(songIds, sourceSongIds, sourceQueueName);
         if (!force && signature === accountQueueSnapshotSignature) return Promise.resolve(true);
         accountQueueSnapshotSignature = signature;
         return new Promise(resolve => {
-            socket.emit('accountQueueSnapshot', { songIds }, response => {
+            socket.emit('accountQueueSnapshot', { songIds, sourceSongIds, queueName: sourceQueueName }, response => {
                 if (response?.success) {
                     if (Number.isInteger(response.revision)) accountQueueRevision = response.revision;
                     accountQueueIds = songIds;
+                    accountQueueSourceIds = sourceSongIds;
+                    accountQueueName = sourceQueueName;
                     accountQueueSnapshotCached = true;
                     persistAccountQueueSnapshot();
                     resolve(true);
@@ -11282,6 +11338,11 @@ export function initMusicPlayer() {
                 .map(songId => playlist.find(track => String(track._id || track.id) === String(songId)))
                 .filter(Boolean)
             : [];
+        const accountSourceTracks = hasAccountQueue
+            ? accountQueueSourceIds
+                .map(songId => playlist.find(track => String(track._id || track.id) === String(songId)))
+                .filter(Boolean)
+            : [];
 
         if (currentTrack) {
             const currentHeader = document.createElement('div');
@@ -11307,9 +11368,7 @@ export function initMusicPlayer() {
         if (displayedQueue.length > 0) {
             const header = document.createElement('div');
             header.className = 'queue-header';
-            header.textContent = hasAccountQueue
-                    ? 'A continuación en la cola · heredada'
-                    : 'A continuación en la cola';
+            header.textContent = 'A continuación en la cola';
             queueList.appendChild(header);
 
             displayedQueue.forEach(({ track, position }) => {
@@ -11412,6 +11471,36 @@ export function initMusicPlayer() {
                     </div>
                 `;
                 setupSongMenuListeners(li, origIndex);
+                setupQueueAddSwipe(li, track);
+                queueList.appendChild(li);
+            });
+        } else if (accountSourceTracks.length > 0) {
+            const sourceHeader = document.createElement('div');
+            sourceHeader.className = 'queue-header';
+            sourceHeader.textContent = accountQueueName || 'GENERAL';
+            queueList.appendChild(sourceHeader);
+            accountSourceTracks.forEach(track => {
+                const li = document.createElement('li');
+                li.className = 'queue-source-item';
+                li.dataset.songId = String(track._id || track.id || '');
+                li.style.setProperty('--track-color', safeColor(track.color));
+                li.innerHTML = `
+                    ${createImageMarkup(getSongCover(track), 'queue-item-img')}
+                    <div class="queue-item-info">
+                        <span class="queue-item-name">${escapeHtml(track.name)}</span>
+                        <span class="queue-item-artist">${escapeHtml(track.artist)}</span>
+                    </div>
+                `;
+                li.tabIndex = 0;
+                li.setAttribute('role', 'button');
+                const playAccountSourceTrack = () => requestAccountQueuePlay(track, -1);
+                li.addEventListener('click', playAccountSourceTrack);
+                li.addEventListener('keydown', event => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        playAccountSourceTrack();
+                    }
+                });
                 setupQueueAddSwipe(li, track);
                 queueList.appendChild(li);
             });
