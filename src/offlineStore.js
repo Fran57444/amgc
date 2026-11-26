@@ -77,14 +77,11 @@ export async function getOfflinePlaylists(userId) {
 }
 
 export async function saveOfflinePlaylists(userId, playlists) {
-    const existing = await getOfflinePlaylists(userId);
-    return writeRecord('playlists', {
-        userId: String(userId),
+    return updateOfflinePlaylistsRecord(userId, existing => ({
         playlists,
-        profilePlaylists: existing?.profilePlaylists || {},
-        playlistSavers: existing?.playlistSavers || {},
-        updatedAt: Date.now()
-    });
+        profilePlaylists: existing.profilePlaylists || {},
+        playlistSavers: existing.playlistSavers || {}
+    }));
 }
 
 export async function getOfflineProfilePlaylists(userId, profileUserId) {
@@ -93,17 +90,14 @@ export async function getOfflineProfilePlaylists(userId, profileUserId) {
 }
 
 export async function saveOfflineProfilePlaylists(userId, profileUserId, playlists) {
-    const record = await getOfflinePlaylists(userId);
-    return writeRecord('playlists', {
-        userId: String(userId),
-        playlists: record?.playlists || [],
+    return updateOfflinePlaylistsRecord(userId, record => ({
+        playlists: record.playlists || [],
         profilePlaylists: {
-            ...(record?.profilePlaylists || {}),
+            ...(record.profilePlaylists || {}),
             [String(profileUserId)]: playlists
         },
-        playlistSavers: record?.playlistSavers || {},
-        updatedAt: Date.now()
-    });
+        playlistSavers: record.playlistSavers || {}
+    }));
 }
 
 export async function getOfflinePlaylistSavers(userId, playlistId) {
@@ -112,16 +106,51 @@ export async function getOfflinePlaylistSavers(userId, playlistId) {
 }
 
 export async function saveOfflinePlaylistSavers(userId, playlistId, data) {
-    const record = await getOfflinePlaylists(userId);
-    return writeRecord('playlists', {
-        userId: String(userId),
-        playlists: record?.playlists || [],
-        profilePlaylists: record?.profilePlaylists || {},
+    return updateOfflinePlaylistsRecord(userId, record => ({
+        playlists: record.playlists || [],
+        profilePlaylists: record.profilePlaylists || {},
         playlistSavers: {
-            ...(record?.playlistSavers || {}),
+            ...(record.playlistSavers || {}),
             [String(playlistId)]: data
-        },
-        updatedAt: Date.now()
+        }
+    }));
+}
+
+async function updateOfflinePlaylistsRecord(userId, update) {
+    const database = await openDatabase();
+    const key = String(userId);
+    return new Promise((resolve, reject) => {
+        const transaction = database.transaction('playlists', 'readwrite');
+        const store = transaction.objectStore('playlists');
+        let updatedRecord = null;
+        const request = store.get(key);
+        request.onsuccess = () => {
+            try {
+                const existing = request.result || {
+                    userId: key,
+                    playlists: [],
+                    profilePlaylists: {},
+                    playlistSavers: {}
+                };
+                updatedRecord = {
+                    ...existing,
+                    ...update(existing),
+                    userId: key,
+                    updatedAt: Date.now()
+                };
+                store.put(updatedRecord);
+            } catch (error) {
+                transaction.abort();
+                reject(error);
+            }
+        };
+        transaction.oncomplete = () => resolve(updatedRecord);
+        transaction.onerror = () => reject(
+            transaction.error || new Error('No se pudieron actualizar las playlists offline.')
+        );
+        transaction.onabort = () => reject(
+            transaction.error || new Error('Se canceló la actualización de playlists offline.')
+        );
     });
 }
 
@@ -158,6 +187,18 @@ export async function getOfflineMediaIndex() {
         };
         request.onerror = () => reject(request.error || new Error('No se pudo leer el índice offline.'));
     });
+}
+
+export async function getOfflineAudioSongIds(isCurrentSource = null) {
+    const mediaIndex = await getOfflineMediaIndex();
+    const songIds = new Set();
+    for (const [key, sourceUrl] of mediaIndex) {
+        const match = /^song:(.+):audio$/.exec(key);
+        if (match && (!isCurrentSource || isCurrentSource(match[1], sourceUrl))) {
+            songIds.add(match[1]);
+        }
+    }
+    return songIds;
 }
 
 export async function saveOfflineMedia(key, blob, contentType = '', sourceUrl = '') {

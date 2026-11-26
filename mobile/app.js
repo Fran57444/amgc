@@ -1,5 +1,6 @@
 import {
   getOfflineFriends,
+  getOfflineAudioSongIds,
   getOfflineLibrary,
   getOfflineMedia,
   getOfflineMediaIndex,
@@ -64,6 +65,10 @@ const state = {
   secretPhrases: [],
   secretPhrasesPersonal: false,
   currentTab: 'home',
+  catalogLoading: false,
+  catalogLoadError: '',
+  songSearchQuery: '',
+  songSearchScrollTop: 0,
   currentPlaylistId: null,
   profileUser: null,
   profilePlaylists: [],
@@ -75,9 +80,11 @@ const state = {
   offlineEnabled: false,
   offlineStatus: 'Descargas offline desactivadas.',
   offlineProgress: null,
+  offlineAudioSongIds: new Set(),
   queue: [],
   queueIndex: -1,
   currentTrack: null,
+  loadingTrackId: '',
   remotePlayback: null,
   ownPlayback: null,
   playbackOwnerConfirmed: false,
@@ -94,7 +101,14 @@ const state = {
   sharedQueueRole: null,
   sharedQueueRevision: 0,
   sharedQueueIds: [],
-  pendingSharedQueueAdds: [],
+  sharedQueueUpcomingIds: [],
+  sharedQueueHostQueueName: 'GENERAL',
+  sharedQueueJamActive: false,
+  sharedQueueJamRequestPending: false,
+  sharedQueueJamRequestId: '',
+  sharedQueueJamUpdateInFlight: false,
+  sharedQueueJamPendingUpcomingIds: null,
+  hostJamRequestId: '',
   sharedQueueSnapshotSignature: '',
   accountQueueIds: [],
   accountQueueSnapshotCached: false,
@@ -146,6 +160,12 @@ const elements = {
   suggestionForm: document.getElementById('suggestion-form'),
   lyricsScreen: document.getElementById('lyrics-screen'),
   playerQueue: document.getElementById('player-queue'),
+  queueJamControls: document.getElementById('queue-jam-controls'),
+  requestJamButton: document.getElementById('btn-request-jam'),
+  jamRequestNotification: document.getElementById('jam-request-notification'),
+  jamRequestMessage: document.getElementById('jam-request-message'),
+  acceptJamRequest: document.getElementById('jam-request-accept'),
+  declineJamRequest: document.getElementById('jam-request-decline'),
   queueScrim: document.getElementById('queue-scrim'),
   homeLyrics: document.getElementById('home-lyrics'),
   chatScreen: document.getElementById('chat-screen'),
@@ -188,6 +208,7 @@ let cachedNativeNotificationCoverPath = '';
 let sharedPlaybackClockTimer = null;
 let suppressRemotePlaybackPause = false;
 let playbackTransferPending = false;
+let playbackDeviceRemovalPending = false;
 let activePlaybackTransferId = null;
 let activePlaybackTransferUserId = null;
 let isActivatingPlaybackTransfer = false;
@@ -196,6 +217,11 @@ let remoteSeekTimer = null;
 let queuedRemoteSeekPosition = 0;
 let profileProgressTimer = null;
 let songSearchTimer = null;
+window.addEventListener('scroll', () => {
+  if (state.currentTab === 'songs' && !state.currentPlaylistId) {
+    state.songSearchScrollTop = window.scrollY;
+  }
+}, { passive: true });
 let offlineSyncPromise = null;
 let offlineSyncRequested = false;
 let libraryRequestSequence = 0;
@@ -244,7 +270,9 @@ async function request(path, options = {}) {
       logout(false);
       elements.loginError.textContent = 'La sesión no fue aceptada por el servidor. Inicia sesión nuevamente.';
     }
-    throw new Error(result?.error || `Error del servidor (${response.status}).`);
+    const error = new Error(result?.error || `Error del servidor (${response.status}).`);
+    error.status = response.status;
+    throw error;
   }
   return result;
 }
@@ -674,10 +702,25 @@ function renderPlaybackDevicePicker() {
     if (deviceIcon) icon.append(deviceIcon);
     const name = makeElement('span', 'playback-device-option-name', label);
     const status = makeElement('small', 'playback-device-option-status',
-      device.isConnected === false ? 'Desconectado' : '');
+      device.isConnected === false ? 'Desconectado' : isCurrentDevice ? '' : 'Conectado');
     option.append(icon, name, status);
     option.addEventListener('click', () => void transferPlaybackToDevice(device.deviceId));
-    elements.playbackDeviceList.append(option);
+    const row = makeElement('div', 'playback-device-row');
+    row.append(option);
+    if (!isCurrentDevice) {
+      const removeButton = makeButton(
+        'playback-device-remove',
+        `Eliminar dispositivo ${label}`,
+        () => void removePlaybackDevice(device),
+        '×'
+      );
+      removeButton.disabled = playbackDeviceRemovalPending || device.isConnected !== false;
+      removeButton.title = device.isConnected === false
+        ? `Eliminar ${label}`
+        : `Desconecta ${label} para poder eliminarlo`;
+      row.append(removeButton);
+    }
+    elements.playbackDeviceList.append(row);
   });
 }
 
@@ -708,6 +751,35 @@ async function transferPlaybackToDevice(targetDeviceId) {
   } finally {
     endLoading();
     playbackTransferPending = false;
+    renderPlaybackDevicePicker();
+  }
+}
+
+async function removePlaybackDevice(device) {
+  if (
+    playbackDeviceRemovalPending
+    || playbackTransferPending
+    || !device?.deviceId
+    || device.deviceId === playbackDeviceId
+    || device.isConnected !== false
+    || !window.confirm(`¿Eliminar el dispositivo «${device.deviceName || 'Dispositivo'}» de tu cuenta?`)
+  ) return;
+  playbackDeviceRemovalPending = true;
+  renderPlaybackDevicePicker();
+  try {
+    const response = await requestPlaybackSocket('playbackDeviceRemoveRequest', {
+      deviceId: device.deviceId
+    });
+    if (!response.success) throw new Error(response.error || 'No se pudo eliminar el dispositivo.');
+    connectedPlaybackDevices = connectedPlaybackDevices.filter(
+      item => item.deviceId !== device.deviceId
+    );
+    renderPlaybackDevicePicker();
+    showToast('Dispositivo eliminado.');
+  } catch (error) {
+    showToast(error.message || 'No se pudo eliminar el dispositivo.', true);
+  } finally {
+    playbackDeviceRemovalPending = false;
     renderPlaybackDevicePicker();
   }
 }
@@ -1331,6 +1403,9 @@ function imageElement(src, className, alt = '', size = 'small') {
 
 function setTab(tab) {
   if (tab === state.currentTab && !state.currentPlaylistId) return;
+  if (state.currentTab === 'songs' && !state.currentPlaylistId) {
+    state.songSearchScrollTop = window.scrollY;
+  }
   clearTimeout(songSearchTimer);
   songSearchTimer = null;
   const returningHome = tab === 'home' && state.currentTab !== 'home';
@@ -1400,15 +1475,85 @@ function makeProfileUserLink(user) {
   return makeElement('span', 'playlist-user-name', username);
 }
 
+function updateSongLoadingIndicator(row) {
+  const isLoading = row.dataset.songId === state.loadingTrackId;
+  const isSyncing = row.classList.contains('is-syncing');
+  const isCoverLoading = row.dataset.coverLoading === 'true';
+  const isBusy = isLoading || isSyncing || isCoverLoading;
+  row.classList.toggle('is-loading', isLoading);
+  row.setAttribute('aria-busy', String(isBusy));
+  const cover = row.querySelector('.song-cover-loading');
+  if (!cover) return;
+  let spinner = cover.querySelector('.song-loading-spinner');
+  if (isBusy) {
+    if (!spinner) {
+      spinner = makeElement('span', 'song-loading-spinner');
+      spinner.setAttribute('role', 'status');
+      cover.append(spinner);
+    }
+    spinner.classList.toggle('syncing', isSyncing);
+    spinner.setAttribute('aria-label', isCoverLoading ? 'Cargando portada' : 'Cargando canción');
+  } else {
+    spinner?.remove();
+  }
+}
+
+function watchSongCoverLoading(row, cover, image) {
+  if (!image) return;
+  const hasSource = Boolean(image.dataset.nativeDriveImage || image.hasAttribute('src'));
+  row.dataset.coverLoading = String(hasSource);
+  updateSongLoadingIndicator(row);
+  if (!hasSource) return;
+
+  let finished = false;
+  const finishLoading = () => {
+    if (finished) return;
+    finished = true;
+    row.dataset.coverLoading = 'false';
+    image.removeEventListener('load', finishLoading);
+    image.removeEventListener('error', finishFailedLoad);
+    updateSongLoadingIndicator(row);
+  };
+  const finishFailedLoad = () => {
+    if (image.hasAttribute('src')) return;
+    finishLoading();
+  };
+  image.addEventListener('load', finishLoading);
+  image.addEventListener('error', finishFailedLoad);
+  if (image.complete && image.naturalWidth > 0) finishLoading();
+  else if (image.complete && !image.hasAttribute('src') && !image.dataset.nativeDriveImage) {
+    finishLoading();
+  }
+}
+
 function renderSongRow(song, options = {}) {
   const songId = getSongId(song);
   const row = makeElement('article', `song-row${options.detail ? ' detail-song-row' : ''}`);
+  row.dataset.songId = songId;
+  const isSyncing = Boolean(options.playlist && (
+    song.syncPending || pendingPlaylistAdds.has(`${options.playlist.id}:${songId}`)
+  ));
+  const isLoading = state.loadingTrackId === songId;
+  if (isLoading || isSyncing) row.classList.add(isSyncing ? 'is-syncing' : 'is-loading');
   const play = makeButton('song-play', `Reproducir ${song.name || 'canción'}`, () => {
     const sourceQueue = options.queue || state.songs;
     const index = sourceQueue.findIndex(entry => getSongId(entry) === songId);
     if (index >= 0) void playTrack(sourceQueue, index, { queueTitle: options.queueTitle || 'GENERAL' });
   });
-  const cover = imageElement(getSongCover(song), 'song-cover', '');
+  const coverWrap = makeElement('span', 'song-cover-loading');
+  const coverImage = imageElement(getSongCover(song), 'song-cover', '');
+  coverWrap.append(coverImage);
+  if (state.offlineAudioSongIds.has(songId)) {
+    const offlineBadge = makeElement('span', 'offline-ready-badge', '✓');
+    offlineBadge.setAttribute('role', 'img');
+    offlineBadge.setAttribute('aria-label', 'Audio disponible sin conexión');
+    offlineBadge.title = 'Audio guardado en este dispositivo';
+    coverWrap.append(offlineBadge);
+  }
+  if (isLoading || isSyncing) {
+    coverWrap.append(makeElement('span', `song-loading-spinner${isSyncing ? ' syncing' : ''}`));
+  }
+  watchSongCoverLoading(row, coverWrap, coverImage);
   const copy = makeElement('span', 'song-copy');
   copy.append(
     makeElement('strong', '', song.name || 'Canción sin título'),
@@ -1422,7 +1567,7 @@ function renderSongRow(song, options = {}) {
     lyricsLabel.append(lyricsIcon, makeElement('span', '', 'LETRA'));
     copy.append(lyricsLabel);
   }
-  play.append(cover, copy);
+  play.append(coverWrap, copy);
   row.append(play);
   if (options.detail) {
     const addedBy = song.addedBy && typeof song.addedBy === 'object' ? song.addedBy : null;
@@ -1501,12 +1646,34 @@ function renderSongs() {
     if (state.songs.length) void playTrack(state.songs, 0);
     else showToast('No hay canciones disponibles para reproducir.', true);
   }));
+  if (state.catalogLoading || (state.catalogLoadError && state.songs.length)) {
+    let loadingMessage = state.catalogLoadError;
+    if (state.catalogLoading) {
+      loadingMessage = state.songs.length
+        ? 'Actualizando el catálogo…'
+        : 'Conectando con el catálogo…';
+    }
+    const loadingStatus = makeElement(
+      'p',
+      'catalog-loading-status',
+      loadingMessage
+    );
+    loadingStatus.setAttribute('role', 'status');
+    loadingStatus.setAttribute('aria-live', 'polite');
+    if (state.catalogLoading) {
+      const loadingSpinner = makeElement('span', 'sync-spinner');
+      loadingSpinner.setAttribute('aria-hidden', 'true');
+      loadingStatus.prepend(loadingSpinner);
+    }
+    view.append(loadingStatus);
+  }
   const search = makeElement('label', 'search-box');
   search.append(makeElement('span', '', '⌕'));
   const input = makeElement('input');
   input.type = 'search';
   input.placeholder = 'Buscar canción o artista';
   input.setAttribute('aria-label', 'Buscar canción o artista');
+  input.value = state.songSearchQuery;
   search.append(input);
   const results = makeElement('div');
   const searchableSongs = state.songs.map(song => ({
@@ -1515,13 +1682,17 @@ function renderSongs() {
   }));
   const renderResults = () => {
     if (!input.isConnected) return;
-    const query = input.value.trim().toLocaleLowerCase();
+    const query = state.songSearchQuery.trim().toLocaleLowerCase();
     const filtered = query
       ? searchableSongs.filter(entry => entry.text.includes(query)).map(entry => entry.song)
       : state.songs;
-    results.replaceChildren(renderSongList(filtered, query ? 'No se encontraron canciones.' : 'No hay canciones disponibles.'));
+    const emptyMessage = state.catalogLoading
+      ? 'Esperando el catálogo…'
+      : state.catalogLoadError || (query ? 'No se encontraron canciones.' : 'No hay canciones disponibles.');
+    results.replaceChildren(renderSongList(filtered, emptyMessage));
   };
   input.addEventListener('input', () => {
+    state.songSearchQuery = input.value;
     clearTimeout(songSearchTimer);
     songSearchTimer = window.setTimeout(renderResults, 100);
   });
@@ -2306,6 +2477,7 @@ function renderProfile() {
     } else {
       const friendList = makeElement('div', 'profile-friends');
       state.friends.forEach(friend => {
+        const friendRow = makeElement('div', 'profile-friend-row');
         const friendButton = makeButton('profile-friend', `Ver perfil de ${friend.username}`, () => {
           void openFriendProfile(friend);
         });
@@ -2316,7 +2488,14 @@ function renderProfile() {
         const statusDot = makeElement('span', `profile-presence-dot ${friend.isOnline ? 'online' : 'offline'}`);
         statusDot.setAttribute('aria-label', friend.isOnline ? 'En línea' : 'Desconectado');
         friendButton.append(statusDot);
-        friendList.append(friendButton);
+        const removeButton = makeButton(
+          'friend-remove-button',
+          `Eliminar a ${friend.username} de tus amigos`,
+          () => void removeFriend(friend._id, friend.username),
+          '×'
+        );
+        friendRow.append(friendButton, removeButton);
+        friendList.append(friendRow);
       });
       friendsCard.append(friendList);
     }
@@ -2602,6 +2781,13 @@ async function loadFriends() {
       ...(update.updatedAt && { lastActive: update.updatedAt })
     };
   });
+  if (
+    state.followingUserId
+    && !state.friends.some(friend => String(friend._id) === String(state.followingUserId))
+  ) {
+    stopFollowingFriend();
+    showToast('Se detuvo la escucha compartida porque ya no está en tu lista de amigos.', true);
+  }
   if (state.offlineEnabled && navigator.onLine) {
     try {
       await saveOfflineFriends(userId, state.friends);
@@ -2669,6 +2855,18 @@ async function addFriend(input) {
     showToast(error.message || 'No se pudo agregar al amigo.', true);
   } finally {
     if (submitButton) submitButton.disabled = false;
+  }
+}
+
+async function removeFriend(friendId, friendName = 'este amigo') {
+  if (!friendId || !window.confirm(`¿Eliminar a ${friendName} de tus amigos?`)) return;
+  try {
+    await request(`/users/friends/${encodeURIComponent(friendId)}`, { method: 'DELETE' });
+    if (String(state.activeChatFriend?._id || '') === String(friendId)) closeChat();
+    await loadFriends();
+    showToast(`${friendName} se eliminó de tus amigos.`);
+  } catch (error) {
+    showToast(error.message || 'No se pudo eliminar al amigo.', true);
   }
 }
 
@@ -2851,6 +3049,27 @@ function updateOfflineStatus(message, progress = null) {
   if (status) status.textContent = message;
 }
 
+async function refreshOfflineAudioAvailability(render = true) {
+  try {
+    const songsById = new Map();
+    [...state.songs, ...state.playlists.flatMap(playlist => playlist.tracks || []),
+      ...state.profilePlaylists.flatMap(playlist => playlist.tracks || []),
+      ...state.queue, ...state.upcomingQueue].forEach(song => {
+      const songId = String(getSongId(song) || '');
+      if (songId && !songsById.has(songId)) songsById.set(songId, song);
+    });
+    state.offlineAudioSongIds = await getOfflineAudioSongIds((songId, cachedSource) => {
+      const song = songsById.get(songId);
+      const source = song?.path || song?.audioUrl;
+      return Boolean(source
+        && sameMediaSource(cachedSource, resolveOfflineResourceUrl(source, 'audio')));
+    });
+    if (render && state.user?._id && !elements.appShell.hidden) renderCurrentView();
+  } catch (error) {
+    console.warn('No se pudo actualizar qué canciones están disponibles offline.', error);
+  }
+}
+
 async function cacheOfflineResource(key, source) {
   const mediaType = getOfflineResourceMediaType(key);
   const imageSize = getImageSizeFromCacheKey(key);
@@ -2943,6 +3162,8 @@ async function downloadOfflineLibrary() {
     let visualCacheChanged = false;
     do {
       offlineSyncRequested = false;
+      failed = 0;
+      firstFailure = '';
       const resources = new Map();
       const addResource = (key, source) => {
         if (typeof source !== 'string' || !source.trim() || /^(?:data|blob):/i.test(source)) return;
@@ -3055,6 +3276,7 @@ async function downloadOfflineLibrary() {
       updateOfflineStatus(message, { completed, total });
       showToast(message, failed > 0);
     }
+    await refreshOfflineAudioAvailability(false);
     if (state.offlineEnabled || visualCacheChanged) {
       renderCurrentView();
       updateNavigationState();
@@ -3103,6 +3325,7 @@ async function setOfflineMode(enabled) {
 }
 
 function renderCurrentView() {
+  const isSongsView = state.currentTab === 'songs' && !state.currentPlaylistId;
   if (state.currentPlaylistId) {
     renderPlaylistDetail();
     updateHomeLyrics();
@@ -3116,6 +3339,14 @@ function renderCurrentView() {
     settings: renderSettings
   };
   (renderers[state.currentTab] || renderHome)();
+  if (isSongsView) {
+    const scrollTop = state.songSearchScrollTop;
+    window.requestAnimationFrame(() => {
+      if (state.currentTab === 'songs' && !state.currentPlaylistId) {
+        window.scrollTo(0, scrollTop);
+      }
+    });
+  }
   updateHomeLyrics();
   syncProfileProgressTimer();
 }
@@ -3132,7 +3363,16 @@ function renderDrawerPlaylists() {
     const cover = getPlaylistCover(playlist);
     if (cover) button.append(imageElement(cover, '', ''));
     else button.append(makeElement('span', 'drawer-playlist-art', '♫'));
-    button.append(makeElement('span', '', playlist.name || 'Playlist'));
+    button.append(makeElement('span', 'drawer-playlist-name', playlist.name || 'Playlist'));
+    const playlistId = String(playlist.id);
+    const isSyncPending = (playlist.tracks || []).some(track => track.syncPending)
+      || [...pendingPlaylistAdds].some(key => key.startsWith(`${playlistId}:`));
+    if (isSyncPending) {
+      const indicator = makeElement('span', 'sync-spinner');
+      indicator.setAttribute('role', 'status');
+      indicator.setAttribute('aria-label', 'Sincronizando cambios de playlist');
+      button.append(indicator);
+    }
     drawerPlaylists.append(button);
   });
 }
@@ -3960,9 +4200,18 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
-function renderPlayerQueue({ syncAccount = true } = {}) {
+function renderPlayerQueue({ syncAccount = true, syncShared = true } = {}) {
   const queueList = document.getElementById('player-queue-list');
   if (!elements.playerQueue || !queueList) return;
+  updateJamControls();
+  const queueSyncIndicator = document.getElementById('player-queue-sync-indicator');
+  if (queueSyncIndicator) {
+    queueSyncIndicator.hidden = !(
+      Array.isArray(state.accountQueuePendingIds)
+      || state.accountQueueSyncInFlight
+      || state.sharedQueueJamUpdateInFlight
+    );
+  }
   queueList.replaceChildren();
   const remotePlayback = getRemotePlaybackSession();
   const isLocalQueue = !remotePlayback
@@ -3970,47 +4219,48 @@ function renderPlayerQueue({ syncAccount = true } = {}) {
     && state.sharedQueueRole !== 'follower';
   const showAccountQueue = Boolean(remotePlayback);
   const currentSong = remotePlayback ? getLyricsSong() : getCurrentSong();
-  const sharedQueueIds = state.sharedQueueRole === 'follower'
-    ? getDisplayedSharedQueueIds()
-    : state.sharedQueueIds;
   const upcoming = showAccountQueue
     ? getDisplayedAccountQueueIds().map((id, position) => ({
       song: state.songs.find(song => getSongId(song) === id),
       position
     })).filter(item => item.song)
     : state.sharedQueueRole === 'follower'
-    ? sharedQueueIds
-      .map((id, position) => ({ song: state.songs.find(song => getSongId(song) === id), position }))
-      .filter(item => item.song)
+    ? state.sharedQueueJamActive
+      ? getDisplayedSharedUpcomingIds().map((id, position) => ({
+        song: state.songs.find(song => getSongId(song) === id),
+        position
+      })).filter(item => item.song)
+      : []
     : state.upcomingQueue.map((song, position) => ({ song, position }));
   const activePlaylist = state.queueTitle === 'GENERAL'
     ? null
     : state.playlists.find(playlist => playlist.name === state.queueTitle);
   const sourceQueue = isLocalQueue
     ? state.queueTitle === 'GENERAL'
-      ? state.songs
-      : activePlaylist?.tracks || state.queue
+      ? state.sharedQueueJamActive ? state.queue : state.songs
+      : state.sharedQueueJamActive ? state.queue : activePlaylist?.tracks || state.queue
     : [];
-  const sourceQueueItems = sourceQueue.map((song, index) => ({ song, index }));
-  const currentSourceItem = sourceQueueItems.find(item => (
-    getSongId(item.song) === getSongId(currentSong)
-  ));
-  const shuffledSourceItems = state.shuffle
+  const sourceQueueIndices = state.shuffle
     ? state.shuffleQueue
-      .map(index => getSongId(state.queue[index]))
-      .map(songId => sourceQueueItems.find(item => getSongId(item.song) === songId))
+    : state.queueIndex < 0
+      ? []
+      : Array.from(
+        { length: Math.max(0, state.queue.length - 1) },
+        (_, offset) => (state.queueIndex + offset + 1) % state.queue.length
+      );
+  const displayedSourceItems = sourceQueueIndices
+    .map(index => {
+      const queuedSong = state.queue[index];
+      if (!queuedSong) return null;
+      const sourceIndex = sourceQueue.findIndex(song => getSongId(song) === getSongId(queuedSong));
+      return sourceIndex >= 0 ? { song: sourceQueue[sourceIndex], index: sourceIndex } : null;
+    })
+    .filter(Boolean);
+  const sharedSourceItems = state.sharedQueueRole === 'follower'
+    ? state.sharedQueueIds
+      .map(id => state.songs.find(song => getSongId(song) === id))
       .filter(Boolean)
     : [];
-  const displayedSourceItems = (state.shuffle
-    ? [
-      ...(currentSourceItem ? [currentSourceItem] : []),
-      ...shuffledSourceItems.filter(item => item !== currentSourceItem),
-      ...sourceQueueItems.filter(item => (
-        item !== currentSourceItem
-        && !shuffledSourceItems.includes(item)
-      ))
-    ]
-    : sourceQueueItems).filter(item => item !== currentSourceItem);
 
   if (currentSong) {
     queueList.append(makeElement('p', 'queue-section-label', 'REPRODUCIENDO AHORA'));
@@ -4019,22 +4269,28 @@ function renderPlayerQueue({ syncAccount = true } = {}) {
 
   if (upcoming.length) {
     queueList.append(makeElement('p', 'queue-section-label',
-      state.sharedQueueSessionId
-        ? 'A CONTINUACIÓN EN LA COLA · COMPARTIDA'
-        : showAccountQueue
+      showAccountQueue
           ? 'A CONTINUACIÓN EN LA COLA · HEREDADA'
           : 'A CONTINUACIÓN EN LA COLA'));
     upcoming.forEach(({ song, position }) => {
       queueList.append(renderQueueTrack(song, false, {
         position,
-        removable: Boolean(remotePlayback) || state.sharedQueueRole !== 'follower',
-        draggable: Boolean(remotePlayback) || state.sharedQueueRole !== 'follower'
+        removable: Boolean(remotePlayback)
+          || state.sharedQueueRole !== 'follower'
+          || state.sharedQueueJamActive,
+        draggable: Boolean(remotePlayback)
+          || state.sharedQueueRole !== 'follower'
+          || state.sharedQueueJamActive
       }));
     });
   }
 
   if (displayedSourceItems.length) {
-    queueList.append(makeElement('p', 'queue-section-label', state.queueTitle || 'GENERAL'));
+    queueList.append(makeElement(
+      'p',
+      'queue-section-label',
+      state.sharedQueueJamActive && state.queueTitle === 'GENERAL' ? 'JAM' : state.queueTitle || 'GENERAL'
+    ));
     displayedSourceItems.forEach(({ song, index }) => {
       if (song) queueList.append(renderQueueTrack(
         song,
@@ -4042,33 +4298,59 @@ function renderPlayerQueue({ syncAccount = true } = {}) {
         { sourceIndex: index, source: true, sourceQueue, queueTitle: state.queueTitle }
       ));
     });
+  } else if (sharedSourceItems.length) {
+    queueList.append(makeElement(
+      'p',
+      'queue-section-label',
+      state.sharedQueueJamActive && state.sharedQueueHostQueueName === 'GENERAL'
+        ? 'JAM'
+        : state.sharedQueueHostQueueName || 'GENERAL'
+    ));
+    sharedSourceItems.forEach(song => {
+      queueList.append(renderQueueTrack(song, false, {
+        sharedSource: true,
+        source: state.sharedQueueJamActive
+      }));
+    });
   } else if (!upcoming.length && !currentSong) {
     queueList.append(makeElement('p', 'empty-state', 'Reproduce una canción para llenar la cola.'));
   }
-  if (state.sharedQueueRole === 'host') emitSharedQueueSnapshot();
-  if (syncAccount && !remotePlayback && !state.followingUserId && currentSong) {
+  if (syncShared && state.sharedQueueRole === 'host') emitSharedQueueSnapshot();
+  if (syncAccount && !remotePlayback && !state.followingUserId && !state.sharedQueueSessionId && currentSong) {
     void publishAccountQueueSnapshot();
   }
 }
 
 function renderQueueTrack(song, current, options = {}) {
   const row = makeElement('div', `queue-row${current ? ' current' : ''}`);
+  row.dataset.songId = getSongId(song);
   const track = makeElement('div', 'queue-track');
   const copy = makeElement('span', 'queue-track-copy');
   copy.append(
     makeElement('strong', 'queue-track-title', `${current ? '▶ ' : ''}${song.name || 'Canción'}`),
     makeElement('small', 'queue-track-artist', song.artist || 'Artista desconocido')
   );
-  track.append(
-    imageElement(getSongCover(song), '', ''),
-    copy
-  );
+  const cover = makeElement('span', 'song-cover-loading queue-cover-loading');
+  const coverImage = imageElement(getSongCover(song), '', '');
+  cover.append(coverImage);
+  watchSongCoverLoading(row, cover, coverImage);
+  track.append(cover, copy);
   const canPlayAccountQueueTrack = Boolean(getRemotePlaybackSession());
-  if (!current && (state.sharedQueueRole !== 'follower' || canPlayAccountQueueTrack)) {
+  const canPlayJamQueueTrack = state.sharedQueueRole === 'follower' && state.sharedQueueJamActive;
+  if (!current && (
+    state.sharedQueueRole !== 'follower'
+    || canPlayAccountQueueTrack
+    || canPlayJamQueueTrack
+  )) {
     track.setAttribute('role', 'button');
     track.tabIndex = 0;
     track.addEventListener('click', () => {
       if (canPlayAccountQueueTrack) requestAccountQueuePlay(song, options.position);
+      else if (canPlayJamQueueTrack) requestSharedJamPlayback(
+        'playTrack',
+        getSongId(song),
+        options.sharedSource ? 'source' : 'upcoming'
+      );
       else if (options.source) {
         playSourceQueueTrack(options.sourceIndex, options.sourceQueue, options.queueTitle);
       }
@@ -4078,6 +4360,11 @@ function renderQueueTrack(song, current, options = {}) {
       if (event.key === 'Enter' || event.key === ' ') {
         event.preventDefault();
         if (canPlayAccountQueueTrack) requestAccountQueuePlay(song, options.position);
+        else if (canPlayJamQueueTrack) requestSharedJamPlayback(
+          'playTrack',
+          getSongId(song),
+          options.sharedSource ? 'source' : 'upcoming'
+        );
         else if (options.source) {
           void playSourceQueueTrack(options.sourceIndex, options.sourceQueue, options.queueTitle);
         }
@@ -4107,11 +4394,11 @@ function renderQueueTrack(song, current, options = {}) {
     row.append(makeButton('queue-remove', 'Quitar de la cola', () => {
       removeUpcomingTrack(options.position);
     }, '×'));
-  } else if ((state.sharedQueueRole === 'follower' || canPlayAccountQueueTrack) && !current) {
+  } else   if ((state.sharedQueueRole === 'follower' || canPlayAccountQueueTrack) && !current && !options.sharedSource) {
     row.append(makeElement(
       'small',
       'queue-shared-label',
-      canPlayAccountQueueTrack ? 'Heredada' : 'Compartida'
+      canPlayAccountQueueTrack ? 'Heredada' : state.sharedQueueJamActive ? 'Jam' : 'Compartida'
     ));
   }
   if (options.source) setupQueueAddSwipe(row, song);
@@ -4341,99 +4628,272 @@ async function playSourceQueueTrack(index, sourceQueue = state.queue, queueTitle
 }
 
 function addToUpcomingQueue(song) {
+  if (state.sharedQueueRole === 'follower') {
+    if (!state.sharedQueueJamActive) {
+      showToast('La cola del anfitrión es de solo lectura. Propón una Jam desde la cola para colaborar.', true);
+      return;
+    }
+    const sharedUpcomingIds = getDisplayedSharedUpcomingIds();
+    if (sharedUpcomingIds.length >= 5000) {
+      showToast('La cola de la Jam alcanzó el máximo de 5000 canciones.', true);
+      return;
+    }
+    requestSharedJamQueueUpdate([
+      ...sharedUpcomingIds,
+      getSongId(song)
+    ]);
+    return;
+  }
+  const isJamHost = state.sharedQueueRole === 'host' && state.sharedQueueJamActive;
   if (
-    getRemotePlaybackSession()
-    || Array.isArray(state.accountQueuePendingIds)
-    || state.accountQueueSnapshotCached
+    !isJamHost
+    && (
+      getRemotePlaybackSession()
+      || Array.isArray(state.accountQueuePendingIds)
+      || state.accountQueueSnapshotCached
+    )
   ) {
     requestAccountQueueAdd(song);
     return;
   }
-  if (state.sharedQueueRole === 'follower') {
-    requestSharedQueueAdd(song);
-    return;
-  }
-  if (state.sharedQueueRole === 'host' && state.upcomingQueue.length >= 5000) {
-    showToast('La cola compartida alcanzó el máximo de 5000 canciones.', true);
-    return;
-  }
   const fullTrack = state.songs.find(item => getSongId(item) === getSongId(song)) || song;
-  state.upcomingQueue.push(fullTrack);
+  if (state.sharedQueueRole === 'host' && state.sharedQueueJamActive) {
+    if (state.upcomingQueue.length >= 5000) {
+      showToast('La cola de la Jam alcanzó el máximo de 5000 canciones.', true);
+      return;
+    }
+    state.upcomingQueue.push(fullTrack);
+  } else {
+    state.upcomingQueue.push(fullTrack);
+  }
   persistUpcomingQueue();
   emitSharedQueueSnapshot();
   renderPlayerQueue();
   showToast('Canción añadida a continuación.');
 }
 
-function getDisplayedSharedQueueIds() {
-  const displayedIds = [...state.sharedQueueIds];
-  const counts = new Map();
-  for (const songId of state.sharedQueueIds) {
-    counts.set(songId, (counts.get(songId) || 0) + 1);
-  }
-  for (const pending of state.pendingSharedQueueAdds) {
-    if ((counts.get(pending.songId) || 0) > pending.baselineCount) continue;
-    displayedIds.push(pending.songId);
-  }
-  return displayedIds;
+function getDisplayedSharedUpcomingIds() {
+  return state.sharedQueueJamPendingUpcomingIds || state.sharedQueueUpcomingIds;
 }
 
-function settleSharedQueueAdd(pending, success) {
-  const pendingIndex = state.pendingSharedQueueAdds.indexOf(pending);
-  if (pendingIndex < 0) return;
-  const currentCount = state.sharedQueueIds.filter(songId => songId === pending.songId).length;
-  state.pendingSharedQueueAdds.splice(pendingIndex, 1);
-  if (success && pending.sessionId === state.sharedQueueSessionId
-    && currentCount <= pending.baselineCount) {
-    state.sharedQueueIds.push(pending.songId);
-  } else if (!success) {
-    for (const laterPending of state.pendingSharedQueueAdds.slice(pendingIndex)) {
-      if (laterPending.songId === pending.songId) laterPending.baselineCount -= 1;
-    }
-  }
-  renderPlayerQueue();
+function updateJamControls() {
+  const isFollower = state.sharedQueueRole === 'follower' && Boolean(state.followingUserId);
+  const jamActive = state.sharedQueueJamActive;
+  elements.queueJamControls.hidden = !isFollower || jamActive;
+  if (!isFollower || jamActive) return;
+  elements.requestJamButton.disabled = state.sharedQueueJamRequestPending
+    || state.sharedQueueRevision < 1
+    || !state.socket?.connected;
+  elements.requestJamButton.setAttribute(
+    'aria-label',
+    state.sharedQueueJamRequestPending ? 'Esperando respuesta a la propuesta de Jam' : 'Proponer Jam'
+  );
+  elements.requestJamButton.title = state.sharedQueueJamRequestPending
+    ? 'Esperando respuesta a la propuesta de Jam'
+    : 'Proponer Jam';
+  elements.requestJamButton.innerHTML = state.sharedQueueJamRequestPending
+    ? '<span class="sync-spinner" aria-hidden="true"></span>'
+    : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17V5l11-2v12M10 17c0 1.7-1.6 3-3.5 3S3 19 3 17.5 4.6 15 6.5 15s3.5.9 3.5 2Zm11-2c0 1.7-1.6 3-3.5 3S14 17 14 15.5s1.6-2.5 3.5-2.5 3.5.9 3.5 2Zm-4-10v5m-2.5-2.5h5"/></svg>';
 }
 
-function requestSharedQueueAdd(song) {
-  const songId = getSongId(song);
+function showJamRequestNotification(requestId, followerId) {
+  if (
+    state.sharedQueueRole !== 'host'
+    || !state.sharedQueueSessionId
+    || !requestId
+    || !elements.jamRequestNotification
+  ) return;
+  state.hostJamRequestId = String(requestId);
+  const friend = state.friends.find(item => String(item._id) === String(followerId));
+  elements.jamRequestMessage.textContent = `${friend?.username || 'Un amigo'} quiere controlar la reproducción contigo.`;
+  elements.jamRequestNotification.hidden = false;
+  elements.acceptJamRequest.focus();
+}
+
+function closeJamRequestNotification(requestId = '') {
+  if (requestId && String(requestId) !== state.hostJamRequestId) return;
+  state.hostJamRequestId = '';
+  elements.jamRequestNotification.hidden = true;
+  elements.acceptJamRequest.disabled = false;
+  elements.declineJamRequest.disabled = false;
+}
+
+function respondToJamRequest(accepted) {
   const socket = state.socket;
   const sessionId = state.sharedQueueSessionId;
-  if (!socket?.connected || !sessionId || !songId) {
-    showToast('No se pudo conectar a la cola compartida.', true);
-    return;
-  }
-  const currentCount = state.sharedQueueIds.filter(id => id === songId).length;
-  const pendingCount = state.pendingSharedQueueAdds.filter(item => item.songId === songId).length;
-  if (getDisplayedSharedQueueIds().length >= 5000) {
-    showToast('La cola compartida alcanzó el máximo de 5000 canciones.', true);
-    return;
-  }
-  const pending = {
-    songId,
+  const requestId = state.hostJamRequestId;
+  if (!socket?.connected || !sessionId || !requestId) return;
+  elements.acceptJamRequest.disabled = true;
+  elements.declineJamRequest.disabled = true;
+  socket.timeout(7000).emit('listenTogetherJamResponse', {
     sessionId,
-    baselineCount: currentCount + pendingCount
-  };
-  state.pendingSharedQueueAdds.push(pending);
-  renderPlayerQueue({ syncAccount: false });
-  showToast('Añadida localmente; sincronizando con el anfitrión…');
-  socket.timeout(7000).emit('listenTogetherQueueAddRequest', {
-    sessionId,
-    songId
+    requestId,
+    accepted
   }, (timeoutError, response) => {
-    if (socket !== state.socket || sessionId !== state.sharedQueueSessionId) {
-      state.pendingSharedQueueAdds = state.pendingSharedQueueAdds.filter(item => item !== pending);
+    if (socket !== state.socket || sessionId !== state.sharedQueueSessionId
+      || requestId !== state.hostJamRequestId) return;
+    if (!response?.success) {
+      elements.acceptJamRequest.disabled = false;
+      elements.declineJamRequest.disabled = false;
+      showToast(response?.error || (timeoutError
+        ? 'No se pudo responder a la solicitud de Jam.'
+        : 'La solicitud de Jam ya no está disponible.'), true);
       return;
     }
-    const snapshotIncludesAddition = state.sharedQueueIds
-      .filter(id => id === songId).length > pending.baselineCount;
-    const success = Boolean(response?.success || snapshotIncludesAddition);
-    settleSharedQueueAdd(pending, success);
-    if (success) {
-      showToast('Canción añadida a la cola compartida.');
-    } else {
+    closeJamRequestNotification(requestId);
+  });
+}
+
+function requestJam() {
+  const socket = state.socket;
+  const sessionId = state.sharedQueueSessionId;
+  if (
+    !socket?.connected
+    || state.sharedQueueRole !== 'follower'
+    || !state.followingUserId
+    || !sessionId
+    || state.sharedQueueRevision < 1
+    || state.sharedQueueJamRequestPending
+    || state.sharedQueueJamActive
+  ) return;
+  state.sharedQueueJamRequestPending = true;
+  updateJamControls();
+  socket.timeout(7000).emit('listenTogetherJamRequest', { sessionId }, (timeoutError, response) => {
+    if (socket !== state.socket || sessionId !== state.sharedQueueSessionId) return;
+    if (!response?.success) {
+      state.sharedQueueJamRequestPending = false;
+      state.sharedQueueJamRequestId = '';
+      updateJamControls();
       showToast(response?.error || (timeoutError
-        ? 'El anfitrión no confirmó la canción a tiempo.'
-        : 'No se pudo añadir a la cola compartida.'), true);
+        ? 'No se pudo enviar la solicitud de Jam.'
+        : 'No se pudo proponer la Jam.'), true);
+      return;
+    }
+    state.sharedQueueJamRequestId = String(response.requestId || '');
+    updateJamControls();
+  });
+}
+
+function applyJamQueue(songIds, { hostCommand = false } = {}) {
+  if (!Array.isArray(songIds) || songIds.length > 5000) return false;
+  const tracks = songIds.map(songId => (
+    state.songs.find(song => getSongId(song) === String(songId))
+  ));
+  if (tracks.some(song => !song)) return false;
+  state.sharedQueueIds = songIds.map(String);
+  if (hostCommand) {
+    const currentSong = getCurrentSong();
+    const playedQueue = currentSong && state.currentQueueKind === 'source' && state.queueIndex >= 0
+      ? state.queue.slice(0, state.queueIndex + 1)
+      : currentSong ? [currentSong] : [];
+    state.queue = [...playedQueue, ...tracks];
+    state.queueIndex = currentSong ? state.queue.length - tracks.length - 1 : -1;
+    state.currentTrack = currentSong;
+    state.currentQueueKind = 'source';
+    state.queueTitle = state.sharedQueueHostQueueName || state.queueTitle || 'GENERAL';
+    state.shuffle = false;
+    state.shuffleQueue = [];
+    state.sharedQueueSnapshotSignature = '';
+    renderPlayerQueue({ syncAccount: false, syncShared: false });
+  } else {
+    renderPlayerQueue({ syncAccount: false, syncShared: false });
+  }
+  return true;
+}
+
+function applyJamUpcomingQueue(songIds, { hostCommand = false } = {}) {
+  if (!Array.isArray(songIds) || songIds.length > 5000) return false;
+  const tracks = songIds.map(songId => (
+    state.songs.find(song => getSongId(song) === String(songId))
+  ));
+  if (tracks.some(song => !song)) return false;
+  state.sharedQueueUpcomingIds = songIds.map(String);
+  if (hostCommand) {
+    state.upcomingQueue = tracks;
+    persistUpcomingQueue();
+  }
+  renderPlayerQueue({ syncAccount: false, syncShared: false });
+  return true;
+}
+
+function requestSharedJamQueueUpdate(songIds) {
+  const socket = state.socket;
+  const sessionId = state.sharedQueueSessionId;
+  if (
+    !socket?.connected
+    || !sessionId
+    || state.sharedQueueRole !== 'follower'
+    || !state.sharedQueueJamActive
+    || state.sharedQueueJamUpdateInFlight
+    || songIds.length > 5000
+  ) return;
+  const normalizedSongIds = songIds.map(String);
+  const tracks = normalizedSongIds.map(songId => (
+    state.songs.find(song => getSongId(song) === songId)
+  ));
+  if (tracks.some(song => !song)) {
+    showToast('Una canción de la cola no está disponible en este dispositivo.', true);
+    return;
+  }
+  const revision = state.sharedQueueRevision;
+  const signature = normalizedSongIds.join(',');
+  state.sharedQueueJamUpdateInFlight = true;
+  state.sharedQueueJamPendingUpcomingIds = normalizedSongIds;
+  renderPlayerQueue({ syncAccount: false, syncShared: false });
+  socket.timeout(9000).emit('listenTogetherJamQueueUpdateRequest', {
+    sessionId,
+    revision,
+    songIds: normalizedSongIds
+  }, (timeoutError, response) => {
+    if (socket !== state.socket || sessionId !== state.sharedQueueSessionId) return;
+    state.sharedQueueJamUpdateInFlight = false;
+    if (response?.success) {
+      state.sharedQueueRevision = Math.max(state.sharedQueueRevision, Number(response.revision) || 0);
+      if (state.sharedQueueJamPendingUpcomingIds?.join(',') === signature) {
+        state.sharedQueueUpcomingIds = normalizedSongIds;
+        state.sharedQueueJamPendingUpcomingIds = null;
+      }
+      renderPlayerQueue({ syncAccount: false, syncShared: false });
+      return;
+    }
+    if (Array.isArray(response?.upcomingSongIds)) {
+      state.sharedQueueUpcomingIds = response.upcomingSongIds.map(String);
+      state.sharedQueueRevision = Number(response.revision) || state.sharedQueueRevision;
+    } else {
+      socket.emit('listenTogetherQueueSnapshotRequest', { sessionId });
+    }
+    state.sharedQueueJamPendingUpcomingIds = null;
+    renderPlayerQueue({ syncAccount: false, syncShared: false });
+    showToast(response?.error || (timeoutError
+      ? 'El anfitrión no confirmó el cambio de la cola.'
+      : 'No se pudo actualizar la cola de la Jam.'), true);
+  });
+}
+
+function requestSharedJamPlayback(action, songId = '', queueKind = 'source') {
+  const socket = state.socket;
+  const sessionId = state.sharedQueueSessionId;
+  if (
+    !socket?.connected
+    || !sessionId
+    || state.sharedQueueRole !== 'follower'
+    || !state.sharedQueueJamActive
+  ) return;
+  if (state.sharedQueueJamUpdateInFlight) {
+    showToast('Espera a que se sincronice el cambio de la cola.', true);
+    return;
+  }
+  socket.timeout(8000).emit('listenTogetherJamPlaybackRequest', {
+    sessionId,
+    action,
+    songId,
+    queueKind
+  }, (timeoutError, response) => {
+    if (socket !== state.socket || sessionId !== state.sharedQueueSessionId) return;
+    if (!response?.success) {
+      showToast(response?.error || (timeoutError
+        ? 'El anfitrión no respondió al control.'
+        : 'No se pudo controlar la reproducción.'), true);
     }
   });
 }
@@ -4605,6 +5065,7 @@ function flushPendingAccountQueue(quiet = false) {
   const socket = state.socket;
   const finish = (retryNewerIntent = false, attemptedIds = null) => {
     state.accountQueueSyncInFlight = false;
+    renderPlayerQueue({ syncAccount: false });
     if (
       retryNewerIntent
       && state.accountQueuePendingIds
@@ -4700,6 +5161,13 @@ function syncAccountQueue() {
 }
 
 function removeUpcomingTrack(position) {
+  if (state.sharedQueueRole === 'follower') {
+    if (!state.sharedQueueJamActive) return;
+    const upcomingIds = [...getDisplayedSharedUpcomingIds()];
+    upcomingIds.splice(position, 1);
+    requestSharedJamQueueUpdate(upcomingIds);
+    return;
+  }
   if (
     getRemotePlaybackSession()
     || Array.isArray(state.accountQueuePendingIds)
@@ -4715,7 +5183,20 @@ function removeUpcomingTrack(position) {
 }
 
 function reorderUpcomingQueue(from, to) {
-  if (getRemotePlaybackSession()) {
+  if (state.sharedQueueRole === 'follower') {
+    if (!state.sharedQueueJamActive) return;
+    const upcomingIds = [...getDisplayedSharedUpcomingIds()];
+    if (from === to || from < 0 || from >= upcomingIds.length || to < 0 || to >= upcomingIds.length) return;
+    const [songId] = upcomingIds.splice(from, 1);
+    upcomingIds.splice(to, 0, songId);
+    requestSharedJamQueueUpdate(upcomingIds);
+    return;
+  }
+  if (
+    getRemotePlaybackSession()
+    || Array.isArray(state.accountQueuePendingIds)
+    || state.accountQueueSnapshotCached
+  ) {
     reorderAccountQueue(from, to);
     return;
   }
@@ -4808,8 +5289,17 @@ async function playUpcomingTrack(index) {
   const song = skippedTracks[skippedTracks.length - 1];
   persistUpcomingQueue();
   pushPlaybackHistory();
+  const sourceQueueIndex = state.queue.findIndex(track => getSongId(track) === getSongId(song));
+  if (sourceQueueIndex >= 0) {
+    if (state.shuffle) {
+      state.shuffleQueue = state.shuffleQueue.filter(index => index !== sourceQueueIndex);
+    } else {
+      state.queueIndex = sourceQueueIndex;
+    }
+  }
   state.currentTrack = song;
   state.currentQueueKind = 'upcoming';
+  persistLastPlayback(0);
   emitSharedQueueSnapshot();
   return loadTrack(song);
 }
@@ -4826,12 +5316,15 @@ async function loadTrack(song, {
 } = {}) {
   if (autoplay && isRemotePlaybackLocked()) return false;
   const loadSequence = ++trackLoadSequence;
+  state.loadingTrackId = getSongId(song);
+  updateSongLoadingIndicators();
   currentTrackShouldAutoplay = autoplay;
   activeTrackUsingOfflineCache = false;
   activeTrackFallbackState = fallbackState || {
     cache: cacheOnly || bypassOfflineCache
   };
   const source = song.path || song.audioUrl || '';
+  let audioSourceAssigned = false;
   try {
     let mediaUrl = source ? resolveMediaUrl(source) : '';
     const mediaKey = `song:${getSongId(song)}:audio`;
@@ -4887,6 +5380,7 @@ async function loadTrack(song, {
       }, { once: true });
     }
     elements.audio.src = mediaUrl;
+    audioSourceAssigned = true;
     elements.audio.load();
     updatePlayerUI();
     if (autoplay) {
@@ -4922,6 +5416,8 @@ async function loadTrack(song, {
     return true;
   } catch (error) {
     if (loadSequence !== trackLoadSequence) return false;
+    state.loadingTrackId = '';
+    updateSongLoadingIndicators();
     if (error.name === 'AbortError' && !currentTrackShouldAutoplay) return false;
     if (
       (
@@ -4942,15 +5438,27 @@ async function loadTrack(song, {
         awaitPlaybackStart
       });
     }
+
     console.error('No se pudo reproducir la canción.', error);
     if (sync && error.name === 'NotAllowedError') state.followNeedsUserGesture = true;
-    if (showError) {
+    const audioErrorWillBeReported = audioSourceAssigned
+      && Boolean(elements.audio.error)
+      && Boolean(state.queue.length)
+      && currentTrackShouldAutoplay
+      && !isActivatingPlaybackTransfer;
+    if (showError && !audioErrorWillBeReported) {
       showToast(error.name === 'NotAllowedError'
         ? 'El navegador bloqueó la reproducción. Toca reproducir de nuevo.'
         : error.message || getAudioErrorMessage(), true);
     }
     return false;
   }
+}
+
+function updateSongLoadingIndicators() {
+  document.querySelectorAll('.song-row[data-song-id], .queue-row[data-song-id]').forEach(row => {
+    updateSongLoadingIndicator(row);
+  });
 }
 
 async function playTrack(queue, index, {
@@ -4978,6 +5486,9 @@ async function playTrack(queue, index, {
   state.currentTrack = state.queue[index];
   state.currentQueueKind = 'source';
   state.queueTitle = queueTitle || 'GENERAL';
+  if (state.sharedQueueRole === 'host' && state.sharedQueueJamActive) {
+    state.sharedQueueHostQueueName = state.queueTitle;
+  }
   state.playbackHistory = [];
   if (state.shuffle) rebuildShuffleQueue();
   else state.shuffleQueue = [];
@@ -5503,7 +6014,13 @@ function playNext(direction = 1) {
     void requestRemotePlaybackControl(direction > 0 ? 'next' : 'previous');
     return;
   }
-  if (state.followingUserId || isRemotePlaybackLocked()) return;
+  if (state.followingUserId) {
+    if (state.sharedQueueJamActive) {
+      requestSharedJamPlayback(direction > 0 ? 'next' : 'previous');
+    }
+    return;
+  }
+  if (isRemotePlaybackLocked()) return;
   if (direction > 0 && state.upcomingQueue.length && state.sharedQueueRole !== 'follower') {
     void playUpcomingTrack(0);
     return;
@@ -5634,13 +6151,19 @@ function emitSharedQueueSnapshot() {
   const sourceQueue = state.shuffle
     ? state.shuffleQueue.map(index => state.queue[index])
     : state.queue.slice(state.queueIndex + 1);
-  const songIds = [...state.upcomingQueue, ...sourceQueue].map(getSongId).filter(Boolean).slice(0, 5000);
-  const signature = `${state.sharedQueueSessionId}:${songIds.join(',')}`;
+  const songIds = sourceQueue.map(getSongId).filter(Boolean).slice(0, 5000);
+  const upcomingSongIds = state.upcomingQueue.map(getSongId).filter(Boolean).slice(0, 5000);
+  const queueName = state.sharedQueueJamActive
+    ? state.sharedQueueHostQueueName
+    : state.queueTitle;
+  const signature = `${state.sharedQueueSessionId}:${queueName}:${songIds.join(',')}:${upcomingSongIds.join(',')}`;
   if (signature === state.sharedQueueSnapshotSignature) return;
   state.sharedQueueSnapshotSignature = signature;
   state.socket.emit('listenTogetherQueueSnapshot', {
     sessionId: state.sharedQueueSessionId,
-    songIds
+    songIds,
+    upcomingSongIds,
+    queueName
   }, response => {
     if (!response?.success) {
       if (state.sharedQueueSnapshotSignature === signature) state.sharedQueueSnapshotSignature = '';
@@ -6132,11 +6655,32 @@ function connectRealtime() {
     void loadUnreadMessages(true);
     if (state.activeChatFriend) void loadChatMessages();
   });
-  socket.on('listenTogetherQueueSessionStarted', ({ sessionId, peerId } = {}) => {
+  socket.on('listenTogetherQueueSessionStarted', ({
+    sessionId,
+    peerId,
+    jamActive = false,
+    songIds = [],
+    upcomingSongIds = [],
+    revision = 0,
+    queueName = 'GENERAL'
+  } = {}) => {
     if (!sessionId || !peerId) return;
     state.sharedQueueSessionId = String(sessionId);
     state.sharedQueueRole = 'host';
+    state.sharedQueueRevision = Number(revision) || 0;
+    state.sharedQueueIds = Array.isArray(songIds) ? songIds.map(String) : [];
+    state.sharedQueueUpcomingIds = Array.isArray(upcomingSongIds) ? upcomingSongIds.map(String) : [];
+    state.sharedQueueHostQueueName = typeof queueName === 'string' && queueName.trim()
+      ? queueName.trim()
+      : 'GENERAL';
+    state.sharedQueueJamActive = Boolean(jamActive);
+    state.hostJamRequestId = '';
     state.sharedQueueSnapshotSignature = '';
+    if (state.sharedQueueJamActive) {
+      applyJamQueue(state.sharedQueueIds, { hostCommand: true });
+      applyJamUpcomingQueue(state.sharedQueueUpcomingIds, { hostCommand: true });
+      return;
+    }
     emitSharedQueueSnapshot();
     renderPlayerQueue();
   });
@@ -6145,43 +6689,177 @@ function connectRealtime() {
       emitSharedQueueSnapshot();
     }
   });
-  socket.on('listenTogetherQueueSnapshot', ({ sessionId, revision, songIds } = {}) => {
+  socket.on('listenTogetherQueueSnapshot', ({
+    sessionId,
+    revision,
+    songIds,
+    upcomingSongIds = [],
+    queueName = state.sharedQueueHostQueueName
+  } = {}) => {
     if (
-      state.sharedQueueRole !== 'follower'
-      || String(sessionId) !== String(state.sharedQueueSessionId)
+      String(sessionId) !== String(state.sharedQueueSessionId)
       || !Number.isInteger(revision)
       || revision <= state.sharedQueueRevision
       || !Array.isArray(songIds)
+      || !Array.isArray(upcomingSongIds)
     ) return;
     state.sharedQueueRevision = revision;
     state.sharedQueueIds = songIds.map(String);
+    state.sharedQueueUpcomingIds = upcomingSongIds.map(String);
+    state.sharedQueueHostQueueName = typeof queueName === 'string' && queueName.trim()
+      ? queueName.trim()
+      : 'GENERAL';
+    if (state.sharedQueueRole === 'host') return;
+    if (state.sharedQueueRole !== 'follower') return;
+    if (state.sharedQueueJamPendingUpcomingIds?.join(',') === state.sharedQueueUpcomingIds.join(',')) {
+      state.sharedQueueJamPendingUpcomingIds = null;
+      state.sharedQueueJamUpdateInFlight = false;
+    }
     renderPlayerQueue();
   });
-  socket.on('listenTogetherQueueAddRequest', ({ sessionId, songId } = {}, acknowledge = () => {}) => {
-    if (state.sharedQueueRole !== 'host' || String(sessionId) !== String(state.sharedQueueSessionId)) {
-      acknowledge({ success: false, error: 'El anfitrión no está conectado a esta cola.' });
+  socket.on('listenTogetherJamRequestReceived', ({ sessionId, requestId, followerId } = {}) => {
+    if (String(sessionId) !== String(state.sharedQueueSessionId)) return;
+    showJamRequestNotification(requestId, followerId);
+  });
+  socket.on('listenTogetherJamRequestClosed', ({ sessionId, requestId, reason } = {}) => {
+    if (String(sessionId) !== String(state.sharedQueueSessionId)) return;
+    if (
+      state.sharedQueueJamRequestPending
+      && (!state.sharedQueueJamRequestId || state.sharedQueueJamRequestId === String(requestId || ''))
+    ) {
+      state.sharedQueueJamRequestPending = false;
+      state.sharedQueueJamRequestId = '';
+      updateJamControls();
+      if (reason === 'expired') showToast('La solicitud de Jam venció sin respuesta.', true);
+    }
+    closeJamRequestNotification(requestId);
+  });
+  socket.on('listenTogetherJamState', ({
+    sessionId,
+    requestId,
+    active,
+    accepted,
+    songIds,
+    upcomingSongIds = [],
+    revision,
+    queueName = state.sharedQueueHostQueueName
+  } = {}) => {
+    if (String(sessionId) !== String(state.sharedQueueSessionId)) return;
+    if (requestId) {
+      state.sharedQueueJamRequestPending = false;
+      state.sharedQueueJamRequestId = '';
+    }
+    if (!accepted) {
+      state.sharedQueueJamActive = false;
+      closeJamRequestNotification(requestId);
+      renderPlayerQueue();
+      if (state.sharedQueueRole === 'follower') {
+        showToast('El anfitrión rechazó la propuesta de Jam.', true);
+      }
       return;
     }
-    const song = state.songs.find(item => getSongId(item) === String(songId));
-    if (!song) {
-      acknowledge({ success: false, error: 'La canción no está disponible en la biblioteca.' });
+    state.sharedQueueJamActive = Boolean(active);
+    state.sharedQueueJamUpdateInFlight = false;
+    state.sharedQueueJamPendingUpcomingIds = null;
+    state.sharedQueueRevision = Number(revision) || state.sharedQueueRevision;
+    state.sharedQueueHostQueueName = typeof queueName === 'string' && queueName.trim()
+      ? queueName.trim()
+      : 'GENERAL';
+    state.sharedQueueIds = Array.isArray(songIds) ? songIds.map(String) : [];
+    state.sharedQueueUpcomingIds = Array.isArray(upcomingSongIds) ? upcomingSongIds.map(String) : [];
+    if (state.sharedQueueJamActive) {
+      const applied = applyJamQueue(state.sharedQueueIds, {
+        hostCommand: state.sharedQueueRole === 'host'
+      });
+      const upcomingApplied = applyJamUpcomingQueue(state.sharedQueueUpcomingIds, {
+        hostCommand: state.sharedQueueRole === 'host'
+      });
+      if (!applied || !upcomingApplied) {
+        showToast('No se pudo preparar la cola de la Jam; revisa que las canciones estén cargadas.', true);
+        return;
+      }
+      showToast(state.sharedQueueRole === 'host'
+        ? 'Jam iniciada; la cola y la reproducción se comparten.'
+        : 'Jam aceptada; puedes controlar la reproducción y editar «A continuación».');
+    }
+    closeJamRequestNotification(requestId);
+    updateJamControls();
+  });
+  socket.on('listenTogetherJamQueueReplaceCommand', ({
+    sessionId,
+    requestId,
+    revision,
+    songIds
+  } = {}, acknowledge = () => {}) => {
+    if (
+      state.sharedQueueRole !== 'host'
+      || !state.sharedQueueJamActive
+      || String(sessionId) !== String(state.sharedQueueSessionId)
+      || revision !== state.sharedQueueRevision
+    ) {
+      acknowledge({ success: false, error: 'La Jam cambió; vuelve a sincronizar la cola.' });
       return;
     }
-    if (state.upcomingQueue.length >= 5000) {
-      acknowledge({ success: false, error: 'La cola compartida alcanzó el máximo de 5000 canciones.' });
+    const success = applyJamUpcomingQueue(songIds, { hostCommand: true });
+    acknowledge(success
+      ? { success: true, requestId }
+      : { success: false, error: 'La cola contiene canciones no disponibles en el dispositivo anfitrión.' });
+  });
+  socket.on('listenTogetherJamPlaybackCommand', async ({
+    sessionId,
+    action,
+    songId,
+    queueKind = 'source'
+  } = {}, acknowledge = () => {}) => {
+    if (
+      state.sharedQueueRole !== 'host'
+      || !state.sharedQueueJamActive
+      || String(sessionId) !== String(state.sharedQueueSessionId)
+    ) {
+      acknowledge({ success: false, error: 'La Jam ya no está activa en el anfitrión.' });
       return;
     }
-    state.upcomingQueue.push(song);
-    persistUpcomingQueue();
-    emitSharedQueueSnapshot();
-    renderPlayerQueue();
-    acknowledge({ success: true });
+    try {
+      if (action === 'playTrack') {
+        const requestedSongId = String(songId || '');
+        const targetQueue = queueKind === 'upcoming' ? state.upcomingQueue : state.queue;
+        const queuePosition = targetQueue.findIndex(song => getSongId(song) === requestedSongId);
+        if (queuePosition < 0) {
+          acknowledge({ success: false, error: 'La canción ya no está en la cola de la Jam.' });
+          return;
+        }
+        if (requestedSongId === getSongId(getCurrentSong())) {
+          acknowledge({ success: true });
+          return;
+        }
+        const started = queueKind === 'upcoming'
+          ? await playUpcomingTrack(queuePosition)
+          : await playSourceQueueTrack(queuePosition);
+        acknowledge(started === false
+          ? { success: false, error: 'No se pudo reproducir la canción en el anfitrión.' }
+          : { success: true });
+        return;
+      }
+      if (action === 'next') await playNext(1);
+      else if (action === 'previous') await playNext(-1);
+      else if (action === 'pause') elements.audio.pause();
+      else if (action === 'play') await elements.audio.play();
+      else {
+        acknowledge({ success: false, error: 'Control de reproducción no válido.' });
+        return;
+      }
+      acknowledge({ success: true });
+    } catch (error) {
+      console.error('No se pudo aplicar un control remoto de Jam.', error);
+      acknowledge({ success: false, error: error.message || 'No se pudo controlar la reproducción.' });
+    }
   });
   socket.on('accountQueueSnapshot', ({ revision, songIds } = {}) => {
     if (!Number.isInteger(revision) || revision <= state.accountQueueRevision || !Array.isArray(songIds)) return;
     state.accountQueueRevision = revision;
     state.accountQueueIds = songIds.map(String);
     state.accountQueueSnapshotSignature = state.accountQueueIds.join(',');
+    state.accountQueueSnapshotCached = true;
     persistAccountQueueSnapshot();
     const pendingMatchesServer = state.accountQueuePendingIds
       && state.accountQueuePendingIds.join(',') === state.accountQueueIds.join(',');
@@ -6332,10 +7010,25 @@ function joinSharedQueue(hostId) {
     }
     state.sharedQueueSessionId = response.sessionId;
     state.sharedQueueRole = 'follower';
-    state.sharedQueueRevision = 0;
-    socket.emit('listenTogetherQueueSnapshotRequest', { sessionId: response.sessionId }, result => {
-      if (!result?.success) showToast(result?.error || 'No se pudo cargar la cola compartida.', true);
-    });
+    state.sharedQueueRevision = Number(response.revision) || 0;
+    state.sharedQueueIds = Array.isArray(response.songIds) ? response.songIds.map(String) : [];
+    state.sharedQueueUpcomingIds = Array.isArray(response.upcomingSongIds)
+      ? response.upcomingSongIds.map(String)
+      : [];
+    state.sharedQueueHostQueueName = typeof response.queueName === 'string' && response.queueName.trim()
+      ? response.queueName.trim()
+      : 'GENERAL';
+    state.sharedQueueJamActive = Boolean(response.jamActive);
+    state.sharedQueueJamRequestPending = false;
+    state.sharedQueueJamRequestId = '';
+    state.sharedQueueJamUpdateInFlight = false;
+    state.sharedQueueJamPendingUpcomingIds = null;
+    renderPlayerQueue();
+    if (!Array.isArray(response.songIds) || state.sharedQueueRevision < 1) {
+      socket.emit('listenTogetherQueueSnapshotRequest', { sessionId: response.sessionId }, result => {
+        if (!result?.success) showToast(result?.error || 'No se pudo cargar la cola compartida.', true);
+      });
+    }
   });
 }
 
@@ -6344,8 +7037,16 @@ function clearSharedQueueState() {
   state.sharedQueueRole = null;
   state.sharedQueueRevision = 0;
   state.sharedQueueIds = [];
-  state.pendingSharedQueueAdds = [];
+  state.sharedQueueUpcomingIds = [];
+  state.sharedQueueHostQueueName = 'GENERAL';
+  state.sharedQueueJamActive = false;
+  state.sharedQueueJamRequestPending = false;
+  state.sharedQueueJamRequestId = '';
+  state.sharedQueueJamUpdateInFlight = false;
+  state.sharedQueueJamPendingUpcomingIds = null;
   state.sharedQueueSnapshotSignature = '';
+  closeJamRequestNotification();
+  updateJamControls();
 }
 
 function leaveSharedQueue() {
@@ -6584,6 +7285,12 @@ async function resumeAudioPlayback() {
 
 async function togglePlayback() {
   if (getRemotePlaybackSession()) return requestRemotePlaybackControl('toggle');
+  if (state.followingUserId) {
+    if (state.sharedQueueJamActive) {
+      requestSharedJamPlayback(elements.audio.paused ? 'play' : 'pause');
+    }
+    return false;
+  }
   if (isRemotePlaybackLocked()) return false;
   if (!getCurrentSong()) {
     if (state.songs.length) return playTrack(state.songs, 0);
@@ -6667,7 +7374,11 @@ function handlePlaybackNotificationAction(action) {
 async function loadLibrary(initialUser = null) {
   const requestSequence = ++libraryRequestSequence;
   libraryRevision += 1;
+  state.catalogLoading = true;
+  state.catalogLoadError = '';
+  if (state.currentTab === 'songs' && !state.currentPlaylistId) renderCurrentView();
   const userId = String(state.user?._id || '');
+  let libraryRequest = null;
   const previousPlayback = {
     queue: [...state.queue],
     currentTrack: getCurrentSong(),
@@ -6675,16 +7386,84 @@ async function loadLibrary(initialUser = null) {
     currentTime: Number(elements.audio.currentTime) || 0,
     wasPlaying: !elements.audio.paused && !elements.audio.ended
   };
+  const cachedUser = initialUser || state.user;
+  const cachedUserId = String(cachedUser?._id || '');
+  if (cachedUserId) {
+    state.offlineEnabled = localStorage.getItem(`amgc-offline-enabled-${cachedUserId}`) === 'true';
+  }
+  if (cachedUserId) {
+    try {
+      const [offlineLibrary, offlinePlaylists, offlineFriends] = await Promise.all([
+        getOfflineLibrary(cachedUserId),
+        getOfflinePlaylists(cachedUserId),
+        getOfflineFriends(cachedUserId)
+      ]);
+      if (
+        requestSequence === libraryRequestSequence
+        && String(state.user?._id || cachedUserId) === cachedUserId
+        && (Array.isArray(offlineLibrary?.songs) || Array.isArray(offlinePlaylists?.playlists))
+      ) {
+        state.user = cachedUser;
+        if (Array.isArray(offlineLibrary?.songs)) state.songs = offlineLibrary.songs;
+        state.playlists = offlinePlaylists?.playlists || [];
+        state.friends = offlineFriends?.friends || state.friends;
+        restoreAccountQueueSnapshot(cachedUserId);
+        restorePendingAccountQueueIds(cachedUserId);
+        updateNavigationState();
+        renderCurrentView();
+        updatePlayerUI();
+        void refreshOfflineAudioAvailability();
+        updateOfflineStatus('Biblioteca local lista; comprobando cambios en segundo plano…');
+        if (navigator.onLine) {
+          libraryRequest = Promise.all([
+            request('/songs'),
+            request('/playlists'),
+            initialUser ? Promise.resolve(initialUser) : request('/auth/me')
+          ]);
+          libraryRequest.catch(() => {});
+        }
+        await reconcilePlaybackLibrary(previousPlayback);
+        await hydrateCurrentOfflineImages();
+        if (requestSequence !== libraryRequestSequence) return;
+        updateNavigationState();
+        renderCurrentView();
+        updatePlayerUI();
+        void refreshOfflineAudioAvailability();
+        void restoreLastPlayback().catch(error => {
+          console.warn('No se pudo restaurar la reproducción guardada localmente.', error);
+        });
+      }
+    } catch (error) {
+      console.warn('No se pudo preparar la biblioteca local antes de sincronizar.', error);
+    }
+  }
   try {
-    const [songResult, playlistResult, user] = await Promise.all([
+    const [songResult, playlistResult, user] = await (libraryRequest || Promise.all([
       request('/songs'),
       request('/playlists'),
       initialUser ? Promise.resolve(initialUser) : request('/auth/me')
-    ]);
+    ]));
     if (requestSequence !== libraryRequestSequence || (userId && String(state.user?._id || '') !== userId)) return;
-    state.songs = Array.isArray(songResult?.songs) ? songResult.songs : [];
+    if (!Array.isArray(songResult?.songs)) {
+      throw new Error('El servidor devolvió un catálogo de canciones inválido.');
+    }
+    state.songs = songResult.songs;
+    const pendingTracksByPlaylist = new Map(state.playlists.map(playlist => [
+      String(playlist.id),
+      (playlist.tracks || []).filter(track => track.syncPending)
+    ]).filter(([, tracks]) => tracks.length));
     state.playlists = Array.isArray(playlistResult) ? playlistResult : [];
+    state.playlists.forEach(playlist => {
+      const pendingTracks = pendingTracksByPlaylist.get(String(playlist.id)) || [];
+      pendingTracks.forEach(track => {
+        if (!(playlist.tracks || []).some(item => getSongId(item) === getSongId(track))) {
+          playlist.tracks = [...(playlist.tracks || []), track];
+        }
+      });
+    });
     state.user = user;
+    state.catalogLoading = false;
+    state.catalogLoadError = '';
     restoreAccountQueueSnapshot(String(user?._id || ''));
     restorePendingAccountQueueIds(String(user?._id || ''));
     await reconcilePlaybackLibrary(previousPlayback);
@@ -6713,6 +7492,7 @@ async function loadLibrary(initialUser = null) {
       saveOfflineLibrary(user._id, state.songs),
       saveOfflinePlaylists(user._id, state.playlists)
     ]).then(() => {
+      if (navigator.onLine) void syncPendingPlaylistAdds();
       if (state.offlineEnabled && navigator.onLine) void downloadOfflineLibrary();
     }).catch(error => console.warn('No se pudo guardar la biblioteca para uso offline.', error));
     void loadSecondaryLibraryData();
@@ -6729,17 +7509,22 @@ async function loadLibrary(initialUser = null) {
           getOfflinePlaylists(state.user._id),
           getOfflineFriends(state.user._id)
         ]);
-        if (offlineLibrary?.songs || offlinePlaylists?.playlists) {
-          state.songs = offlineLibrary?.songs || [];
+        if (Array.isArray(offlineLibrary?.songs) || Array.isArray(offlinePlaylists?.playlists)) {
+          if (Array.isArray(offlineLibrary?.songs)) state.songs = offlineLibrary.songs;
           state.playlists = offlinePlaylists?.playlists || [];
           state.friends = offlineFriends?.friends || [];
           restorePendingAccountQueueIds(String(state.user._id));
           await reconcilePlaybackLibrary(previousPlayback);
           state.offlineEnabled = localStorage.getItem(`amgc-offline-enabled-${state.user._id}`) === 'true';
           await hydrateCurrentOfflineImages();
+          state.catalogLoading = false;
+          state.catalogLoadError = Array.isArray(offlineLibrary?.songs)
+            ? 'Sin conexión: mostrando el catálogo guardado.'
+            : 'No hay un catálogo guardado en este dispositivo.';
           updateNavigationState();
           renderCurrentView();
           updatePlayerUI();
+          void refreshOfflineAudioAvailability();
           await restoreLastPlayback();
           updateOfflineStatus('Sin conexión: biblioteca local cargada.');
           return;
@@ -6748,6 +7533,9 @@ async function loadLibrary(initialUser = null) {
         console.error('No se pudo abrir la biblioteca offline.', offlineError);
       }
     }
+    state.catalogLoading = false;
+    state.catalogLoadError = error.message || 'No se pudo cargar el catálogo. Comprueba la conexión e inténtalo de nuevo.';
+    if (state.currentTab === 'songs' && !state.currentPlaylistId) renderCurrentView();
     showToast(error.message || 'No se pudo cargar la biblioteca.', true);
   }
 }
@@ -6799,6 +7587,7 @@ async function restoreCachedLibrary(userId) {
     renderDrawerFriends();
     renderCurrentView();
     updatePlayerUI();
+    void refreshOfflineAudioAvailability();
     await restoreLastPlayback();
   } catch (error) {
     console.warn('No se pudo restaurar la biblioteca móvil guardada.', error);
@@ -7089,9 +7878,11 @@ async function addSongToPlaylist(playlist, songId) {
   }
   if (pendingPlaylistAdds.has(pendingKey)) return;
   pendingPlaylistAdds.add(pendingKey);
+  renderDrawerPlaylists();
   const songDuration = Math.max(0, Number(song.duration) || 0);
   const optimisticTrack = {
     ...song,
+    syncPending: true,
     addedBy: { _id: currentUser._id, username: currentUser.username },
     addedAt: new Date().toISOString()
   };
@@ -7101,11 +7892,9 @@ async function addSongToPlaylist(playlist, songId) {
   targetPlaylist.updatedAt = optimisticTrack.addedAt;
   targetPlaylist.tracks = [...(targetPlaylist.tracks || []), optimisticTrack];
   if (state.currentPlaylistId === playlistId) renderCurrentView();
-  if (state.offlineEnabled) {
-    void saveOfflinePlaylists(currentUser._id, state.playlists).catch(error => {
-      console.error('No se pudo guardar la playlist optimista en la caché offline.', error);
-    });
-  }
+  void saveOfflinePlaylists(currentUser._id, state.playlists).catch(error => {
+    console.error('No se pudo guardar la playlist optimista en la caché offline.', error);
+  });
   showToast(`Agregada localmente; sincronizando “${song.name}”…`);
   try {
     const result = await request(`/playlists/${encodeURIComponent(playlistId)}/tracks`, {
@@ -7119,17 +7908,27 @@ async function addSongToPlaylist(playlist, songId) {
         Number(result.duration)
       );
     }
-    if (state.offlineEnabled) {
-      void saveOfflinePlaylists(currentUser._id, state.playlists).catch(error => {
-        console.error('No se pudo actualizar la caché offline de playlists.', error);
-      });
-    }
+    const confirmedTrack = updatedPlaylist?.tracks.find(track => getSongId(track) === normalizedSongId);
+    if (confirmedTrack) delete confirmedTrack.syncPending;
+    void saveOfflinePlaylists(currentUser._id, state.playlists).catch(error => {
+      console.error('No se pudo actualizar la caché offline de playlists.', error);
+    });
     if (state.currentPlaylistId === playlistId) renderCurrentView();
+    renderDrawerPlaylists();
     showToast(`“${song.name}” se agregó a “${targetPlaylist.name}”.`);
   } catch (error) {
     const updatedPlaylist = state.playlists.find(item => String(item.id) === playlistId);
     const alreadyAdded = /ya está en la playlist/i.test(error.message || '');
-    if (updatedPlaylist && !alreadyAdded) {
+    const shouldQueueForReconnect = !alreadyAdded && (
+      !navigator.onLine || /no se pudo conectar con el servidor amgc/i.test(error.message || '')
+    );
+    if (updatedPlaylist && shouldQueueForReconnect) {
+      optimisticTrack.syncPending = true;
+      void saveOfflinePlaylists(currentUser._id, state.playlists).catch(saveError => {
+        console.error('No se pudo guardar la canción pendiente de sincronización.', saveError);
+      });
+      showToast(`“${song.name}” quedó guardada localmente y se sincronizará al reconectar.`);
+    } else if (updatedPlaylist && !alreadyAdded) {
       const hadOptimisticTrack = (updatedPlaylist.tracks || []).includes(optimisticTrack);
       const hasConfirmedTrack = (updatedPlaylist.tracks || []).some(track => (
         getSongId(track) === normalizedSongId && track !== optimisticTrack
@@ -7140,20 +7939,76 @@ async function addSongToPlaylist(playlist, songId) {
       }
     }
     if (alreadyAdded) {
+      delete optimisticTrack.syncPending;
       void loadLibrary();
       showToast('La canción ya estaba en esta playlist.');
-    } else {
+    } else if (!shouldQueueForReconnect) {
       showToast(error.message || 'No se pudo agregar la canción.', true);
     }
     if (state.currentPlaylistId === playlistId) renderCurrentView();
-    if (state.offlineEnabled) {
-      void saveOfflinePlaylists(currentUser._id, state.playlists).catch(saveError => {
-        console.error('No se pudo revertir la caché offline de playlists.', saveError);
-      });
-    }
+    renderDrawerPlaylists();
+    void saveOfflinePlaylists(currentUser._id, state.playlists).catch(saveError => {
+      console.error('No se pudo actualizar la caché local de playlists.', saveError);
+    });
   } finally {
     pendingPlaylistAdds.delete(pendingKey);
+    renderDrawerPlaylists();
+    if (state.currentPlaylistId === playlistId) renderCurrentView();
   }
+}
+
+async function syncPendingPlaylistAdds() {
+  if (!navigator.onLine || !state.token || !state.user?._id) return;
+  const userId = String(state.user._id);
+  const token = state.token;
+  const playlistsForSync = state.playlists;
+  const isCurrentSync = () => (
+    String(state.user?._id || '') === userId
+    && state.token === token
+    && state.playlists === playlistsForSync
+  );
+  for (const playlist of playlistsForSync) {
+    if (!isCurrentSync()) return;
+    for (const track of playlist.tracks || []) {
+      if (!track.syncPending) continue;
+      const playlistId = String(playlist.id);
+      const songId = getSongId(track);
+      const pendingKey = `${playlistId}:${songId}`;
+      if (pendingPlaylistAdds.has(pendingKey)) continue;
+      pendingPlaylistAdds.add(pendingKey);
+      try {
+        const result = await request(`/playlists/${encodeURIComponent(playlistId)}/tracks`, {
+          method: 'POST',
+          body: JSON.stringify({ userId, songId })
+        });
+        if (!isCurrentSync()) return;
+        if (Number.isFinite(Number(result?.duration))) playlist.duration = Number(result.duration);
+        delete track.syncPending;
+      } catch (error) {
+        if (!isCurrentSync()) return;
+        const status = Number(error?.status);
+        if (/ya está en la playlist/i.test(error?.message || '')) {
+          delete track.syncPending;
+        } else if (status >= 400 && status < 500 && ![408, 429].includes(status)) {
+          const trackIndex = (playlist.tracks || []).indexOf(track);
+          if (trackIndex >= 0) {
+            playlist.tracks.splice(trackIndex, 1);
+            playlist.duration = Math.max(0, (Number(playlist.duration) || 0) - (Number(track.duration) || 0));
+          }
+          delete track.syncPending;
+          showToast(`No se pudo sincronizar “${track.name || 'la canción'}” en “${playlist.name}”.`, true);
+        } else {
+          console.warn(`No se pudo sincronizar la canción pendiente de "${playlist.name}".`, error);
+        }
+      } finally {
+        pendingPlaylistAdds.delete(pendingKey);
+        renderDrawerPlaylists();
+      }
+    }
+  }
+  if (!isCurrentSync()) return;
+  await saveOfflinePlaylists(userId, playlistsForSync);
+  if (state.currentPlaylistId) renderCurrentView();
 }
 
 function openSharePlaylistSheet(playlist) {
@@ -7431,6 +8286,9 @@ elements.miniPlaybackDeviceTrigger.addEventListener('click', event => {
 });
 document.getElementById('player-toggle').addEventListener('click', togglePlayback);
 document.getElementById('mini-toggle').addEventListener('click', togglePlayback);
+elements.requestJamButton.addEventListener('click', requestJam);
+elements.acceptJamRequest.addEventListener('click', () => respondToJamRequest(true));
+elements.declineJamRequest.addEventListener('click', () => respondToJamRequest(false));
 elements.playbackDevicePickerTrigger.addEventListener('click', event => {
   event.stopPropagation();
   setPlaybackDevicePickerOpen(elements.playbackDevicePicker.hidden);
@@ -7616,6 +8474,24 @@ elements.miniProgress.addEventListener('keydown', event => {
   if (remotePlayback) queueRemoteSeek(targetTime);
   else elements.audio.currentTime = targetTime;
 });
+elements.audio.addEventListener('loadstart', () => {
+  const song = getCurrentSong();
+  if (!song) return;
+  state.loadingTrackId = getSongId(song);
+  updateSongLoadingIndicators();
+});
+elements.audio.addEventListener('waiting', () => {
+  const song = getCurrentSong();
+  if (!song) return;
+  state.loadingTrackId = getSongId(song);
+  updateSongLoadingIndicators();
+});
+for (const eventName of ['canplay', 'playing', 'error']) {
+  elements.audio.addEventListener(eventName, () => {
+    state.loadingTrackId = '';
+    updateSongLoadingIndicators();
+  });
+}
 elements.audio.addEventListener('timeupdate', () => {
   if (getRemotePlaybackSession()) {
     updatePlayerUI();

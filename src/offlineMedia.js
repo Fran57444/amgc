@@ -1,6 +1,7 @@
 import {
     getOfflineMedia,
     getOfflineMediaIndex,
+    getOfflineAudioSongIds as getStoredOfflineAudioSongIds,
     saveOfflineMedia
 } from './offlineStore.js';
 
@@ -8,10 +9,20 @@ const OFFLINE_RESOURCE_TIMEOUT_MS = 60000;
 
 export function createOfflineMediaManager({ apiUrl, getState, updateStatus, getActiveObjectUrl }) {
     const objectUrls = new Map();
+    const retiredObjectUrls = new Set();
     let syncInProgress = false;
     let syncRequested = false;
     let cacheCompleted = 0;
     let cacheTotal = 0;
+
+    function releaseRetiredObjectUrls() {
+        const activeObjectUrl = getActiveObjectUrl();
+        retiredObjectUrls.forEach(objectUrl => {
+            if (objectUrl === activeObjectUrl) return;
+            URL.revokeObjectURL(objectUrl);
+            retiredObjectUrls.delete(objectUrl);
+        });
+    }
 
     function getOfflineResourceUrl(resource) {
         const apiOrigin = new URL(apiUrl, window.location.origin).origin;
@@ -25,10 +36,49 @@ export function createOfflineMediaManager({ apiUrl, getState, updateStatus, getA
         return resolvedUrl.href;
     }
 
-    async function getOfflineObjectUrl(key) {
-        if (objectUrls.has(key)) return objectUrls.get(key);
+    function getDriveFileId(resource) {
+        try {
+            const url = new URL(resource, window.location.href);
+            const isDriveHost = /(^|\.)drive\.google\.com$/i.test(url.hostname)
+                || /(^|\.)drive\.usercontent\.google\.com$/i.test(url.hostname);
+            if (isDriveHost) {
+                const fileId = url.searchParams.get('id')
+                    || url.pathname.match(/\/d\/([\w-]+)/)?.[1];
+                if (fileId && /^[\w-]{25,}$/.test(fileId)) return fileId;
+            }
+            return url.pathname.match(/^\/(?:api\/)?media\/([\w-]{25,})$/)?.[1] || null;
+        } catch {
+            return null;
+        }
+    }
+
+    function sameMediaSource(left, right) {
+        if (left === right) return true;
+        const leftDriveId = getDriveFileId(left);
+        return Boolean(leftDriveId && leftDriveId === getDriveFileId(right));
+    }
+
+    async function getOfflineAudioSongIds() {
+        const songsById = new Map();
+        getState().playlist.forEach(song => {
+            const songId = String(song._id || song.id || '');
+            if (songId && !songsById.has(songId)) songsById.set(songId, song);
+        });
+        return getStoredOfflineAudioSongIds((songId, cachedSource) => {
+            const song = songsById.get(songId);
+            const source = song?.path || song?.audioUrl;
+            return Boolean(source
+                && sameMediaSource(cachedSource, getOfflineResourceUrl(source)));
+        });
+    }
+
+    async function getOfflineObjectUrl(key, expectedSource = '') {
+        releaseRetiredObjectUrls();
         const record = await getOfflineMedia(key);
         if (!record?.blob) return null;
+        if (expectedSource && record.sourceUrl
+            && !sameMediaSource(record.sourceUrl, getOfflineResourceUrl(expectedSource))) return null;
+        if (objectUrls.has(key)) return objectUrls.get(key);
         const objectUrl = URL.createObjectURL(record.blob);
         objectUrls.set(key, objectUrl);
         return objectUrl;
@@ -113,9 +163,13 @@ export function createOfflineMediaManager({ apiUrl, getState, updateStatus, getA
         if (!blob.size) throw new Error('El recurso descargado está vacío.');
         await saveOfflineMedia(key, blob, blob.type, resolvedUrl);
         const cachedObjectUrl = objectUrls.get(key);
-        if (cachedObjectUrl && getActiveObjectUrl() !== cachedObjectUrl) {
-            URL.revokeObjectURL(cachedObjectUrl);
+        if (cachedObjectUrl) {
             objectUrls.delete(key);
+            if (getActiveObjectUrl() === cachedObjectUrl) {
+                retiredObjectUrls.add(cachedObjectUrl);
+            } else {
+                URL.revokeObjectURL(cachedObjectUrl);
+            }
         }
         return true;
     }
@@ -136,10 +190,15 @@ export function createOfflineMediaManager({ apiUrl, getState, updateStatus, getA
         try {
             do {
                 syncRequested = false;
+                failureCount = 0;
+                firstFailure = '';
                 const state = getState();
                 const resources = new Map();
                 const addResource = (key, url) => {
-                    if (url && typeof url === 'string' && !url.startsWith('data:')) resources.set(key, url);
+                    if (typeof url !== 'string') return;
+                    const normalizedUrl = url.trim();
+                    if (!normalizedUrl || /^(?:data|blob):/i.test(normalizedUrl)) return;
+                    resources.set(key, normalizedUrl);
                 };
                 state.playlist.forEach(song => {
                     addResource(`song:${song._id}:audio`, song.path || song.audioUrl);
@@ -250,6 +309,8 @@ export function createOfflineMediaManager({ apiUrl, getState, updateStatus, getA
     function dispose() {
         objectUrls.forEach(objectUrl => URL.revokeObjectURL(objectUrl));
         objectUrls.clear();
+        retiredObjectUrls.forEach(objectUrl => URL.revokeObjectURL(objectUrl));
+        retiredObjectUrls.clear();
     }
 
     function getProgress() {
@@ -259,6 +320,7 @@ export function createOfflineMediaManager({ apiUrl, getState, updateStatus, getA
     return {
         dispose,
         forgetObjectUrl,
+        getOfflineAudioSongIds,
         getOfflineImageUrl,
         getOfflineObjectUrl,
         getProgress,

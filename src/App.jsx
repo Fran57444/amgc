@@ -79,6 +79,17 @@ function App() {
           </div>
         </div>
 
+        <section id="jam-request-notification" className="jam-request-notification" hidden role="alertdialog" aria-labelledby="jam-request-title" aria-describedby="jam-request-message">
+          <div className="jam-request-copy">
+            <strong id="jam-request-title">Jam</strong>
+            <p id="jam-request-message"></p>
+          </div>
+          <div className="jam-request-actions">
+            <button id="jam-request-accept" type="button">Aceptar</button>
+            <button id="jam-request-decline" type="button">Rechazar</button>
+          </div>
+        </section>
+
         <div className="sidebar-shell">
           <span className="sidebar-trigger" aria-hidden="true" title="Abrir menú" />
           <nav aria-label="Navegación principal">
@@ -291,6 +302,33 @@ function App() {
                 />
               </div>
               <br></br>
+            </div>
+
+            <div className="settings-section">
+              <h3>Atajos de teclado</h3>
+              <p>Asigna combinaciones para buscar, reproducir o cambiar de canción. No se activan al escribir.</p>
+              <div className="keyboard-shortcuts">
+                <div className="keyboard-shortcut-row">
+                  <span>Buscar canciones</span>
+                  <button type="button" className="shortcut-capture-button" data-shortcut-action="search">Ctrl + Alt + K</button>
+                </div>
+                <div className="keyboard-shortcut-row">
+                  <span>Reproducir / pausar</span>
+                  <button type="button" className="shortcut-capture-button" data-shortcut-action="toggle">Espacio</button>
+                </div>
+                <div className="keyboard-shortcut-row">
+                  <span>Canción anterior</span>
+                  <button type="button" className="shortcut-capture-button" data-shortcut-action="previous">Mayús + ←</button>
+                </div>
+                <div className="keyboard-shortcut-row">
+                  <span>Canción siguiente</span>
+                  <button type="button" className="shortcut-capture-button" data-shortcut-action="next">Mayús + →</button>
+                </div>
+              </div>
+              <div className="lyrics-editor-actions">
+                <button id="btn-reset-keyboard-shortcuts" className="shortcut-capture-button" type="button">Restablecer</button>
+                <span id="keyboard-shortcuts-status" className="lyrics-editor-status" aria-live="polite"></span>
+              </div>
             </div>
 
             <div className="settings-section">
@@ -673,6 +711,11 @@ function App() {
 
         <div id="bottom-bar-wrapper" className="ready interactive">
           <div id="queue-container">
+            <div id="queue-jam-controls" className="queue-jam-controls" hidden>
+              <button id="btn-request-jam" className="queue-jam-button" type="button" aria-label="Proponer Jam" title="Proponer Jam">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17V5l11-2v12M10 17c0 1.7-1.6 3-3.5 3S3 19 3 17.5 4.6 15 6.5 15s3.5.9 3.5 2Zm11-2c0 1.7-1.6 3-3.5 3S14 17 14 15.5s1.6-2.5 3.5-2.5 3.5.9 3.5 2Zm-4-10v5m-2.5-2.5h5"/></svg>
+              </button>
+            </div>
             <ul id="queue-list"></ul>
           </div>
 
@@ -785,8 +828,9 @@ function App() {
                 <button id="btn-shuffle" className="control-btn">
                    <img src="/img/aleatorio.png" draggable="false" className="no-drag" alt="Aleatorio" style={{ opacity: 0.7 }} />
                 </button>
-                <button id="btn-queue" className="control-btn">
+                <button id="btn-queue" className="control-btn" type="button" aria-label="Abrir cola">
                    =
+                   <span id="queue-sync-indicator" className="sync-spinner" hidden role="status" aria-label="Sincronizando cola"></span>
                 </button>
 
               </div>

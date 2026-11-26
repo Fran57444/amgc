@@ -162,13 +162,18 @@
       <div id="queue-scrim" class="queue-scrim" hidden></div>
       <aside id="player-queue" class="queue-drawer" aria-label="Cola de reproducción" aria-hidden="true">
         <div class="queue-drawer-heading">
-          <div><p class="eyebrow">REPRODUCCIÓN</p><h2>Cola</h2></div>
+          <div><p class="eyebrow">REPRODUCCIÓN</p><h2>Cola <span id="player-queue-sync-indicator" class="sync-spinner" hidden role="status" aria-label="Sincronizando cola"></span></h2></div>
           <div class="queue-drawer-actions">
             <button id="player-queue-shuffle" class="icon-button image-icon-button" type="button" aria-label="Reproducción aleatoria" aria-pressed="false">
               <img src="./img/aleatorio.png" alt="" />
             </button>
             <button id="player-queue-close" class="icon-button" type="button" aria-label="Cerrar cola">×</button>
           </div>
+        </div>
+        <div id="queue-jam-controls" class="queue-jam-controls" hidden>
+          <button id="btn-request-jam" class="queue-jam-button" type="button" aria-label="Proponer Jam" title="Proponer Jam">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17V5l11-2v12M10 17c0 1.7-1.6 3-3.5 3S3 19 3 17.5 4.6 15 6.5 15s3.5.9 3.5 2Zm11-2c0 1.7-1.6 3-3.5 3S14 17 14 15.5s1.6-2.5 3.5-2.5 3.5.9 3.5 2Zm-4-10v5m-2.5-2.5h5"/></svg>
+          </button>
         </div>
         <div id="player-queue-list"></div>
       </aside>
@@ -270,6 +275,16 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <section id="jam-request-notification" class="jam-request-notification" hidden role="alertdialog" aria-labelledby="jam-request-title" aria-describedby="jam-request-message">
+      <div class="jam-request-copy">
+        <strong id="jam-request-title">Jam</strong>
+        <p id="jam-request-message"></p>
+      </div>
+      <div class="jam-request-actions">
+        <button id="jam-request-accept" type="button">Aceptar</button>
+        <button id="jam-request-decline" type="button">Rechazar</button>
+      </div>
+    </section>
     <audio id="audio-element" preload="metadata"></audio>
     <script type="module" src="./app.js"></script>
   </body>
