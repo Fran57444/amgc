@@ -208,7 +208,8 @@ const userSchema = new mongoose.Schema({
   profilePhoto: { type: String, default: '' },
   spotify: {
     refreshTokenEncrypted: { type: String, select: false },
-    scopes: { type: [String], default: [] }
+    scopes: { type: [String], default: [] },
+    profileId: { type: String, default: '', select: false }
   }
 }, { timestamps: true });
 
@@ -403,6 +404,37 @@ const SPOTIFY_API_PAGES_PER_BATCH = 5;
 const SPOTIFY_PLAYLISTS_PER_PAGE = 50;
 const SPOTIFY_PLAYLIST_TRACKS_MAX = 5000;
 const SPOTIFY_PLAYLIST_SCOPES = ['playlist-read-private', 'playlist-read-collaborative'];
+const spotifyUserProfileCache = new Map();
+
+function getSpotifyProfileUrl(spotifyId, externalUrl = '') {
+  try {
+    const url = new URL(externalUrl);
+    if (url.protocol === 'https:' && url.hostname === 'open.spotify.com' && /^\/user\/[^/]+\/?$/i.test(url.pathname)) {
+      return url.toString().slice(0, 2048);
+    }
+  } catch {
+    if (!spotifyId) return '';
+  }
+  return spotifyId ? `https://open.spotify.com/user/${encodeURIComponent(spotifyId)}` : '';
+}
+
+function getSpotifyDisplayName(displayName, spotifyId) {
+  if (typeof displayName !== 'string') return '';
+  const normalizedName = displayName.trim().slice(0, 100);
+  return normalizedName && normalizedName !== spotifyId ? normalizedName : '';
+}
+
+function getSpotifyProfileImageUrl(imageUrl) {
+  if (typeof imageUrl !== 'string') return '';
+  try {
+    const url = new URL(imageUrl);
+    return url.protocol === 'https:' && url.hostname === 'i.scdn.co'
+      ? url.toString().slice(0, 2048)
+      : '';
+  } catch {
+    return '';
+  }
+}
 
 async function requestSpotifyApi(user, path, params = {}) {
   let accessToken = await getSpotifyAccessToken(user);
@@ -430,6 +462,91 @@ async function requestSpotifyApi(user, path, params = {}) {
       await new Promise(resolve => setTimeout(resolve, waitMs));
     }
   }
+}
+
+async function getSpotifyUserProfiles(user, spotifyIds) {
+  const now = Date.now();
+  const userIds = [...new Set(spotifyIds.filter(Boolean))];
+  const unknownUserIds = userIds
+    .filter(userId => !spotifyUserProfileCache.has(userId)
+      || spotifyUserProfileCache.get(userId).expiresAt <= now)
+    .slice(0, 100);
+
+  for (let offset = 0; offset < unknownUserIds.length; offset += 8) {
+    await Promise.all(unknownUserIds.slice(offset, offset + 8).map(async userId => {
+      try {
+        const response = await requestSpotifyApi(user, `users/${encodeURIComponent(userId)}`);
+        spotifyUserProfileCache.set(userId, {
+          name: getSpotifyDisplayName(response.data.display_name, userId),
+          photoUrl: getSpotifyProfileImageUrl(response.data.images?.[0]?.url),
+          profileUrl: getSpotifyProfileUrl(userId, response.data.external_urls?.spotify),
+          expiresAt: Date.now() + 24 * 60 * 60 * 1000
+        });
+      } catch (error) {
+        const status = error.response?.status;
+        console.warn(
+          `No se pudo obtener un perfil público de Spotify${status ? ` (HTTP ${status})` : ''}; se usará la atribución disponible.`
+        );
+        spotifyUserProfileCache.set(userId, {
+          name: '',
+          photoUrl: '',
+          profileUrl: getSpotifyProfileUrl(userId),
+          expiresAt: Date.now() + 60 * 60 * 1000
+        });
+      }
+    }));
+  }
+
+  while (spotifyUserProfileCache.size > 1000) {
+    spotifyUserProfileCache.delete(spotifyUserProfileCache.keys().next().value);
+  }
+  return new Map(userIds.map(userId => [userId, spotifyUserProfileCache.get(userId)]));
+}
+
+async function enrichSpotifyAddedByProfiles(user, items) {
+  const profiles = await getSpotifyUserProfiles(user, items.map(item => item.spotifyAddedById));
+  items.forEach(item => {
+    const profile = profiles.get(item.spotifyAddedById);
+    if (!profile) return;
+    item.spotifyAddedByName ||= profile.name;
+    item.spotifyAddedByPhoto ||= profile.photoUrl;
+    item.spotifyAddedByUrl ||= profile.profileUrl;
+  });
+}
+
+async function getUniqueLinkedAmgcSpotifyUsers(spotifyIds) {
+  const uniqueSpotifyIds = [...new Set(spotifyIds.filter(Boolean))];
+  if (!uniqueSpotifyIds.length) return new Map();
+  const linkedUsers = await User.find({ 'spotify.profileId': { $in: uniqueSpotifyIds } })
+    .select('username profilePhoto +spotify.profileId')
+    .lean();
+  const usernamesBySpotifyId = new Map();
+  linkedUsers.forEach(user => {
+    const spotifyId = user.spotify?.profileId;
+    if (!spotifyId || !user.username) return;
+    const users = usernamesBySpotifyId.get(spotifyId) || [];
+    users.push({
+      _id: String(user._id),
+      username: user.username,
+      profilePhoto: user.profilePhoto || ''
+    });
+    usernamesBySpotifyId.set(spotifyId, users);
+  });
+  return new Map(
+    [...usernamesBySpotifyId.entries()]
+      .filter(([_spotifyId, users]) => users.length === 1)
+      .map(([spotifyId, users]) => [spotifyId, users[0]])
+  );
+}
+
+async function mapSpotifyAddedByNamesToAmgcUsers(items) {
+  const linkedUsersBySpotifyId = await getUniqueLinkedAmgcSpotifyUsers(
+    items.map(item => item.spotifyAddedById)
+  );
+  items.forEach(item => {
+    const linkedUser = linkedUsersBySpotifyId.get(item.spotifyAddedById);
+    if (linkedUser) item.spotifyAddedByName = linkedUser.username;
+  });
 }
 
 async function fetchSpotifyPlaylistItems(user, playlistId, total) {
@@ -478,6 +595,16 @@ async function fetchSpotifyPlaylistItems(user, playlistId, total) {
             || track?.show?.name?.slice(0, 200)
             || 'Artista desconocido',
           primaryArtist: (track?.artists || []).find(artist => artist?.name)?.name?.slice(0, 200) || '',
+          spotifyAddedById: typeof item?.added_by?.id === 'string'
+            ? item.added_by.id.slice(0, 100)
+            : '',
+          spotifyAddedByName: getSpotifyDisplayName(item?.added_by?.display_name, item?.added_by?.id),
+          spotifyAddedByPhoto: getSpotifyProfileImageUrl(item?.added_by?.images?.[0]?.url),
+          spotifyAddedByUrl: getSpotifyProfileUrl(
+            item?.added_by?.id,
+            item?.added_by?.external_urls?.spotify
+          ),
+          spotifyAddedAt: typeof item?.added_at === 'string' ? item.added_at : '',
           album: typeof track?.album?.name === 'string' ? track.album.name.slice(0, 200) : '',
           coverUrl,
           externalUrl: typeof track?.external_urls?.spotify === 'string'
@@ -490,6 +617,7 @@ async function fetchSpotifyPlaylistItems(user, playlistId, total) {
       });
     });
   }
+  await enrichSpotifyAddedByProfiles(user, items);
   return items.slice(0, itemCount);
 }
 
@@ -761,17 +889,29 @@ const playlistSchema = new mongoose.Schema({
   }],
   spotifyPlaylistId: { type: String, default: undefined },
   spotifyOwnerId: { type: String, default: '' },
+  spotifyOwnerName: { type: String, default: '' },
+  spotifyOwnerPhoto: { type: String, default: '' },
+  spotifyOwnerUrl: { type: String, default: '' },
+  spotifyOwnerAmgcUserId: { type: String, default: '' },
+  spotifyCollaborative: { type: Boolean, default: false },
   spotifySnapshotId: { type: String, default: '' },
+  spotifyAttributionVersion: { type: Number, default: 0 },
   spotifyImageKey: { type: String, default: '' },
   spotifyCheckedAt: { type: Date },
   spotifyTracks: [{
     spotifyTrackId: { type: String, default: '' },
     uri: { type: String, default: '' },
     songId: { type: mongoose.Schema.Types.ObjectId, ref: 'Song' },
+    manuallyLinked: { type: Boolean, default: false },
     position: { type: Number, required: true },
     name: { type: String, default: '' },
     artist: { type: String, default: '' },
     primaryArtist: { type: String, default: '' },
+    spotifyAddedById: { type: String, default: '' },
+    spotifyAddedByName: { type: String, default: '' },
+    spotifyAddedByPhoto: { type: String, default: '' },
+    spotifyAddedByUrl: { type: String, default: '' },
+    spotifyAddedAt: { type: String, default: '' },
     album: { type: String, default: '' },
     coverUrl: { type: String, default: '' },
     externalUrl: { type: String, default: '' },
@@ -2668,12 +2808,13 @@ app.post('/api/discord/artwork-url', async (req, res) => {
 app.get('/api/spotify/status', async (req, res) => {
   try {
     const user = await User.findById(req.user._id)
-      .select('+spotify.refreshTokenEncrypted spotify.scopes')
+      .select('+spotify.refreshTokenEncrypted +spotify.profileId spotify.scopes')
       .lean();
     res.json({
       configured: Boolean(getSpotifyConfiguration()),
       connected: Boolean(user?.spotify?.refreshTokenEncrypted),
-      playlistScopesGranted: SPOTIFY_PLAYLIST_SCOPES.every(scope => user?.spotify?.scopes?.includes(scope))
+      playlistScopesGranted: SPOTIFY_PLAYLIST_SCOPES.every(scope => user?.spotify?.scopes?.includes(scope)),
+      identityLinked: Boolean(user?.spotify?.profileId)
     });
   } catch (error) {
     console.error('No se pudo consultar la conexión de Spotify.', error);
@@ -2710,7 +2851,7 @@ app.post('/api/spotify/connect', async (req, res) => {
     client_id: configuration.clientId,
     response_type: 'code',
     redirect_uri: configuration.redirectUri,
-    scope: ['user-library-read', ...SPOTIFY_PLAYLIST_SCOPES].join(' '),
+    scope: ['user-library-read', 'user-read-private', ...SPOTIFY_PLAYLIST_SCOPES].join(' '),
     state
   }).toString();
   res.json({ authorizationUrl: authorizationUrl.toString() });
@@ -2751,13 +2892,30 @@ app.get('/api/spotify/callback', async (req, res) => {
       }
     );
     if (!tokenResponse.data.refresh_token) throw new Error('Spotify no devolvió un token renovable.');
-    const user = await User.findById(userId).select('+spotify.refreshTokenEncrypted');
+    let spotifyProfileId = '';
+    try {
+      const profileResponse = await axios.get('https://api.spotify.com/v1/me', {
+        headers: { Authorization: `Bearer ${tokenResponse.data.access_token}` },
+        timeout: 15000
+      });
+      spotifyProfileId = typeof profileResponse.data.id === 'string'
+        ? profileResponse.data.id.trim().slice(0, 100)
+        : '';
+    } catch (error) {
+      console.warn(
+        'Spotify no permitió guardar el identificador de perfil para vincular la cuenta de AMGC.',
+        error.response?.status || error.message || error
+      );
+    }
+    const user = await User.findById(userId)
+      .select('+spotify.refreshTokenEncrypted +spotify.profileId');
     if (!user) return redirectToApp('error');
     user.spotify = {
       refreshTokenEncrypted: encryptSpotifyRefreshToken(tokenResponse.data.refresh_token),
       scopes: typeof tokenResponse.data.scope === 'string'
         ? tokenResponse.data.scope.split(/\s+/).filter(Boolean)
-        : []
+        : [],
+      profileId: spotifyProfileId || user.spotify?.profileId || ''
     };
     await user.save();
     spotifyLikedTracksCache.delete(String(user._id));
@@ -2869,7 +3027,9 @@ app.get('/api/spotify/playlists', async (req, res) => {
           name: String(item.name).slice(0, 200),
           description: typeof item.description === 'string' ? item.description.slice(0, 1000) : '',
           image,
-          ownerName: item.owner?.display_name || item.owner?.id || 'Spotify',
+          ownerName: getSpotifyDisplayName(item.owner?.display_name, item.owner?.id) || 'Dueño de Spotify',
+          collaborative: item.collaborative === true,
+          isPublic: item.public === true,
           totalTracks: Math.max(0, Number(item.items?.total ?? item.tracks?.total) || 0),
           linkedPlaylistId: linked?.id || '',
           checkedAt: linked?.spotifyCheckedAt || null
@@ -2895,6 +3055,7 @@ app.get('/api/spotify/playlists', async (req, res) => {
 app.post('/api/spotify/playlists/:spotifyPlaylistId/import', async (req, res) => {
   try {
     const spotifyPlaylistId = String(req.params.spotifyPlaylistId || '');
+    const refreshAttribution = req.body?.refreshAttribution === true;
     if (!/^[A-Za-z0-9]{10,40}$/.test(spotifyPlaylistId)) {
       return res.status(400).json({ error: 'La playlist de Spotify no es válida.' });
     }
@@ -2922,7 +3083,12 @@ app.post('/api/spotify/playlists/:spotifyPlaylistId/import', async (req, res) =>
       && existingPlaylist.spotifySnapshotId === spotifyPlaylist.snapshot_id
       && existingPlaylist.spotifyTracks.length === spotifyTotal
     );
-    const sourceEntries = sameSnapshot
+    const refreshLegacyAttribution = Boolean(
+      existingPlaylist
+      && Number(existingPlaylist.spotifyAttributionVersion || 0) < 1
+    );
+    const shouldRefreshAttribution = refreshAttribution || refreshLegacyAttribution;
+    const sourceEntries = sameSnapshot && !shouldRefreshAttribution
       ? existingPlaylist.spotifyTracks.map(entry => entry.toObject())
       : await fetchSpotifyPlaylistItems(req.user, spotifyPlaylistId, spotifyTotal);
     if (sourceEntries.length !== spotifyTotal) {
@@ -2930,7 +3096,8 @@ app.post('/api/spotify/playlists/:spotifyPlaylistId/import', async (req, res) =>
       error.statusCode = 502;
       throw error;
     }
-    if (!sameSnapshot && spotifyPlaylist.snapshot_id) {
+    await mapSpotifyAddedByNamesToAmgcUsers(sourceEntries);
+    if ((!sameSnapshot || shouldRefreshAttribution) && spotifyPlaylist.snapshot_id) {
       const currentPlaylist = await requestSpotifyApi(
         req.user,
         `playlists/${encodeURIComponent(spotifyPlaylistId)}`
@@ -2949,20 +3116,49 @@ app.post('/api/spotify/playlists/:spotifyPlaylistId/import', async (req, res) =>
         .lean()
       : [];
     const songsByArtist = groupSongsByArtist(candidates);
+    const previousTracksBySpotifyId = new Map(
+      (existingPlaylist?.spotifyTracks || [])
+        .filter(entry => entry.spotifyTrackId)
+        .map(entry => [entry.spotifyTrackId, entry])
+    );
+    const manualSongIds = [...new Set(
+      [...previousTracksBySpotifyId.values()]
+        .filter(entry => entry.manuallyLinked && entry.songId)
+        .map(entry => String(entry.songId._id || entry.songId))
+    )];
+    const existingManualSongIds = new Set(
+      manualSongIds.length
+        ? (await Song.find({ _id: { $in: manualSongIds } }).select('_id').lean())
+          .map(song => String(song._id))
+        : []
+    );
     const spotifyTracks = sourceEntries.map(entry => {
       const primaryArtist = entry.primaryArtist || getPrimaryArtistName(entry.artist);
       const artistSongs = getSongCandidatesByArtists(songsByArtist, entry.artist, primaryArtist);
-      const matchingSong = entry.spotifyTrackId
+      const previousTrack = previousTracksBySpotifyId.get(entry.spotifyTrackId);
+      const manuallyLinkedSongId = previousTrack?.manuallyLinked
+        && existingManualSongIds.has(String(previousTrack.songId?._id || previousTrack.songId))
+        ? previousTrack.songId?._id || previousTrack.songId
+        : null;
+      const matchingSong = manuallyLinkedSongId
+        ? { _id: manuallyLinkedSongId }
+        : entry.spotifyTrackId
         ? findUniqueSongMatch(artistSongs, entry.name, entry.artist, primaryArtist)
         : null;
       return {
         spotifyTrackId: entry.spotifyTrackId || '',
         uri: entry.uri || '',
         songId: matchingSong?._id,
+        manuallyLinked: Boolean(manuallyLinkedSongId),
         position: Number(entry.position) || 0,
         name: entry.name || 'Contenido no disponible',
         artist: entry.artist || 'Artista desconocido',
         primaryArtist,
+        spotifyAddedById: entry.spotifyAddedById || '',
+        spotifyAddedByName: getSpotifyDisplayName(entry.spotifyAddedByName, entry.spotifyAddedById),
+        spotifyAddedByPhoto: entry.spotifyAddedByPhoto || '',
+        spotifyAddedByUrl: entry.spotifyAddedByUrl || '',
+        spotifyAddedAt: entry.spotifyAddedAt || '',
         album: entry.album || '',
         coverUrl: entry.coverUrl || '',
         externalUrl: entry.externalUrl || '',
@@ -2977,6 +3173,14 @@ app.post('/api/spotify/playlists/:spotifyPlaylistId/import', async (req, res) =>
       || spotifyTracks.some((track, index) => (
         String(existingPlaylist.spotifyTracks[index]?.songId || '') !== String(track.songId || '')
       ));
+    const attributionChanged = Boolean(existingPlaylist && spotifyTracks.some((track, index) => {
+      const previousTrack = existingPlaylist.spotifyTracks[index];
+      return previousTrack?.spotifyAddedById !== track.spotifyAddedById
+        || previousTrack?.spotifyAddedByName !== track.spotifyAddedByName
+        || previousTrack?.spotifyAddedByPhoto !== track.spotifyAddedByPhoto
+        || previousTrack?.spotifyAddedByUrl !== track.spotifyAddedByUrl
+        || previousTrack?.spotifyAddedAt !== track.spotifyAddedAt;
+    }));
     const checkedAt = new Date();
     const spotifyImage = spotifyPlaylist.images?.find(candidate => (
       typeof candidate?.url === 'string' && getSpotifyPlaylistImageKey(candidate.url)
@@ -2998,13 +3202,35 @@ app.post('/api/spotify/playlists/:spotifyPlaylistId/import', async (req, res) =>
       ? spotifyPlaylist.description.slice(0, 1000)
       : '';
     const nextOwnerId = String(spotifyPlaylist.owner?.id || '').slice(0, 100);
+    const linkedOwner = (await getUniqueLinkedAmgcSpotifyUsers([nextOwnerId])).get(nextOwnerId);
+    const ownerProfile = nextOwnerId
+      ? (await getSpotifyUserProfiles(req.user, [nextOwnerId])).get(nextOwnerId)
+      : null;
+    const nextOwnerName = getSpotifyDisplayName(spotifyPlaylist.owner?.display_name, nextOwnerId)
+      || ownerProfile?.name
+      || '';
+    const nextOwnerPhoto = getSpotifyProfileImageUrl(spotifyPlaylist.owner?.images?.[0]?.url)
+      || ownerProfile?.photoUrl
+      || '';
+    const nextOwnerUrl = getSpotifyProfileUrl(
+      nextOwnerId,
+      spotifyPlaylist.owner?.external_urls?.spotify || ownerProfile?.profileUrl
+    );
+    const nextCollaborative = spotifyPlaylist.collaborative === true;
     const changed = !sameSnapshot
       || mappedIdsChanged
+      || attributionChanged
       || Boolean(existingPlaylist && (
         existingPlaylist.name !== nextName
         || existingPlaylist.desc !== nextDescription
         || existingPlaylist.photo !== photo
         || existingPlaylist.spotifyOwnerId !== nextOwnerId
+        || existingPlaylist.spotifyOwnerName !== nextOwnerName
+        || existingPlaylist.spotifyOwnerPhoto !== nextOwnerPhoto
+        || existingPlaylist.spotifyOwnerUrl !== nextOwnerUrl
+        || existingPlaylist.spotifyOwnerAmgcUserId !== (linkedOwner?._id || '')
+        || existingPlaylist.spotifyCollaborative !== nextCollaborative
+        || Number(existingPlaylist.spotifyAttributionVersion || 0) < 1
         || existingPlaylist.spotifyImageKey !== spotifyImageKey
         || Number(existingPlaylist.duration) !== nextDuration
       ));
@@ -3019,7 +3245,13 @@ app.post('/api/spotify/playlists/:spotifyPlaylistId/import', async (req, res) =>
           tracks: matchedSongIds,
           trackDetails: [],
           spotifyOwnerId: nextOwnerId,
+          spotifyOwnerName: nextOwnerName,
+          spotifyOwnerPhoto: nextOwnerPhoto,
+          spotifyOwnerUrl: nextOwnerUrl,
+          spotifyOwnerAmgcUserId: linkedOwner?._id || '',
+          spotifyCollaborative: nextCollaborative,
           spotifySnapshotId: String(spotifyPlaylist.snapshot_id || ''),
+          spotifyAttributionVersion: 1,
           spotifyImageKey,
           spotifyCheckedAt: checkedAt,
           spotifyTracks,
@@ -3058,6 +3290,52 @@ app.post('/api/spotify/playlists/:spotifyPlaylistId/import', async (req, res) =>
           ? 'Spotify no permitió leer esta playlist. Actualiza los permisos o verifica que tengas acceso.'
           : 'No se pudo importar o sincronizar la playlist de Spotify.'
     });
+  }
+});
+
+app.post('/api/playlists/:playlistId/spotify-tracks/:spotifyTrackId/add', async (req, res) => {
+  try {
+    if (!await authorizePermission(res, req.user, 'edit_songs')) return;
+    const { playlistId, spotifyTrackId } = req.params;
+    const songId = normalizeUserId(req.body?.songId);
+    if (!isValidObjectId(songId)) {
+      return res.status(400).json({ error: 'La canción que intentas añadir no es válida.' });
+    }
+    if (!/^[A-Za-z0-9]{10,40}$/.test(spotifyTrackId)) {
+      return res.status(400).json({ error: 'La canción de Spotify no es válida.' });
+    }
+    const playlist = await Playlist.findOne({
+      id: playlistId,
+      userId: req.user._id,
+      spotifyPlaylistId: { $type: 'string' }
+    });
+    if (!playlist) {
+      return res.status(404).json({ error: 'No se encontró la playlist importada de Spotify.' });
+    }
+    const entries = playlist.spotifyTracks.filter(entry => entry.spotifyTrackId === spotifyTrackId);
+    if (!entries.length) {
+      return res.status(404).json({ error: 'La canción ya no está en esta playlist de Spotify.' });
+    }
+    const song = await Song.findById(songId).select('_id').lean();
+    if (!song) return res.status(404).json({ error: 'La canción no está en el catálogo.' });
+    if (entries.every(entry => String(entry.songId || '') === String(song._id))) {
+      return res.json({ success: true, unchanged: true });
+    }
+
+    entries.forEach(entry => {
+      entry.songId = song._id;
+      entry.manuallyLinked = true;
+    });
+    playlist.tracks = [...new Set(
+      playlist.spotifyTracks.filter(entry => entry.songId).map(entry => String(entry.songId))
+    )];
+    playlist.updatedAt = new Date();
+    await playlist.save();
+    emitPlaylistChanged(playlist, req.user._id);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('No se pudo añadir la canción a la playlist de Spotify.', error);
+    res.status(500).json({ error: 'No se pudo añadir la canción a la playlist.' });
   }
 });
 
@@ -3740,7 +4018,7 @@ app.get('/api/playlists', async (req, res) => {
         }
         : {};
     const playlists = await Playlist.find(playlistQuery)
-      .select('id name desc photo tracks trackDetails duration userId sharedWith createdAt updatedAt spotifyPlaylistId spotifyOwnerId spotifySnapshotId spotifyCheckedAt spotifyTracks')
+      .select('id name desc photo tracks trackDetails duration userId sharedWith createdAt updatedAt spotifyPlaylistId spotifyOwnerId spotifyOwnerName spotifyOwnerPhoto spotifyOwnerUrl spotifyCollaborative spotifySnapshotId spotifyCheckedAt spotifyTracks')
       .populate({
         path: 'tracks',
         select: 'name artist cover path color duration addedBy editedBy addedAt editedAt',
@@ -3777,6 +4055,11 @@ app.get('/api/playlists', async (req, res) => {
     playlists.forEach(playlist => {
       playlist.savedCount = savedCountByPlaylistId.get(String(playlist.id)) || 0;
     });
+    const spotifyIdentityIds = playlists.flatMap(playlist => [
+      playlist.spotifyOwnerId,
+      ...(playlist.spotifyTracks || []).map(track => track.spotifyAddedById)
+    ]).filter(Boolean);
+    const linkedSpotifyUsers = await getUniqueLinkedAmgcSpotifyUsers(spotifyIdentityIds);
     
     await Promise.all(playlists.map(async pl => {
       const calculatedDuration = pl.spotifyPlaylistId
@@ -3807,14 +4090,61 @@ app.get('/api/playlists', async (req, res) => {
         })
         : [];
       if (plObj.spotifyPlaylistId) {
+        const linkedOwner = linkedSpotifyUsers.get(plObj.spotifyOwnerId);
+        const linkedOwnerPhoto = linkedOwner?.profilePhoto
+          ? (linkedOwner.profilePhoto.includes('drive.google.com')
+            ? `${req.protocol}://${req.get('host')}/api/media/${extractDriveId(linkedOwner.profilePhoto)}`
+            : linkedOwner.profilePhoto)
+          : '';
+        const spotifyOwnerAttribution = linkedOwner?.username
+          || (plObj.spotifyOwnerName !== plObj.spotifyOwnerId ? plObj.spotifyOwnerName : '')
+          || 'Dueño de Spotify';
+        const ownerProfilePhoto = linkedOwner ? linkedOwnerPhoto : plObj.spotifyOwnerPhoto || '';
+        const ownerProfileUrl = linkedOwner
+          ? ''
+          : getSpotifyProfileUrl(plObj.spotifyOwnerId, plObj.spotifyOwnerUrl);
         plObj.playlistItems = (plObj.spotifyTracks || [])
           .slice()
           .sort((left, right) => Number(left.position) - Number(right.position))
           .map(entry => {
+            const ownerFallback = !entry.spotifyAddedById && !entry.spotifyAddedByName;
+            const linkedContributor = ownerFallback
+              ? linkedOwner
+              : linkedSpotifyUsers.get(entry.spotifyAddedById);
+            const storedAddedByName = entry.spotifyAddedByName !== entry.spotifyAddedById
+              ? entry.spotifyAddedByName
+              : '';
+            const name = linkedContributor?.username
+              || (ownerFallback
+                ? spotifyOwnerAttribution
+                : storedAddedByName || (entry.spotifyAddedById ? 'Usuario de Spotify' : 'No informado por Spotify'));
+            const spotifyAddedByName = ownerFallback ? `${name} (dueño)` : name;
+            const linkedContributorPhoto = linkedContributor?.profilePhoto
+              ? (linkedContributor.profilePhoto.includes('drive.google.com')
+                ? `${req.protocol}://${req.get('host')}/api/media/${extractDriveId(linkedContributor.profilePhoto)}`
+                : linkedContributor.profilePhoto)
+              : '';
+            const spotifyAddedByProfile = {
+              userId: linkedContributor?._id || '',
+              username: linkedContributor?.username || '',
+              photoUrl: linkedContributor ? linkedContributorPhoto : ownerFallback
+                ? ownerProfilePhoto
+                : entry.spotifyAddedByPhoto || '',
+              url: linkedContributor ? '' : ownerFallback
+                ? ownerProfileUrl
+                : getSpotifyProfileUrl(entry.spotifyAddedById, entry.spotifyAddedByUrl),
+              ownerFallback
+            };
             const song = entry.songId?._id ? entry.songId : null;
             if (song) {
               return {
                 ...song,
+                addedByName: spotifyAddedByName,
+                addedAt: entry.spotifyAddedAt || '',
+                spotifyAddedById: entry.spotifyAddedById || '',
+                spotifyAddedByName,
+                spotifyAddedByProfile,
+                spotifyAddedAt: entry.spotifyAddedAt || '',
                 spotifyTrackId: entry.spotifyTrackId,
                 spotifyPosition: entry.position
               };
@@ -3826,9 +4156,14 @@ app.get('/api/playlists', async (req, res) => {
               album: entry.album,
               cover: entry.coverUrl,
               duration: entry.duration,
-              externalUrl: entry.externalUrl,
               spotifyTrackId: entry.spotifyTrackId,
               spotifyPosition: entry.position,
+              addedByName: spotifyAddedByName,
+              addedAt: entry.spotifyAddedAt || '',
+              spotifyAddedById: entry.spotifyAddedById || '',
+              spotifyAddedByName,
+              spotifyAddedByProfile,
+              spotifyAddedAt: entry.spotifyAddedAt || '',
               spotifyUnavailable: true
             };
           });
@@ -4427,6 +4762,59 @@ app.get('/api/media/:fileId', async (req, res) => {
   mediaUrl.searchParams.set('id', fileId);
   if (isImage) mediaUrl.searchParams.set('sz', 'w1000');
   else mediaUrl.searchParams.set('export', 'download');
+
+  if (!isImage && process.env.NODE_ENV !== 'production') {
+    const headers = {};
+    if (req.headers.range) headers.Range = req.headers.range;
+    const controller = new AbortController();
+    res.on('close', () => {
+      if (!res.writableEnded) controller.abort();
+    });
+
+    try {
+      const response = await fetch(mediaUrl, { headers, signal: controller.signal });
+      const contentType = response.headers.get('content-type') || 'application/octet-stream';
+      if (!response.ok || contentType.includes('text/html')) {
+        await response.body?.cancel();
+        console.error('Google Drive no devolvió un archivo de audio reproducible.', {
+          fileId,
+          status: response.status,
+          contentType
+        });
+        return res.status(response.ok ? 502 : response.status).json({
+          error: 'No se pudo obtener el archivo de audio desde Google Drive.'
+        });
+      }
+
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Accept-Ranges', 'bytes');
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      for (const header of ['content-length', 'content-range']) {
+        const value = response.headers.get(header);
+        if (value) res.setHeader(header, value);
+      }
+      res.status(response.status);
+      const mediaStream = Readable.fromWeb(response.body);
+      mediaStream.on('error', error => {
+        if (error.name === 'AbortError') return;
+        console.error('Se interrumpió la transmisión local de audio desde Google Drive.', {
+          fileId,
+          message: error.message
+        });
+        if (!res.headersSent) res.status(502).end();
+        else res.destroy();
+      });
+      mediaStream.pipe(res);
+      return;
+    } catch (error) {
+      if (error.name === 'AbortError') return;
+      console.error('No se pudo transmitir audio localmente desde Google Drive.', {
+        fileId,
+        message: error.message
+      });
+      return res.status(502).json({ error: 'No se pudo obtener el archivo de audio desde Google Drive.' });
+    }
+  }
 
   res.vary('Accept');
   res.vary('Sec-Fetch-Dest');

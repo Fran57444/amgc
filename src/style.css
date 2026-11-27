@@ -1031,9 +1031,10 @@ img.no-image { font-size: 0.65rem; object-fit: none; }
 .quick-add-media-row input[type="file"] { padding: 7px; font-size: 0.72rem; }
 .quick-add-options-row { grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: end; gap: 14px; }
 .quick-add-color-field { align-items: start; }
-.quick-add-color-field input[type="color"] { width: 38px; height: 38px; padding: 3px; border: 1px solid rgba(255,255,255,0.3); border-radius: 50%; background: transparent; cursor: pointer; }
-.quick-add-color-field input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
+.quick-add-color-field input[type="color"] { box-sizing: border-box; width: 38px; height: 38px; padding: 4px; appearance: none; -webkit-appearance: none; overflow: hidden; border: 1px solid rgba(255,255,255,0.3); border-radius: 50%; background: transparent; cursor: pointer; }
+.quick-add-color-field input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; border-radius: 50%; }
 .quick-add-color-field input[type="color"]::-webkit-color-swatch { border: 0; border-radius: 50%; }
+.quick-add-color-field input[type="color"]::-moz-color-swatch { border: 0; border-radius: 50%; }
 .quick-add-upload-status { margin-left: auto; color: rgba(255,255,255,0.68); font-size: 0.75rem; text-align: right; }
 .quick-add-save { min-height: 38px; padding: 8px 18px; }
 .quick-add-empty { grid-column: 1 / -1; padding: 24px; border: 1px dashed rgba(255,255,255,0.2); border-radius: 12px; color: rgba(255,255,255,0.64); text-align: center; }
@@ -1058,7 +1059,7 @@ img.no-image { font-size: 0.65rem; object-fit: none; }
 .spotify-playlist-cover-spinner::after { width: 18px; height: 18px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; content: ""; animation: song-loading-spin 0.75s linear infinite; }
 .spotify-like-item label { display: flex; align-items: center; gap: 10px; min-width: 0; width: 100%; cursor: pointer; }
 .spotify-like-item input { flex: 0 0 auto; accent-color: #1db954; }
-.spotify-like-info { display: flex; flex-direction: column; min-width: 0; }
+.spotify-like-info { display: flex; flex: 1 1 0; flex-direction: column; min-width: 0; }
 .spotify-like-info strong, .spotify-like-info span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .spotify-like-info strong { font-size: 0.83rem; }
 .spotify-like-info span { color: rgba(255,255,255,0.6); font-size: 0.72rem; }
@@ -1066,9 +1067,22 @@ img.no-image { font-size: 0.65rem; object-fit: none; }
 .spotify-playlist-import h3 { margin: 0 0 6px; font-size: 0.95rem; }
 .spotify-playlist-import > p { color: rgba(255,255,255,0.65); font-size: 0.78rem; }
 .spotify-playlist-import .spotify-likes-list { max-height: 260px; }
-.spotify-unavailable-track { opacity: 0.82; }
-.spotify-track-open { color: #9de0b5; font-size: 0.75rem; }
-.spotify-track-suggest { grid-column: 2; justify-self: start; }
+.spotify-unavailable-track { position: relative; overflow: hidden; outline: 1px solid transparent; outline-offset: -1px; transition: background 0.2s ease, outline-color 0.16s ease, box-shadow 0.16s ease; }
+.spotify-unavailable-track:hover, .spotify-unavailable-track:focus-visible { outline-color: #a970ff; box-shadow: 0 0 14px rgba(139,92,246,0.32); }
+.spotify-unavailable-track .playlist-track-meta { min-width: 0; }
+.spotify-unavailable-track .playlist-added-by { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.spotify-like-item > button { flex: 0 0 auto; margin-left: auto; white-space: nowrap; }
+.spotify-missing-cover { position: relative; }
+.spotify-missing-symbol { position: absolute; top: -4px; right: -4px; display: grid; width: 17px; height: 17px; place-items: center; border: 1px solid rgba(255,255,255,0.8); border-radius: 50%; background: #8d5be8; color: #fff; font-size: 0.75rem; line-height: 1; }
+.playlist-direct-add-dialog { box-sizing: border-box; width: min(1400px, calc(100vw - 28px)); max-width: 1400px; max-height: min(92vh, 900px); padding: 18px; overflow: auto; border: 1px solid rgba(255,255,255,0.18); border-radius: 14px; background: #111; color: #fff; }
+.playlist-direct-add-dialog::backdrop { background: rgba(0,0,0,0.78); backdrop-filter: blur(4px); }
+.playlist-direct-add-dialog > header { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 14px; }
+.playlist-direct-add-dialog > header h2 { margin: 0; font-size: 1.1rem; }
+.playlist-direct-add-dialog .quick-add-card { background: #171717; }
+.playlist-direct-add-dialog .quick-add-suggestions-list { width: 100%; max-width: none; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; align-items: start; }
+@media (max-width: 900px) {
+    .playlist-direct-add-dialog .quick-add-suggestions-list { grid-template-columns: 1fr; }
+}
 .spotify-like-badges { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 4px; }
 .spotify-like-info .spotify-like-badge { width: fit-content; padding: 2px 6px; border-radius: 999px; background: rgba(255,154,92,0.12); color: #ffba90; font-size: 0.63rem; }
 .spotify-like-info .spotify-like-badge.is-in-program { background: rgba(90,190,130,0.12); color: #9de0b5; }
@@ -1504,14 +1518,14 @@ img.no-image { font-size: 0.65rem; object-fit: none; }
 
 #pl-view-panel .pl-header-main {
     display: grid;
-    grid-template-columns: 150px minmax(180px, 420px) auto;
-    align-items: end;
-    column-gap: 14px;
+    grid-template-columns: 150px minmax(0, 1fr) auto;
+    align-items: start;
+    column-gap: 24px;
     min-height: 150px;
 }
 
 #pl-view-panel .pl-info-header {
-    align-self: end;
+    align-self: start;
     min-height: 0;
     gap: 2px;
     padding: 0 0 2px;
@@ -1687,6 +1701,18 @@ img.no-image { font-size: 0.65rem; object-fit: none; }
 .playlist-track-meta .playlist-user-link {
     padding: 0;
 }
+.playlist-track-meta .spotify-contributor-link {
+    display: inline-flex;
+    min-width: 0;
+    max-width: 100%;
+    align-items: center;
+    gap: 6px;
+    overflow: hidden;
+    color: #fff;
+    text-decoration: none;
+}
+.spotify-contributor-link > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.playlist-meta-avatar-placeholder { display: inline-grid; width: 20px; height: 20px; flex: 0 0 20px; place-items: center; border-radius: 50%; background: rgba(255,255,255,.12); color: rgba(255,255,255,.82); font-size: 12px; }
 
 .pl-sidebar-item {
     position: relative;

@@ -263,6 +263,9 @@ function App() {
               <button id="btn-share-playlist" className="control-btn" title="Compartir Playlist">
                 <span>↗</span>
               </button>
+              <button id="btn-delete-playlist" className="control-btn" title="Eliminar playlist sincronizada" aria-label="Eliminar playlist sincronizada" hidden>
+                <img src="/img/cancel.png" draggable="false" className="no-drag" alt=""/>
+              </button>
               <button id="btn-save-playlist" className="control-btn" title="Guardar Playlist">
                 <img src="/img/add.png" draggable="false" className="no-drag" alt="Guardar playlist"/>
               </button>
