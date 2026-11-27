@@ -95,10 +95,12 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--track-color); o
 .playlist-meta-avatar { width: 18px; height: 18px; flex: 0 0 18px; border-radius: 50%; object-fit: cover; }
 .playlist-meta-avatar-placeholder { display: inline-grid; width: 18px; height: 18px; flex: 0 0 18px; place-items: center; border-radius: 50%; background: rgba(255,255,255,.12); color: rgba(255,255,255,.82); font-size: 11px; }
 .spotify-contributor-link { display: inline-flex; min-width: 0; max-width: 55%; flex: 0 1 auto; align-items: center; gap: 5px; overflow: hidden; color: #fff; text-decoration: none; }
-.playlist-track-meta .spotify-contributor-link { padding: 0; border: 0; border-radius: 0; background: #000; box-shadow: none; }
+.playlist-track-meta .spotify-contributor-link { padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
 .playlist-track-meta .spotify-contributor-link:hover,
-.playlist-track-meta .spotify-contributor-link:focus,
-.playlist-track-meta .spotify-contributor-link:active { background: #000; box-shadow: none; outline: none; }
+.playlist-track-meta .spotify-contributor-link:focus-visible { background: transparent; }
+.playlist-track-meta .spotify-contributor-link:focus { outline: none; }
+.playlist-track-meta .spotify-contributor-link:focus-visible { outline: 1px solid rgba(164,125,220,.55); outline-offset: 1px; }
+.playlist-track-meta .spotify-contributor-link:active { background: transparent; }
 .spotify-contributor-link > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .playlist-track-meta .playlist-user-link { max-width: 100px; overflow: hidden; padding: 0; border: 0; background: transparent; color: #fff; font-size: inherit; text-overflow: ellipsis; white-space: nowrap; }
 .playlist-track-meta > span:last-child { margin-left: auto; }

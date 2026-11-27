@@ -441,6 +441,58 @@ function getSpotifyProfileImageUrl(imageUrl) {
   }
 }
 
+function decodeSpotifyHtmlEntities(value) {
+  const namedEntities = {
+    amp: '&',
+    apos: "'",
+    gt: '>',
+    lt: '<',
+    nbsp: '\u00a0',
+    quot: '"'
+  };
+  return value.replace(/&(#x[\da-f]+|#\d+|amp|apos|gt|lt|nbsp|quot);/gi, (entity, code) => {
+    if (code[0] !== '#') return namedEntities[code.toLowerCase()] || entity;
+    const isHex = code[1].toLowerCase() === 'x';
+    const codePoint = Number.parseInt(code.slice(isHex ? 2 : 1), isHex ? 16 : 10);
+    if (
+      !Number.isFinite(codePoint)
+      || codePoint <= 0
+      || codePoint > 0x10ffff
+      || (codePoint >= 0xd800 && codePoint <= 0xdfff)
+    ) return entity;
+    return String.fromCodePoint(codePoint);
+  });
+}
+
+function getSpotifyOpenGraphValue(html, property) {
+  const tags = html.match(/<meta\b[^>]*>/gi) || [];
+  for (const tag of tags) {
+    const getAttribute = name => {
+      const match = tag.match(new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, 'i'));
+      return match ? (match[1] ?? match[2] ?? match[3] ?? '') : '';
+    };
+    if (getAttribute('property').toLowerCase() !== property) continue;
+    return decodeSpotifyHtmlEntities(getAttribute('content')).trim().slice(0, 2048);
+  }
+  return '';
+}
+
+async function fetchSpotifyPublicProfilePage(spotifyId) {
+  const response = await axios.get(getSpotifyProfileUrl(spotifyId), {
+    headers: { Accept: 'text/html' },
+    responseType: 'text',
+    maxContentLength: 2 * 1024 * 1024,
+    maxBodyLength: 2 * 1024 * 1024,
+    maxRedirects: 0,
+    timeout: 10000
+  });
+  const html = typeof response.data === 'string' ? response.data : '';
+  return {
+    name: getSpotifyDisplayName(getSpotifyOpenGraphValue(html, 'og:title'), spotifyId),
+    photoUrl: getSpotifyProfileImageUrl(getSpotifyOpenGraphValue(html, 'og:image'))
+  };
+}
+
 async function requestSpotifyApi(user, path, params = {}) {
   let accessToken = await getSpotifyAccessToken(user);
   let refreshed = false;
@@ -479,26 +531,43 @@ async function getSpotifyUserProfiles(user, spotifyIds) {
 
   for (let offset = 0; offset < unknownUserIds.length; offset += 8) {
     await Promise.all(unknownUserIds.slice(offset, offset + 8).map(async userId => {
+      const profile = {
+        name: '',
+        photoUrl: '',
+        profileUrl: getSpotifyProfileUrl(userId)
+      };
+      let pageError = null;
+      let apiError = null;
       try {
-        const response = await requestSpotifyApi(user, `users/${encodeURIComponent(userId)}`);
-        spotifyUserProfileCache.set(userId, {
-          name: getSpotifyDisplayName(response.data.display_name, userId),
-          photoUrl: getSpotifyProfileImageUrl(response.data.images?.[0]?.url),
-          profileUrl: getSpotifyProfileUrl(userId, response.data.external_urls?.spotify),
-          expiresAt: Date.now() + 24 * 60 * 60 * 1000
-        });
+        const pageProfile = await fetchSpotifyPublicProfilePage(userId);
+        profile.name ||= pageProfile.name;
+        profile.photoUrl ||= pageProfile.photoUrl;
       } catch (error) {
-        const status = error.response?.status;
-        console.warn(
-          `No se pudo obtener un perfil público de Spotify${status ? ` (HTTP ${status})` : ''}; se usará la atribución disponible.`
-        );
-        spotifyUserProfileCache.set(userId, {
-          name: '',
-          photoUrl: '',
-          profileUrl: getSpotifyProfileUrl(userId),
-          expiresAt: Date.now() + 60 * 60 * 1000
-        });
+        pageError = error;
       }
+      if (!profile.name || !profile.photoUrl) {
+        try {
+          const response = await requestSpotifyApi(user, `users/${encodeURIComponent(userId)}`);
+          profile.name ||= getSpotifyDisplayName(response.data.display_name, userId);
+          profile.photoUrl ||= getSpotifyProfileImageUrl(response.data.images?.[0]?.url);
+          profile.profileUrl = getSpotifyProfileUrl(userId, response.data.external_urls?.spotify);
+        } catch (error) {
+          apiError = error;
+        }
+      }
+      const hasProfileData = Boolean(profile.name || profile.photoUrl);
+      if (!hasProfileData) {
+        const errorStatuses = [pageError, apiError]
+          .filter(Boolean)
+          .map(error => error.response?.status ? `HTTP ${error.response.status}` : error.code || 'error');
+        console.warn(
+          `No se pudo obtener un perfil público de Spotify${errorStatuses.length ? ` (${errorStatuses.join(', ')})` : ''}; se usará la atribución disponible.`
+        );
+      }
+      spotifyUserProfileCache.set(userId, {
+        ...profile,
+        expiresAt: Date.now() + (hasProfileData ? 24 : 1) * 60 * 60 * 1000
+      });
     }));
   }
 
