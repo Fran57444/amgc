@@ -739,6 +739,7 @@ export function initMusicPlayer() {
     let spotifyLikedTracks = [];
     let spotifySelectedTrackIds = new Set();
     let spotifyIsConnected = false;
+    let spotifyRequiredScopesGranted = false;
     let spotifyPlaylistScopesGranted = false;
     let spotifyIdentityLinked = false;
     let spotifyNextOffset = 0;
@@ -6678,6 +6679,7 @@ export function initMusicPlayer() {
     let musicDataRequestSequence = 0;
     async function fetchMusicData() {
         const requestSequence = ++musicDataRequestSequence;
+        const playbackLoadTokenAtRequestStart = audioSourceLoadToken;
         const userAtRequestStart = getStoredUser();
         const previousCatalogTrackIds = new Set(playlist.map(getTrackStorageId));
         const previousActiveQueueTrackIds = activeQueueTracks.map(getTrackStorageId);
@@ -6852,6 +6854,7 @@ export function initMusicPlayer() {
         if (
             selectedTrackWasRemoved
             && ownsCurrentPlayback
+            && playbackLoadTokenAtRequestStart === audioSourceLoadToken
             && currentTrackSource !== 'together'
             && !getRemotePlaybackSession()
         ) {
@@ -6878,6 +6881,7 @@ export function initMusicPlayer() {
             refreshedCurrentTrack
             && previousSource
             && refreshedSource !== previousSource
+            && playbackLoadTokenAtRequestStart === audioSourceLoadToken
             && !offlineOnly
             && currentTrackSource !== 'together'
             && !getRemotePlaybackSession()
@@ -6890,7 +6894,12 @@ export function initMusicPlayer() {
                 Number.isFinite(audio.currentTime) ? audio.currentTime : 0
             );
         }
-        if (playlist.length > 0 && !audio.src && userAtRequestStart?._id) {
+        if (
+            playlist.length > 0
+            && !audio.src
+            && playbackLoadTokenAtRequestStart === audioSourceLoadToken
+            && userAtRequestStart?._id
+        ) {
             const user = userAtRequestStart;
             let savedPlayback = null;
             if (user?._id) {
@@ -8805,6 +8814,10 @@ export function initMusicPlayer() {
 
     async function loadSpotifyLikedTracks(refresh = false, append = false) {
         if (!spotifyIsConnected || !spotifyLikesStatus) return;
+        if (!spotifyRequiredScopesGranted) {
+            spotifyLikesStatus.textContent = 'Actualiza los permisos de Spotify para habilitar todas sus funciones.';
+            return;
+        }
         const offset = append ? spotifyNextOffset : 0;
         if (append && spotifyLoadMoreButton) spotifyLoadMoreButton.disabled = true;
         else if (spotifyRefreshButton) spotifyRefreshButton.disabled = true;
@@ -8877,7 +8890,7 @@ export function initMusicPlayer() {
             const name = document.createElement('strong');
             name.textContent = spotifyPlaylist.name;
             const detail = document.createElement('span');
-            detail.textContent = `${spotifyPlaylist.ownerName} · ${spotifyPlaylist.totalTracks} canciones · ${spotifyPlaylist.collaborative ? 'Colaborativa' : 'No colaborativa'} · ${spotifyPlaylist.isPublic ? 'Pública' : 'No pública'}`;
+            detail.textContent = `${spotifyPlaylist.ownerName} · ${spotifyPlaylist.totalTracks} canciones · ${spotifyPlaylist.isPublic ? 'Pública' : 'No pública'}`;
             info.append(name, detail);
             item.appendChild(info);
             const action = document.createElement('button');
@@ -8980,7 +8993,7 @@ export function initMusicPlayer() {
             ? 'Actualizar permisos de Spotify'
             : 'Conectar Spotify';
         spotifyPlaylistConnectButton.hidden = spotifyIsConnected
-            && spotifyPlaylistScopesGranted
+            && spotifyRequiredScopesGranted
             && spotifyIdentityLinked;
         spotifyPlaylistConnectButton.disabled = spotifyConnectButton?.disabled ?? true;
         if (spotifyPlaylistsLoadButton) {
@@ -8996,6 +9009,8 @@ export function initMusicPlayer() {
         }
         if (!spotifyIsConnected) {
             spotifyPlaylistImportStatus.textContent = 'Conecta Spotify para importar una playlist vinculada.';
+        } else if (!spotifyRequiredScopesGranted) {
+            spotifyPlaylistImportStatus.textContent = 'Actualiza los permisos desde aquí o desde Me gusta para habilitar todas las funciones de Spotify.';
         } else if (!spotifyPlaylistScopesGranted) {
             spotifyPlaylistImportStatus.textContent = 'Actualiza los permisos de Spotify para permitir la lectura de playlists.';
         } else if (!spotifyIdentityLinked) {
@@ -9362,9 +9377,11 @@ export function initMusicPlayer() {
             const result = await response.json().catch(() => null);
             if (!response.ok) throw new Error(result?.error || 'No se pudo consultar Spotify.');
             const connectionChanged = spotifyIsConnected !== result.connected;
+            const requiredScopesChanged = spotifyRequiredScopesGranted !== (result.requiredScopesGranted === true);
             const playlistScopesChanged = spotifyPlaylistScopesGranted !== (result.playlistScopesGranted === true);
             const identityLinkChanged = spotifyIdentityLinked !== (result.identityLinked === true);
             spotifyIsConnected = result.connected;
+            spotifyRequiredScopesGranted = result.requiredScopesGranted === true;
             spotifyPlaylistScopesGranted = result.playlistScopesGranted === true;
             spotifyIdentityLinked = result.identityLinked === true;
             if (!result.connected) {
@@ -9381,7 +9398,7 @@ export function initMusicPlayer() {
             }
             if (spotifyConnectButton) {
                 spotifyConnectButton.hidden = result.connected
-                    && spotifyPlaylistScopesGranted
+                    && spotifyRequiredScopesGranted
                     && spotifyIdentityLinked;
                 spotifyConnectButton.disabled = !result.configured;
                 spotifyConnectButton.textContent = result.connected
@@ -9389,14 +9406,14 @@ export function initMusicPlayer() {
                     : 'Conectar Spotify';
                 if (!result.configured) spotifyConnectButton.title = 'Configura Spotify en el servidor.';
             }
-            if (spotifyRefreshButton) spotifyRefreshButton.hidden = !result.connected;
+            if (spotifyRefreshButton) spotifyRefreshButton.hidden = !result.connected || !spotifyRequiredScopesGranted;
             if (spotifyDisconnectButton) spotifyDisconnectButton.hidden = !result.connected;
-            if (spotifyLoadMoreButton && !result.connected) spotifyLoadMoreButton.hidden = true;
+            if (spotifyLoadMoreButton) spotifyLoadMoreButton.hidden = !result.connected || !spotifyRequiredScopesGranted || !spotifyHasMore;
             if (spotifyLikesSearch) spotifyLikesSearch.hidden = !result.connected;
             if (spotifyLikesStatus) {
                 spotifyLikesStatus.textContent = result.connected
-                    ? `Conectado${result.displayName ? ` como ${result.displayName}` : ''}.${!spotifyPlaylistScopesGranted
-                        ? ' Actualiza los permisos para acceder a playlists.'
+                    ? `Conectado${result.displayName ? ` como ${result.displayName}` : ''}.${!spotifyRequiredScopesGranted
+                        ? ' Actualiza los permisos para habilitar todas las funciones de Spotify.'
                         : !spotifyIdentityLinked
                             ? ' Actualiza la conexión para vincular Spotify con tu usuario de AMGC.'
                             : ''}`
@@ -9408,13 +9425,13 @@ export function initMusicPlayer() {
             if (
                 result.connected
                 && result.playlistScopesGranted
-                && (connectionChanged || playlistScopesChanged || identityLinkChanged)
+                && (connectionChanged || requiredScopesChanged || playlistScopesChanged || identityLinkChanged)
                 && isPlaylistViewMode
                 && activePlaylistId
             ) {
                 openPlaylistView(activePlaylistId);
             }
-            if (result.connected && (
+            if (result.connected && spotifyRequiredScopesGranted && (
                 loadTracks
                 || (connectionChanged && !spotifyLikedTracksLoaded)
                 || (spotifyLikesSection?.open && !spotifyLikedTracksLoaded)
@@ -9453,7 +9470,9 @@ export function initMusicPlayer() {
             const result = await response.json().catch(() => null);
             if (!response.ok) throw new Error(result?.error || 'No se pudo desconectar Spotify.');
             spotifyIsConnected = false;
+            spotifyRequiredScopesGranted = false;
             spotifyPlaylistScopesGranted = false;
+            spotifyIdentityLinked = false;
             spotifyApiAccessToken = '';
             spotifyApiAccessTokenExpiresAt = 0;
             spotifyApiAccessTokenUserId = '';
@@ -11285,6 +11304,43 @@ export function initMusicPlayer() {
                 creator._id &&
                 all.findIndex(item => String(item._id) === String(creator._id)) === index
             ));
+            const spotifyParticipants = isSpotifyLinked && Array.isArray(pl.spotifyParticipants)
+                ? pl.spotifyParticipants
+                : [];
+            const displayCreators = spotifyParticipants.length
+                ? spotifyParticipants.map(participant => ({
+                    userId: participant.userId || '',
+                    username: participant.name || 'Usuario de Spotify',
+                    profilePhoto: participant.photoUrl || '',
+                    url: participant.url || ''
+                }))
+                : creators.map(creator => ({
+                    userId: creator._id,
+                    username: creator.username,
+                    profilePhoto: creator.profilePhoto || '',
+                    url: ''
+                }));
+            const renderCreatorAvatar = creator => {
+                const avatar = creator.profilePhoto
+                    ? `<img src="${escapeHtml(creator.profilePhoto)}" alt="" class="pl-creator-avatar" />`
+                    : '<span class="pl-creator-avatar-placeholder">♫</span>';
+                if (creator.userId) {
+                    return `<button type="button" class="pl-creator-avatar-link" data-user-id="${escapeHtml(creator.userId)}" data-username="${escapeHtml(creator.username)}" data-profile-photo="${escapeHtml(creator.profilePhoto)}">${avatar}</button>`;
+                }
+                if (creator.url) {
+                    return `<a class="pl-creator-avatar-link spotify-participant-link" href="${escapeHtml(creator.url)}" target="_blank" rel="noopener noreferrer" aria-label="Abrir perfil de Spotify de ${escapeHtml(creator.username)}">${avatar}</a>`;
+                }
+                return `<span class="pl-creator-avatar-link" aria-hidden="true">${avatar}</span>`;
+            };
+            const renderCreatorName = creator => {
+                if (creator.userId) {
+                    return `<button type="button" class="pl-creator-link" data-user-id="${escapeHtml(creator.userId)}" data-username="${escapeHtml(creator.username)}" data-profile-photo="${escapeHtml(creator.profilePhoto)}">${escapeHtml(creator.username)}</button>`;
+                }
+                if (creator.url) {
+                    return `<a class="pl-creator-link spotify-participant-link" href="${escapeHtml(creator.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(creator.username)}</a>`;
+                }
+                return `<span class="pl-creator-link">${escapeHtml(creator.username)}</span>`;
+            };
 
             plViewOwner.innerHTML = `
                 <span id="pl-view-stats" class="pl-view-stats">
@@ -11295,19 +11351,17 @@ export function initMusicPlayer() {
                 </span>
                 <span class="pl-view-creators">
                     <span class="pl-creator-avatars">
-                        ${creators.map(creator => `
+                        ${displayCreators.map(creator => `
                             <span class="pl-creator-avatar-wrap">
-                            <button type="button" class="pl-creator-avatar-link" data-user-id="${escapeHtml(creator._id)}" data-username="${escapeHtml(creator.username)}" data-profile-photo="${escapeHtml(creator.profilePhoto || '')}">
-                                ${creator.profilePhoto ? `<img src="${escapeHtml(creator.profilePhoto)}" alt="" class="pl-creator-avatar" />` : '<span class="pl-creator-avatar-placeholder">?</span>'}
-                            </button>
+                                ${renderCreatorAvatar(creator)}
                             </span>
                         `).join('')}
                     </span>
                     <span class="pl-creator-names">
-                        ${creators.map((creator, index) => `
-                            ${index > 0 && index === creators.length - 1 ? '<span class="pl-creator-separator">&nbsp;y&nbsp;</span>' : ''}
-                            ${index > 0 && index < creators.length - 1 ? '<span class="pl-creator-separator">, </span>' : ''}
-                            <button type="button" class="pl-creator-link" data-user-id="${escapeHtml(creator._id)}" data-username="${escapeHtml(creator.username)}" data-profile-photo="${escapeHtml(creator.profilePhoto || '')}">${escapeHtml(creator.username)}</button>
+                        ${displayCreators.map((creator, index) => `
+                            ${index > 0 && index === displayCreators.length - 1 ? '<span class="pl-creator-separator">&nbsp;y&nbsp;</span>' : ''}
+                            ${index > 0 && index < displayCreators.length - 1 ? '<span class="pl-creator-separator">, </span>' : ''}
+                            ${renderCreatorName(creator)}
                         `).join('')}
                     </span>
                 </span>
@@ -11380,7 +11434,7 @@ export function initMusicPlayer() {
                 }
             });
 
-            plViewOwner.querySelectorAll('.pl-creator-link, .pl-creator-avatar-link').forEach(button => {
+            plViewOwner.querySelectorAll('button.pl-creator-link, button.pl-creator-avatar-link').forEach(button => {
                 button.addEventListener('click', (event) => {
                     event.stopPropagation();
                     const current = getStoredUser();
@@ -11411,6 +11465,9 @@ export function initMusicPlayer() {
                     renderProfile();
                     updateBackgroundAndViews();
                 });
+            });
+            plViewOwner.querySelectorAll('a.spotify-participant-link').forEach(link => {
+                link.addEventListener('click', event => event.stopPropagation());
             });
 
         }
@@ -12834,6 +12891,7 @@ export function initMusicPlayer() {
     btnDeclineJamRequest?.addEventListener('click', () => requestJamResponse(false));
     btnNext.addEventListener('click', playNextTrack);
     audio.addEventListener('ended', () => {
+        if (!audio.ended) return;
         updateDiscordPresence();
         if (currentTrackSource === 'together' && listeningTogetherUserId) return;
         playNextTrack();

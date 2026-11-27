@@ -1708,8 +1708,20 @@ img.no-image { font-size: 0.65rem; object-fit: none; }
     align-items: center;
     gap: 6px;
     overflow: hidden;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: #000;
+    box-shadow: none;
     color: #fff;
     text-decoration: none;
+}
+.playlist-track-meta .spotify-contributor-link:hover,
+.playlist-track-meta .spotify-contributor-link:focus,
+.playlist-track-meta .spotify-contributor-link:active {
+    background: #000;
+    box-shadow: none;
+    outline: none;
 }
 .spotify-contributor-link > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .playlist-meta-avatar-placeholder { display: inline-grid; width: 20px; height: 20px; flex: 0 0 20px; place-items: center; border-radius: 50%; background: rgba(255,255,255,.12); color: rgba(255,255,255,.82); font-size: 12px; }

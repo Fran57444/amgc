@@ -51,6 +51,7 @@ const state = {
   suggestions: [],
   spotifyConnected: false,
   spotifyConfigured: false,
+  spotifyRequiredScopesGranted: false,
   spotifyPlaylistScopesGranted: false,
   spotifyIdentityLinked: false,
   spotifyTracks: [],
@@ -2079,13 +2080,13 @@ function renderSpotifyLikesSection() {
     ? 'Actualizar permisos de Spotify'
     : 'Conectar Spotify';
   connectButton.hidden = state.spotifyConnected
-    && state.spotifyPlaylistScopesGranted
+    && state.spotifyRequiredScopesGranted
     && state.spotifyIdentityLinked;
   connectButton.disabled = !state.spotifyConfigured;
   const refreshButton = makeButton('text-button', 'Actualizar lista', () => {
     void loadSpotifyLikedTracks({ refresh: true });
   }, 'Actualizar');
-  refreshButton.hidden = !state.spotifyConnected;
+  refreshButton.hidden = !state.spotifyConnected || !state.spotifyRequiredScopesGranted;
   const disconnectButton = makeButton('text-button', 'Desconectar', () => {
     void disconnectSpotify(disconnectButton);
   }, 'Desconectar');
@@ -2097,7 +2098,7 @@ function renderSpotifyLikesSection() {
   const loadMoreButton = makeButton('text-button', 'Cargar más canciones', () => {
     void loadSpotifyLikedTracks({ append: true });
   }, 'Cargar más canciones');
-  loadMoreButton.hidden = !state.spotifyHasMore;
+  loadMoreButton.hidden = !state.spotifyRequiredScopesGranted || !state.spotifyHasMore;
   toolbar.append(connectButton, refreshButton, disconnectButton, importButton, loadMoreButton);
   section.append(toolbar);
 
@@ -2138,7 +2139,7 @@ function updateSpotifyPlaylistImportForm() {
     ? 'Actualizar permisos de Spotify'
     : 'Conectar Spotify';
   connectButton.hidden = state.spotifyConnected
-    && state.spotifyPlaylistScopesGranted
+    && state.spotifyRequiredScopesGranted
     && state.spotifyIdentityLinked;
   connectButton.disabled = !state.spotifyConfigured;
   loadButton.textContent = state.spotifyPlaylistsLoaded ? 'Actualizar playlists' : 'Cargar playlists';
@@ -2146,6 +2147,8 @@ function updateSpotifyPlaylistImportForm() {
   moreButton.hidden = !state.spotifyPlaylistsHasMore;
   status.textContent = !state.spotifyConnected
     ? 'Conecta Spotify para importar una playlist vinculada.'
+    : !state.spotifyRequiredScopesGranted
+      ? 'Actualiza los permisos desde aquí o desde Me gusta para habilitar todas las funciones de Spotify.'
     : !state.spotifyPlaylistScopesGranted
       ? 'Actualiza los permisos de Spotify para permitir la lectura de playlists.'
       : !state.spotifyIdentityLinked
@@ -2165,7 +2168,7 @@ function renderSpotifyPlaylistRows(list) {
     const info = makeElement('span', 'spotify-like-info');
     info.append(
       makeElement('strong', '', spotifyPlaylist.name),
-      makeElement('small', '', `${spotifyPlaylist.ownerName} · ${spotifyPlaylist.totalTracks} canciones · ${spotifyPlaylist.collaborative ? 'Colaborativa' : 'No colaborativa'} · ${spotifyPlaylist.isPublic ? 'Pública' : 'No pública'}`)
+      makeElement('small', '', `${spotifyPlaylist.ownerName} · ${spotifyPlaylist.totalTracks} canciones · ${spotifyPlaylist.isPublic ? 'Pública' : 'No pública'}`)
     );
     const action = makeButton(
       'secondary-button',
@@ -2362,18 +2365,18 @@ function updateSpotifyLikesSection() {
       ? 'Actualizar permisos de Spotify'
       : 'Conectar Spotify';
     connectButton.hidden = state.spotifyConnected
-      && state.spotifyPlaylistScopesGranted
+      && state.spotifyRequiredScopesGranted
       && state.spotifyIdentityLinked;
     connectButton.disabled = !state.spotifyConfigured;
   }
   const refreshButton = button('Actualizar');
-  if (refreshButton) refreshButton.hidden = !state.spotifyConnected;
+  if (refreshButton) refreshButton.hidden = !state.spotifyConnected || !state.spotifyRequiredScopesGranted;
   const disconnectButton = button('Desconectar');
   if (disconnectButton) disconnectButton.hidden = !state.spotifyConnected;
   const importButton = button('Importar seleccionadas como sugerencias');
   if (importButton) importButton.hidden = !state.spotifySelectedTrackIds.size;
   const loadMoreButton = button('Cargar más canciones');
-  if (loadMoreButton) loadMoreButton.hidden = !state.spotifyHasMore;
+  if (loadMoreButton) loadMoreButton.hidden = !state.spotifyRequiredScopesGranted || !state.spotifyHasMore;
   const list = section.querySelector('.spotify-likes-list');
   if (list) renderSpotifyLikedTracks(list);
   updateSpotifyPlaylistImportForm();
@@ -2389,10 +2392,12 @@ async function loadSpotifyStatus(loadTracks = false) {
       if (String(state.user?._id || '') !== userId) return;
       const wasConnected = state.spotifyConnected;
       const wasConfigured = state.spotifyConfigured;
+      const hadRequiredScopes = state.spotifyRequiredScopesGranted;
       const hadPlaylistScopes = state.spotifyPlaylistScopesGranted;
       const hadIdentityLink = state.spotifyIdentityLinked;
       state.spotifyConfigured = result.configured === true;
       state.spotifyConnected = result.connected === true;
+      state.spotifyRequiredScopesGranted = result.requiredScopesGranted === true;
       state.spotifyPlaylistScopesGranted = result.playlistScopesGranted === true;
       state.spotifyIdentityLinked = result.identityLinked === true;
       if (!state.spotifyConnected) {
@@ -2416,13 +2421,13 @@ async function loadSpotifyStatus(loadTracks = false) {
       }
       state.spotifyStatusMessage = state.spotifyConnected
         ? state.spotifyTracksLoaded
-          ? `${state.spotifyTracks.length} de ${state.spotifyTotal} canciones cargadas.${!state.spotifyPlaylistScopesGranted
-            ? ' Actualiza permisos para importar playlists.'
+          ? `${state.spotifyTracks.length} de ${state.spotifyTotal} canciones cargadas.${!state.spotifyRequiredScopesGranted
+            ? ' Actualiza permisos para habilitar todas las funciones de Spotify.'
             : !state.spotifyIdentityLinked
               ? ' Actualiza la conexión para vincular Spotify con tu usuario de AMGC.'
               : ''}`
-          : `Spotify conectado.${!state.spotifyPlaylistScopesGranted
-            ? ' Actualiza permisos para importar playlists.'
+          : `Spotify conectado.${!state.spotifyRequiredScopesGranted
+            ? ' Actualiza permisos para habilitar todas las funciones de Spotify.'
             : !state.spotifyIdentityLinked
               ? ' Actualiza la conexión para vincular Spotify con tu usuario de AMGC.'
               : ' Abre esta sección para cargar tus Me gusta.'}`
@@ -2433,6 +2438,7 @@ async function loadSpotifyStatus(loadTracks = false) {
         if (
           wasConnected !== state.spotifyConnected
           || wasConfigured !== state.spotifyConfigured
+          || hadRequiredScopes !== state.spotifyRequiredScopesGranted
           || hadPlaylistScopes !== state.spotifyPlaylistScopesGranted
           || hadIdentityLink !== state.spotifyIdentityLinked
         ) {
@@ -2446,6 +2452,7 @@ async function loadSpotifyStatus(loadTracks = false) {
         state.spotifyConnected
         && state.spotifyPlaylistScopesGranted
         && (wasConnected !== state.spotifyConnected
+          || hadRequiredScopes !== state.spotifyRequiredScopesGranted
           || hadPlaylistScopes !== state.spotifyPlaylistScopesGranted
           || hadIdentityLink !== state.spotifyIdentityLinked)
         && state.currentPlaylistId
@@ -2454,7 +2461,7 @@ async function loadSpotifyStatus(loadTracks = false) {
           .find(playlist => String(playlist.id) === String(state.currentPlaylistId));
         if (activePlaylist?.spotifyPlaylistId) void syncSpotifyPlaylist(activePlaylist);
       }
-      if (state.spotifyConnected && (loadTracks || state.spotifySectionOpen)) {
+      if (state.spotifyConnected && state.spotifyRequiredScopesGranted && (loadTracks || state.spotifySectionOpen)) {
         await loadSpotifyLikedTracks();
       }
     } catch (error) {
@@ -2474,6 +2481,11 @@ async function loadSpotifyStatus(loadTracks = false) {
 
 async function loadSpotifyLikedTracks({ refresh = false, append = false } = {}) {
   if (!state.spotifyConnected) return;
+  if (!state.spotifyRequiredScopesGranted) {
+    state.spotifyStatusMessage = 'Actualiza los permisos de Spotify para habilitar todas sus funciones.';
+    updateSpotifyLikesSection();
+    return;
+  }
   if (spotifyTracksRequest) return spotifyTracksRequest;
   const userId = String(state.user?._id || '');
   const offset = append ? state.spotifyNextOffset : 0;
@@ -2594,6 +2606,7 @@ async function disconnectSpotify(button) {
   try {
     await request('/spotify/disconnect', { method: 'POST' });
     state.spotifyConnected = false;
+    state.spotifyRequiredScopesGranted = false;
     state.spotifyPlaylistScopesGranted = false;
     state.spotifyIdentityLinked = false;
     spotifyApiAccessToken = '';
@@ -2687,14 +2700,30 @@ function renderPlaylistDetail() {
     makeElement('p', 'playlist-owner', 'De ')
   );
   const ownerLine = copy.querySelector('.playlist-owner');
-  ownerLine.append(makeProfileUserLink(creator));
+  const spotifyParticipants = isSpotifyLinked && Array.isArray(playlist.spotifyParticipants)
+    ? playlist.spotifyParticipants
+    : [];
+  if (spotifyParticipants.length) {
+    ownerLine.classList.add('is-spotify-playlist');
+    spotifyParticipants.forEach((participant, index) => {
+      if (index > 0) {
+        ownerLine.append(document.createTextNode(index === spotifyParticipants.length - 1 ? ' y ' : ', '));
+      }
+      ownerLine.append(makeSpotifyAttributionElement({
+        spotifyAddedByName: participant.name,
+        spotifyAddedByProfile: participant
+      }));
+    });
+  } else {
+    ownerLine.append(makeProfileUserLink(creator));
+  }
   if (Number(playlist.savedCount) > 0) {
     copy.append(makeButton('playlist-saved-count', `${playlist.savedCount} personas guardaron esta playlist`,
       () => void openPlaylistSaversSheet(playlist), `♡ ${playlist.savedCount} guardados`));
   }
   const contributors = makeElement('p', 'playlist-contributors');
   const sharedMembers = Array.isArray(playlist.sharedWith) ? playlist.sharedWith : [];
-  if (sharedMembers.length) {
+  if (sharedMembers.length && !isSpotifyLinked) {
     contributors.append(document.createTextNode('Integrantes: '));
     sharedMembers.forEach((member, index) => {
       if (index) contributors.append(document.createTextNode(' · '));
@@ -8414,6 +8443,9 @@ function logout(showMessage) {
   state.suggestions = [];
   state.spotifyConnected = false;
   state.spotifyConfigured = false;
+  state.spotifyRequiredScopesGranted = false;
+  state.spotifyPlaylistScopesGranted = false;
+  state.spotifyIdentityLinked = false;
   state.spotifyTracks = [];
   state.spotifyTracksLoaded = false;
   state.spotifySelectedTrackIds.clear();
