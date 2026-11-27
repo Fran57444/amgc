@@ -112,6 +112,7 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--track-color); o
 .song-cover { width: 48px; height: 48px; flex: 0 0 48px; border: 1px solid rgba(255,255,255,.14); border-radius: 4px; background: #111; object-fit: cover; }
 .song-cover-loading { position: relative; display: inline-flex; width: 48px; height: 48px; flex: 0 0 48px; align-items: center; justify-content: center; border-radius: 4px; }
 .song-cover-loading.is-cover-loading .song-cover, .queue-cover-loading.is-cover-loading img { visibility: hidden; }
+.spotify-import-duration-badge { position: absolute; z-index: 4; top: 3px; right: 3px; padding: 3px 5px; border-radius: 4px; background: rgba(0,0,0,.82); color: #fff; font-size: .58rem; line-height: 1.2; pointer-events: none; }
 .song-loading-spinner { position: absolute; inset: 0; display: grid; place-items: center; border-radius: inherit; background: rgba(0,0,0,.55); }
 .song-loading-spinner::after { width: 21px; height: 21px; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; content: ""; animation: song-loading-spin .75s linear infinite; }
 .song-loading-spinner.syncing::after { border-top-color: #ffbf78; }
@@ -318,7 +319,12 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--track-color); o
 .spotify-playlists-status { min-height: 1.3em; color: var(--muted); font-size: .76rem; line-height: 1.45; }
 .spotify-playlists-list { display: grid; gap: 8px; max-height: 30vh; overflow-y: auto; }
 .spotify-playlist-row { display: flex; min-width: 0; align-items: center; gap: 10px; padding: 8px; border-radius: 7px; background: rgba(255,255,255,.05); }
+.spotify-playlist-cover-frame { position: relative; display: grid; width: 42px; height: 42px; flex: 0 0 42px; place-items: center; overflow: hidden; border-radius: 4px; background: linear-gradient(145deg, rgba(124,58,237,.28), rgba(29,185,84,.2)), #17171b; }
 .spotify-playlist-cover { width: 42px; height: 42px; flex: 0 0 42px; border-radius: 4px; object-fit: cover; }
+.spotify-playlist-cover-frame .spotify-playlist-cover { position: absolute; inset: 0; }
+.spotify-playlist-cover-placeholder { color: rgba(255,255,255,.78); font-size: 1.35rem; line-height: 1; }
+.spotify-playlist-cover-spinner { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(0,0,0,.42); }
+.spotify-playlist-cover-spinner::after { width: 18px; height: 18px; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; content: ""; animation: song-loading-spin .75s linear infinite; }
 .spotify-unavailable-song-row { opacity: .8; }
 .spotify-unavailable-label { color: var(--muted); font-size: .68rem; }
 .spotify-track-open { color: #9c9; font-size: .74rem; }

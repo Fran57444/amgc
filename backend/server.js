@@ -1072,8 +1072,6 @@ function getOAuthClient() {
 const oauthClient = getOAuthClient();
 const drive = google.drive({ version: 'v3', auth: oauthClient });
 const upload = multer({ storage: multer.memoryStorage() });
-let cachedDriveAccessToken = null;
-let cachedDriveTokenExpiresAt = 0;
 async function verifyDiscordCoverUrl(imageUrl) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
@@ -3341,29 +3339,19 @@ app.post('/api/spotify/disconnect', async (req, res) => {
   }
 });
 
-app.get('/api/spotify/cover', async (req, res) => {
+app.get('/api/spotify/cover', (req, res) => {
+  let coverUrl;
   try {
-    const coverUrl = typeof req.query.url === 'string' ? new URL(req.query.url) : null;
-    if (!coverUrl || coverUrl.protocol !== 'https:' || coverUrl.hostname !== 'i.scdn.co'
-      || coverUrl.username || coverUrl.password || (coverUrl.port && coverUrl.port !== '443')) {
-      return res.status(400).json({ error: 'La URL de portada de Spotify no es válida.' });
-    }
-    const response = await axios.get(coverUrl.toString(), {
-      responseType: 'arraybuffer',
-      maxContentLength: 5 * 1024 * 1024,
-      maxBodyLength: 5 * 1024 * 1024,
-      maxRedirects: 0,
-      timeout: 15000
-    });
-    const contentType = response.headers['content-type'] || '';
-    if (!contentType.startsWith('image/')) {
-      return res.status(502).json({ error: 'Spotify no devolvió una imagen válida.' });
-    }
-    res.type(contentType).send(Buffer.from(response.data));
-  } catch (error) {
-    console.error('No se pudo cargar la portada de Spotify.', error.message || error);
-    res.status(502).json({ error: 'No se pudo cargar la portada de Spotify.' });
+    coverUrl = typeof req.query.url === 'string' ? new URL(req.query.url) : null;
+  } catch {
+    return res.status(400).json({ error: 'La URL de portada de Spotify no es válida.' });
   }
+  if (!coverUrl || coverUrl.protocol !== 'https:' || coverUrl.hostname !== 'i.scdn.co'
+    || coverUrl.username || coverUrl.password || (coverUrl.port && coverUrl.port !== '443')) {
+    return res.status(400).json({ error: 'La URL de portada de Spotify no es válida.' });
+  }
+  res.setHeader('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
+  return res.redirect(302, coverUrl.href);
 });
 
 app.get('/api/youtube/search', async (req, res) => {
@@ -3507,6 +3495,11 @@ app.post('/api/song-suggestions/:id/complete', async (req, res) => {
 app.post('/api/songs', upload.fields([{ name: 'mp3' }, { name: 'cover' }]), async (req, res) => {
   try {
     if (!await authorizePermission(res, req.user, 'edit_songs')) return;
+    if (process.env.NODE_ENV === 'production' && req.body.ytLink) {
+      return res.status(400).json({
+        error: 'La web no descarga audio de YouTube en el servidor para evitar consumo de Render. Usa la aplicación de escritorio o sube un archivo MP3.'
+      });
+    }
     const songName = typeof req.body.name === 'string' ? req.body.name.trim() : '';
     const songArtist = typeof req.body.artist === 'string' ? req.body.artist.trim() : '';
     if (!songName || !songArtist) {
@@ -4422,83 +4415,23 @@ app.post(['/api/yt-download', '/api/yt-download/upload'], (_req, res) => {
 
 app.get('/api/media/:fileId', async (req, res) => {
   const { fileId } = req.params;
-  try {
-    if (!oauthClient) {
-      console.error('Drive no disponible: cliente OAuth no inicializado.');
-      return res.status(503).json({ error: 'Google Drive no está configurado en el servidor.' });
-    }
-
-    const now = Date.now();
-    if (!cachedDriveAccessToken || cachedDriveTokenExpiresAt <= now) {
-      const accessTokenObj = await oauthClient.getAccessToken();
-      cachedDriveAccessToken = accessTokenObj.token || accessTokenObj;
-      cachedDriveTokenExpiresAt = now + (5 * 60 * 1000);
-    }
-
-    const headers = { Authorization: `Bearer ${cachedDriveAccessToken}` };
-    if (req.headers.range) headers.Range = req.headers.range;
-
-    let response;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      try {
-        response = await axios({
-          method: 'get',
-          url: `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
-          headers,
-          responseType: 'stream',
-          validateStatus: status => status >= 200 && status < 400
-        });
-        break;
-      } catch (error) {
-        if (typeof error.response?.data?.destroy === 'function') {
-          error.response.data.destroy();
-        }
-        const status = error.response?.status;
-        const retryable = status === 429 || status >= 500
-          || ['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN'].includes(error.code);
-        if (!retryable || attempt === 2) throw error;
-        await new Promise(resolve => setTimeout(resolve, 500 * (2 ** attempt)));
-      }
-    }
-
-    if (response.headers['content-type']) res.setHeader('Content-Type', response.headers['content-type']);
-    if (response.headers['content-length']) res.setHeader('Content-Length', response.headers['content-length']);
-    if (response.headers['content-range']) res.setHeader('Content-Range', response.headers['content-range']);
-    res.setHeader('Accept-Ranges', 'bytes');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
-
-    res.status(response.status);
-    response.data.pipe(res);
-  } catch (error) {
-    const status = error.response?.status;
-    const googleError = error.response?.data?.error;
-    const isAuthError = status === 401
-      || status === 403
-      || error.code === 'invalid_grant'
-      || error.message?.includes('invalid_grant');
-    const responseStatus = status === 404 ? 404
-      : status === 429 ? 503
-        : status >= 500 || isAuthError ? 502
-          : status ? 502 : 500;
-
-    console.error('Error obteniendo archivo multimedia desde Google Drive:', {
-      fileId,
-      message: error.message,
-      code: error.code,
-      status,
-      googleReason: googleError?.errors?.[0]?.reason || googleError?.status
-    });
-
-    res.status(responseStatus).json({
-      error: isAuthError
-        ? 'La autorizacion de Google Drive expiro o no tiene permisos.'
-        : status === 404
-          ? 'El archivo no existe en Google Drive.'
-          : 'No se pudo obtener el archivo multimedia desde Google Drive.',
-      ...(process.env.NODE_ENV !== 'production' && { details: error.message })
-    });
+  if (!/^[\w-]{25,}$/.test(fileId)) {
+    return res.status(400).json({ error: 'El archivo multimedia no es válido.' });
   }
+
+  const isImage = req.get('sec-fetch-dest') === 'image'
+    || /^image\//i.test(req.get('accept') || '');
+  const mediaUrl = new URL(
+    isImage ? 'https://drive.google.com/thumbnail' : 'https://drive.google.com/uc'
+  );
+  mediaUrl.searchParams.set('id', fileId);
+  if (isImage) mediaUrl.searchParams.set('sz', 'w1000');
+  else mediaUrl.searchParams.set('export', 'download');
+
+  res.vary('Accept');
+  res.vary('Sec-Fetch-Dest');
+  res.setHeader('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
+  return res.redirect(302, mediaUrl.href);
 });
 
 if (process.env.NODE_ENV === 'production') {

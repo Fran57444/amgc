@@ -8833,14 +8833,7 @@ export function initMusicPlayer() {
         for (const spotifyPlaylist of spotifyPlaylists) {
             const item = document.createElement('li');
             item.className = 'spotify-like-item';
-            const imageUrl = spotifyPlaylist.image || '';
-            if (imageUrl) {
-                const image = document.createElement('img');
-                image.src = imageUrl;
-                image.alt = '';
-                image.loading = 'lazy';
-                item.appendChild(image);
-            }
+            item.appendChild(createSpotifyPlaylistArtwork(spotifyPlaylist.image, spotifyPlaylist.name));
             const info = document.createElement('span');
             info.className = 'spotify-like-info';
             const name = document.createElement('strong');
@@ -8889,6 +8882,54 @@ export function initMusicPlayer() {
             fragment.appendChild(item);
         }
         spotifyPlaylistsList.replaceChildren(fragment);
+    }
+
+    function createSpotifyPlaylistArtwork(imageUrl, playlistName) {
+        const frame = document.createElement('span');
+        frame.className = 'spotify-playlist-cover-frame';
+        frame.setAttribute('role', 'img');
+        frame.setAttribute('aria-label', `Portada de ${playlistName || 'playlist'}`);
+        const placeholder = document.createElement('span');
+        placeholder.className = 'spotify-playlist-cover-placeholder';
+        placeholder.setAttribute('aria-hidden', 'true');
+        placeholder.textContent = '♫';
+        frame.appendChild(placeholder);
+
+        if (typeof imageUrl !== 'string' || !imageUrl) return frame;
+
+        const image = document.createElement('img');
+        image.className = 'spotify-playlist-cover';
+        image.alt = '';
+        image.loading = 'lazy';
+        image.decoding = 'async';
+        const spinner = document.createElement('span');
+        spinner.className = 'spotify-playlist-cover-spinner';
+        spinner.setAttribute('role', 'status');
+        spinner.setAttribute('aria-label', 'Cargando portada');
+        frame.classList.add('is-loading');
+        frame.setAttribute('aria-busy', 'true');
+
+        const finishLoading = () => {
+            frame.classList.remove('is-loading');
+            frame.setAttribute('aria-busy', 'false');
+            spinner.remove();
+        };
+        image.addEventListener('load', () => {
+            placeholder.hidden = true;
+            finishLoading();
+        }, { once: true });
+        image.addEventListener('error', () => {
+            image.remove();
+            finishLoading();
+        }, { once: true });
+
+        frame.append(image, spinner);
+        image.src = imageUrl;
+        if (image.complete) {
+            if (image.naturalWidth > 0) placeholder.hidden = true;
+            finishLoading();
+        }
+        return frame;
     }
 
     function updateSpotifyPlaylistImportForm() {
@@ -11006,15 +11047,22 @@ export function initMusicPlayer() {
             if (isSpotifyUnavailable) {
                 const li = document.createElement('li');
                 li.className = 'playlist-track-row spotify-unavailable-track';
+                const canSuggestSpotifyTrack = isOwner
+                    && trackItem.spotifyTrackId
+                    && trackItem.artist?.toLocaleLowerCase() !== 'artista desconocido';
+                const spotifyDuration = Math.max(0, Number(trackItem.duration) || 0);
                 li.innerHTML = `
-                    <span class="song-cover-loading">${createImageMarkup(trackItem.cover || '', 'item-cover')}</span>
+                    <span class="song-cover-loading">
+                        ${createImageMarkup(trackItem.cover || '', 'item-cover')}
+                        ${canSuggestSpotifyTrack && spotifyDuration > 0 ? `<span class="spotify-import-duration-badge">${formatTrackTime(spotifyDuration)}</span>` : ''}
+                    </span>
                     <div class="all-songs-item-info">
                         <span class="all-songs-item-name">${escapeHtml(trackItem.name)}</span>
                         <span class="all-songs-item-artist">${escapeHtml(trackItem.artist)}</span>
-                        <small class="playlist-track-meta">No disponible en AMGC · ${formatTrackTime(Number(trackItem.duration) || 0)}</small>
+                        <small class="playlist-track-meta">No disponible en AMGC</small>
                     </div>
                     ${trackItem.externalUrl ? `<a class="spotify-track-open" href="${escapeHtml(trackItem.externalUrl)}" target="_blank" rel="noopener noreferrer">Abrir en Spotify</a>` : ''}
-                    ${isOwner && trackItem.spotifyTrackId && trackItem.artist?.toLocaleLowerCase() !== 'artista desconocido' ? '<button class="spotify-track-suggest modal-btn-text" type="button">Sugerir para el catálogo</button>' : ''}
+                    ${canSuggestSpotifyTrack ? '<button class="spotify-track-suggest modal-btn-text" type="button">Sugerir para el catálogo</button>' : ''}
                 `;
                 li.querySelector('.spotify-track-suggest')?.addEventListener('click', event => {
                     event.stopPropagation();

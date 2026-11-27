@@ -492,10 +492,7 @@ function resolveMediaUrl(path) {
     }
     const driveFileId = getDriveFileId(resolved);
     if (driveFileId) {
-      if (isAndroidNative) {
-        return `https://drive.google.com/uc?export=download&id=${encodeURIComponent(driveFileId)}`;
-      }
-      return `${API_BASE_URL}/media/${encodeURIComponent(driveFileId)}`;
+      return `https://drive.google.com/uc?export=download&id=${encodeURIComponent(driveFileId)}`;
     }
     if (resolved.pathname.startsWith('/mp3/')) return `${apiOrigin}${resolved.pathname}${resolved.search}`;
     return resolved.href;
@@ -526,7 +523,6 @@ function resolveImageUrl(path, size = 'small') {
   const rawPath = String(path).trim();
   if (/^(?:\.{1,2}\/|blob:|data:|file:|content:)/i.test(rawPath)) return rawPath;
   const resolvedUrl = resolveMediaUrl(rawPath);
-  if (!isAndroidNative) return resolvedUrl;
   const driveFileId = getDriveFileId(resolvedUrl);
   return driveFileId
     ? `https://drive.google.com/thumbnail?id=${encodeURIComponent(driveFileId)}&sz=${size === 'large' ? 'w1000' : 'w160'}`
@@ -543,7 +539,7 @@ function resolveOriginalDriveImageUrl(source) {
 function resolveOfflineResourceUrl(source, mediaType) {
   const resolvedUrl = resolveMediaUrl(source);
   const fileId = getDriveFileId(resolvedUrl);
-  if (isAndroidNative && fileId && mediaType.startsWith('image')) {
+  if (fileId && mediaType.startsWith('image')) {
     const size = mediaType === 'image-large' ? 'w1000' : 'w160';
     return `https://drive.google.com/thumbnail?id=${encodeURIComponent(fileId)}&sz=${size}`;
   }
@@ -1572,6 +1568,18 @@ function renderSongRow(song, options = {}) {
     const coverWrap = makeElement('span', 'song-cover-loading');
     const coverImage = imageElement(song.cover || '', 'song-cover', '');
     coverWrap.append(coverImage);
+    const canSuggestSpotifyTrack = options.playlist?.spotifyPlaylistId
+      && String(options.playlist.ownerId) === String(state.user?._id)
+      && song.spotifyTrackId
+      && String(song.artist || '').toLocaleLowerCase() !== 'artista desconocido';
+    const spotifyDuration = Math.max(0, Number(song.duration) || 0);
+    if (canSuggestSpotifyTrack && spotifyDuration > 0) {
+      coverWrap.append(makeElement(
+        'span',
+        'spotify-import-duration-badge',
+        `${formatTime(spotifyDuration)}`
+      ));
+    }
     row.append(coverWrap);
     const copy = makeElement('span', 'song-copy');
     copy.append(
@@ -1587,12 +1595,7 @@ function renderSongRow(song, options = {}) {
       spotifyLink.rel = 'noopener noreferrer';
       row.append(spotifyLink);
     }
-    if (
-      options.playlist?.spotifyPlaylistId
-      && String(options.playlist.ownerId) === String(state.user?._id)
-      && song.spotifyTrackId
-      && String(song.artist || '').toLocaleLowerCase() !== 'artista desconocido'
-    ) {
+    if (canSuggestSpotifyTrack) {
       row.append(makeButton('song-action', 'Sugerir para el catálogo', button => {
         void suggestSpotifyPlaylistTrack(options.playlist, song, button);
       }, '＋'));
@@ -1899,7 +1902,7 @@ function renderSpotifyPlaylistRows(list) {
   list.replaceChildren();
   for (const spotifyPlaylist of state.spotifyPlaylists) {
     const row = makeElement('article', 'spotify-playlist-row');
-    const image = imageElement(spotifyPlaylist.image, 'spotify-playlist-cover', '');
+    const artwork = makeSpotifyPlaylistArtwork(spotifyPlaylist.image, spotifyPlaylist.name);
     const info = makeElement('span', 'spotify-like-info');
     info.append(
       makeElement('strong', '', spotifyPlaylist.name),
@@ -1911,9 +1914,52 @@ function renderSpotifyPlaylistRows(list) {
       button => void importSpotifyPlaylist(spotifyPlaylist, button)
     );
     action.disabled = !state.spotifyConnected || !state.spotifyPlaylistScopesGranted;
-    row.append(image, info, action);
+    row.append(artwork, info, action);
     list.append(row);
   }
+}
+
+function makeSpotifyPlaylistArtwork(imageUrl, playlistName) {
+  const frame = makeElement('span', 'spotify-playlist-cover-frame');
+  frame.setAttribute('role', 'img');
+  frame.setAttribute('aria-label', `Portada de ${playlistName || 'playlist'}`);
+  const placeholder = makeElement('span', 'spotify-playlist-cover-placeholder', '♫');
+  placeholder.setAttribute('aria-hidden', 'true');
+  frame.append(placeholder);
+
+  if (typeof imageUrl !== 'string' || !imageUrl) return frame;
+
+  const image = makeElement('img', 'spotify-playlist-cover');
+  image.alt = '';
+  image.loading = 'lazy';
+  image.decoding = 'async';
+  const spinner = makeElement('span', 'spotify-playlist-cover-spinner');
+  spinner.setAttribute('role', 'status');
+  spinner.setAttribute('aria-label', 'Cargando portada');
+  frame.classList.add('is-loading');
+  frame.setAttribute('aria-busy', 'true');
+
+  const finishLoading = () => {
+    frame.classList.remove('is-loading');
+    frame.setAttribute('aria-busy', 'false');
+    spinner.remove();
+  };
+  image.addEventListener('load', () => {
+    placeholder.hidden = true;
+    finishLoading();
+  }, { once: true });
+  image.addEventListener('error', () => {
+    image.remove();
+    finishLoading();
+  }, { once: true });
+
+  frame.append(image, spinner);
+  image.src = imageUrl;
+  if (image.complete) {
+    if (image.naturalWidth > 0) placeholder.hidden = true;
+    finishLoading();
+  }
+  return frame;
 }
 
 async function loadSpotifyPlaylists({ append = false } = {}) {
