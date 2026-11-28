@@ -88,10 +88,12 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--track-color); o
 .song-list { display: flex; flex-direction: column; gap: 2px; }
 .song-row { display: flex; min-width: 0; align-items: center; gap: 8px; padding: 7px 6px; border-bottom: 1px solid rgba(255,255,255,.055); touch-action: pan-y; user-select: none; -webkit-user-select: none; transition: background .18s ease, transform .18s ease; }
 .song-list > .song-row { content-visibility: auto; contain-intrinsic-size: auto 64px; }
-.detail-song-row { display: grid; grid-template: "track action reorder" auto "meta meta meta" auto / minmax(0,1fr) 34px 32px; gap: 3px 6px; margin-bottom: 7px; padding: 9px 7px; border: 1px solid rgba(255,255,255,.09); border-radius: 6px; background: rgba(255,255,255,.025); }
-.song-list > .detail-song-row { contain-intrinsic-size: auto 104px; }
+.detail-song-row { display: grid; grid-template: "track meta" auto / minmax(0,1fr) minmax(0,30%); gap: 0 6px; margin-bottom: 4px; padding: 4px 5px; border: 1px solid rgba(255,255,255,.09); border-radius: 4px; background: rgba(255,255,255,.025); }
+.song-list > .detail-song-row { contain-intrinsic-size: auto 58px; }
 .detail-song-row .song-play { grid-area: track; }
-.playlist-track-meta { display: flex; min-width: 0; grid-area: meta; align-items: center; gap: 8px; padding-left: 59px; color: var(--muted); font-size: .64rem; }
+.playlist-track-meta { display: flex; min-width: 0; grid-area: meta; align-items: center; justify-content: flex-end; gap: 4px; overflow: hidden; padding: 0; color: var(--muted); font-size: .62rem; }
+.detail-song-row .playlist-track-meta > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.detail-song-row .spotify-contributor-link { max-width: 100%; }
 .playlist-meta-avatar { width: 18px; height: 18px; flex: 0 0 18px; border-radius: 50%; object-fit: cover; }
 .playlist-meta-avatar-placeholder { display: inline-grid; width: 18px; height: 18px; flex: 0 0 18px; place-items: center; border-radius: 50%; background: rgba(255,255,255,.12); color: rgba(255,255,255,.82); font-size: 11px; }
 .spotify-contributor-link { display: inline-flex; min-width: 0; max-width: 55%; flex: 0 1 auto; align-items: center; gap: 5px; overflow: hidden; color: #fff; text-decoration: none; }
@@ -103,9 +105,13 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--track-color); o
 .playlist-track-meta .spotify-contributor-link:active { background: transparent; }
 .spotify-contributor-link > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .playlist-track-meta .playlist-user-link { max-width: 100px; overflow: hidden; padding: 0; border: 0; background: transparent; color: #fff; font-size: inherit; text-overflow: ellipsis; white-space: nowrap; }
+.detail-song-row .playlist-track-meta .playlist-user-link { max-width: 100%; }
+.playlist-detail-copy { text-align: center; }
+.playlist-detail-copy > .playlist-track-count,
+.playlist-detail-copy > .playlist-owner { justify-content: center; text-align: center; }
+.playlist-detail-copy > .playlist-owner.is-spotify-playlist { flex-wrap: wrap; align-items: center; }
+.playlist-owner.is-spotify-playlist .spotify-contributor-link { max-width: none; }
 .playlist-track-meta > span:last-child { margin-left: auto; }
-.detail-song-row .song-action { grid-area: action; width: 34px; height: 38px; }
-.detail-song-row .drag-handle { grid-area: reorder; width: 32px; flex-basis: 32px; }
 .playlist-track-count { font-size: .72rem !important; }
 .song-row:active { background: rgba(255,255,255,.07); }
 .song-row.queue-add-dragging,.queue-row.queue-add-dragging { z-index: 4; transition: none; }
@@ -228,7 +234,7 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--track-color); o
 .playlist-detail-copy .playlist-contributors { margin-top: 7px; font-size: .72rem; }
 .playlist-owner .playlist-user-link,.playlist-contributors .playlist-user-link { padding: 0; border: 0; background: transparent; color: #fff; font-weight: 700; }
 .playlist-owner.is-spotify-playlist { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
-.playlist-owner.is-spotify-playlist .spotify-contributor-link { max-width: 48%; }
+.playlist-owner.is-spotify-playlist .spotify-contributor-link { max-width: none; }
 .playlist-saved-count { display: block; margin: 8px auto 0; padding: 4px 8px; border: 1px solid var(--border); border-radius: 20px; background: transparent; color: var(--muted); font-size: .7rem; }
 .playlist-member-option { cursor: default; }
 .member-remove-button { display: grid; width: 34px; height: 34px; flex: 0 0 34px; place-items: center; border: 1px solid var(--border); border-radius: 50%; background: transparent; color: #ff9a9e; font-size: 1.15rem; }
@@ -343,7 +349,7 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--track-color); o
 .spotify-playlist-cover-spinner::after { width: 18px; height: 18px; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; content: ""; animation: song-loading-spin .75s linear infinite; }
 .spotify-unavailable-song-row { position: relative; overflow: hidden; }
 .spotify-missing-cover { position: relative; }
-.spotify-missing-symbol { position: absolute; top: -4px; right: -4px; z-index: 3; display: grid; width: 17px; height: 17px; place-items: center; border: 1px solid rgba(255,255,255,.8); border-radius: 50%; background: #8d5be8; color: #fff; font-size: .75rem; line-height: 1; }
+.spotify-missing-symbol { position: absolute; top: -4px; right: -4px; z-index: 3; display: grid; width: 17px; height: 17px; place-items: center; border: 1px solid #000; border-radius: 50%; background: #8d5be8; color: #000; font-size: .75rem; line-height: 1; }
 .spotify-missing-add { position: absolute; z-index: 5; inset: 0; display: grid; width: 100%; height: 100%; place-items: center; border: 0; border-radius: inherit; background: rgba(68,45,104,.88); color: #fff; font: inherit; font-size: .9rem; font-weight: 700; opacity: 0; cursor: pointer; transition: opacity .16s ease; }
 .spotify-unavailable-song-row:hover > :not(.spotify-missing-add), .spotify-unavailable-song-row:focus-within > :not(.spotify-missing-add) { filter: blur(1.5px); }
 .spotify-unavailable-song-row:hover .spotify-missing-add, .spotify-missing-add:focus-visible { opacity: 1; }
@@ -351,7 +357,6 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--track-color); o
 .spotify-unavailable-song-row .spotify-missing-add { grid-area: action; }
 @media (hover: none) {
   .spotify-missing-add { inset: auto 8px 8px auto; width: auto; height: auto; padding: 6px 9px; border-radius: 5px; background: #5b3b85; opacity: 1; font-size: .72rem; }
-  .spotify-unavailable-song-row { padding-bottom: 42px; }
 }
 .playlist-direct-add-dialog { box-sizing: border-box; width: min(94vw, 680px); max-width: 680px; max-height: 90dvh; padding: 15px; overflow: auto; border: 1px solid var(--border); border-radius: 12px; background: #111; color: var(--text); }
 .playlist-direct-add-dialog::backdrop { background: rgba(0,0,0,.78); backdrop-filter: blur(4px); }

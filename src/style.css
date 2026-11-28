@@ -1073,7 +1073,7 @@ img.no-image { font-size: 0.65rem; object-fit: none; }
 .spotify-unavailable-track .playlist-added-by { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .spotify-like-item > button { flex: 0 0 auto; margin-left: auto; white-space: nowrap; }
 .spotify-missing-cover { position: relative; }
-.spotify-missing-symbol { position: absolute; top: -4px; right: -4px; display: grid; width: 17px; height: 17px; place-items: center; border: 1px solid rgba(255,255,255,0.8); border-radius: 50%; background: #8d5be8; color: #fff; font-size: 0.75rem; line-height: 1; }
+.spotify-missing-symbol { position: absolute; top: -4px; right: -4px; display: grid; width: 17px; height: 17px; place-items: center; border: 1px solid #000; border-radius: 50%; background: #8d5be8; color: #fff; font-size: 0.75rem; line-height: 1; }
 .playlist-direct-add-dialog { box-sizing: border-box; width: min(1400px, calc(100vw - 28px)); max-width: 1400px; max-height: min(92vh, 900px); padding: 18px; overflow: auto; border: 1px solid rgba(255,255,255,0.18); border-radius: 14px; background: #111; color: #fff; }
 .playlist-direct-add-dialog::backdrop { background: rgba(0,0,0,0.78); backdrop-filter: blur(4px); }
 .playlist-direct-add-dialog > header { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 14px; }

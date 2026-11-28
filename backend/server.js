@@ -613,6 +613,45 @@ async function getUniqueLinkedAmgcSpotifyUsers(spotifyIds) {
   );
 }
 
+async function shareCollaborativeSpotifyPlaylistsWithLinkedUser(userId, spotifyProfileId) {
+  const normalizedUserId = normalizeUserId(userId);
+  const normalizedSpotifyId = typeof spotifyProfileId === 'string' ? spotifyProfileId.trim() : '';
+  if (!isValidObjectId(normalizedUserId) || !normalizedSpotifyId) return 0;
+
+  const linkedUser = (await getUniqueLinkedAmgcSpotifyUsers([normalizedSpotifyId])).get(normalizedSpotifyId);
+  if (!linkedUser || linkedUser._id !== String(normalizedUserId)) return 0;
+
+  const playlists = await Playlist.find({
+    spotifyCollaborative: true,
+    userId: { $ne: normalizedUserId },
+    sharedWith: { $ne: normalizedUserId },
+    $or: [
+      { spotifyOwnerId: normalizedSpotifyId },
+      { 'spotifyTracks.spotifyAddedById': normalizedSpotifyId }
+    ]
+  }).select('_id').lean();
+  if (!playlists.length) return 0;
+
+  const updatedAt = new Date();
+  const sharedPlaylists = await Promise.all(playlists.map(playlist => (
+    Playlist.findOneAndUpdate(
+      {
+        _id: playlist._id,
+        userId: { $ne: normalizedUserId },
+        sharedWith: { $ne: normalizedUserId }
+      },
+      {
+        $addToSet: { sharedWith: normalizedUserId },
+        $set: { updatedAt }
+      },
+      { new: true }
+    ).select('id userId sharedWith').lean()
+  )));
+  const newlyShared = sharedPlaylists.filter(Boolean);
+  newlyShared.forEach(playlist => emitPlaylistChanged(playlist, playlist.userId));
+  return newlyShared.length;
+}
+
 async function mapSpotifyAddedByNamesToAmgcUsers(items) {
   const linkedUsersBySpotifyId = await getUniqueLinkedAmgcSpotifyUsers(
     items.map(item => item.spotifyAddedById)
@@ -2402,12 +2441,12 @@ app.post('/api/users/status', async (req, res) => {
           userId: userKey,
           playback: playbackStateByUser.get(userKey)
         });
-        for (const friendId of updatedUser.friends || []) {
-          realtimeIo?.to(`user:${friendId}`).emit('playbackStatusChanged', {
-            userId: userKey,
-            playback: playbackStateByUser.get(userKey)
-          });
-        }
+      }
+      for (const friendId of updatedUser.friends || []) {
+        realtimeIo?.to(`user:${friendId}`).emit('playbackStatusChanged', {
+          userId: String(updatedUser._id),
+          playback: playbackStateByUser.get(String(updatedUser._id))
+        });
       }
     }
     if (lastPlayed) emitUserStatsChanged(userId);
@@ -2884,12 +2923,17 @@ app.get('/api/spotify/status', async (req, res) => {
     const user = await User.findById(req.user._id)
       .select('+spotify.refreshTokenEncrypted +spotify.profileId spotify.scopes')
       .lean();
+    const connected = Boolean(user?.spotify?.refreshTokenEncrypted);
+    const sharedPlaylistsCount = connected && user?.spotify?.profileId
+      ? await shareCollaborativeSpotifyPlaylistsWithLinkedUser(req.user._id, user.spotify.profileId)
+      : 0;
     res.json({
       configured: Boolean(getSpotifyConfiguration()),
-      connected: Boolean(user?.spotify?.refreshTokenEncrypted),
+      connected,
       requiredScopesGranted: SPOTIFY_REQUIRED_SCOPES.every(scope => user?.spotify?.scopes?.includes(scope)),
       playlistScopesGranted: SPOTIFY_PLAYLIST_SCOPES.every(scope => user?.spotify?.scopes?.includes(scope)),
-      identityLinked: Boolean(user?.spotify?.profileId)
+      identityLinked: Boolean(user?.spotify?.profileId),
+      sharedPlaylistsCount
     });
   } catch (error) {
     console.error('No se pudo consultar la conexión de Spotify.', error);

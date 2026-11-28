@@ -77,7 +77,7 @@
         <div class="drawer-divider"></div>
         <div class="drawer-section-heading">
           <span>PLAYLISTS</span>
-          <button id="drawer-create-playlist" class="drawer-add" type="button" aria-label="Crear playlist">＋</button>
+          <button id="drawer-create-playlist" class="drawer-add" type="button" aria-label="Crear playlist" hidden>＋</button>
         </div>
         <div id="drawer-playlists" class="drawer-playlists"></div>
       </aside>
@@ -105,7 +105,7 @@
                 <path d="M8 21h8M12 16v5M5 21h14"></path>
               </svg>
             </button>
-            <button id="player-add-button" class="icon-button image-icon-button" type="button" aria-label="Añadir a playlist">
+            <button id="player-add-button" class="icon-button image-icon-button" type="button" aria-label="Añadir a playlist" hidden>
               <img src="./img/add.png" alt="" />
             </button>
           </div>
@@ -254,7 +254,7 @@
           <button class="icon-button" type="button" data-close-dialog aria-label="Cerrar">×</button>
         </div>
         <div id="add-to-playlist-options" class="sheet-options"></div>
-        <button id="create-playlist-from-picker" class="secondary-button" type="button">＋ Crear playlist</button>
+        <button id="create-playlist-from-picker" class="secondary-button" type="button" hidden>＋ Crear playlist</button>
       </section>
       <section id="share-playlist-sheet" class="sheet-content" hidden>
         <div class="sheet-heading">

@@ -140,6 +140,7 @@ const state = {
   customNotificationEnabled: localStorage.getItem('amgc-mobile-custom-notification') === 'true',
   notificationPermissionGranted: false
 };
+let playbackRestorePending = Boolean(state.token);
 const spotifyPlaylistSyncs = new Set();
 let accountQueuePublishChain = Promise.resolve();
 let pendingPlaybackTakeoverPromise = null;
@@ -1189,13 +1190,6 @@ function handleOwnPlaybackUpdate({ userId, playback } = {}) {
   }
 }
 
-function formatPlaylistDuration(seconds = 0) {
-  const safeSeconds = Math.max(0, Math.round(Number(seconds) || 0));
-  const hours = Math.floor(safeSeconds / 3600);
-  const minutes = Math.floor((safeSeconds % 3600) / 60);
-  return hours > 0 ? `${hours} h ${minutes} min` : `${minutes} min`;
-}
-
 function getContrastingTextColor(backgroundColor) {
   const match = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(String(backgroundColor || '').trim());
   if (!match) return '#fff';
@@ -1604,9 +1598,6 @@ function renderSongRow(song, options = {}) {
     coverWrap.append(coverImage);
     coverWrap.classList.add('spotify-missing-cover');
     coverWrap.append(makeElement('span', 'spotify-missing-symbol', '＋'));
-    const canAddSpotifyTrack = options.playlist?.spotifyPlaylistId
-      && String(options.playlist.ownerId) === String(state.user?._id)
-      && song.spotifyTrackId;
     const copy = makeElement('span', 'song-copy');
     copy.append(
       makeElement('strong', '', song.name || 'Contenido no disponible'),
@@ -1615,21 +1606,9 @@ function renderSongRow(song, options = {}) {
     const summary = makeElement('div', 'song-play');
     summary.append(coverWrap, copy);
     row.append(summary);
-    const addedAt = song.spotifyAddedAt
-      ? new Date(song.spotifyAddedAt).toLocaleDateString('es-CL', { timeZone: 'America/Santiago' })
-      : '--';
     const meta = makeElement('div', 'playlist-track-meta');
-    meta.append(
-      makeSpotifyAttributionElement(song),
-      makeElement('span', '', addedAt),
-      makeElement('span', '', formatTime(Number(song.duration) || 0))
-    );
+    meta.append(makeSpotifyAttributionElement(song));
     row.append(meta);
-    if (canAddSpotifyTrack) {
-      row.append(makeButton('spotify-missing-add song-action', 'Añadir canción', () => {
-        openDirectSpotifyTrackAdd(options.playlist, song);
-      }, 'Añadir canción'));
-    }
     return row;
   }
   const songId = getSongId(song);
@@ -1695,27 +1674,7 @@ function renderSongRow(song, options = {}) {
     } else {
       meta.append(makeElement('span', '', song.addedByName || 'Desconocido'));
     }
-    const addedAtSource = isSpotifyPlaylist ? song.spotifyAddedAt : song.addedAt;
-    const addedAt = addedAtSource
-      ? new Date(addedAtSource).toLocaleDateString('es-CL', { timeZone: 'America/Santiago' })
-      : '--';
-    meta.append(
-      makeElement('span', '', addedAt),
-      makeElement('span', '', formatTime(Number(song.duration) || 0))
-    );
     row.append(meta);
-  }
-  if (options.onRemove) {
-    row.append(makeButton('song-action', 'Quitar de playlist', options.onRemove, '−'));
-  } else if (state.sharedQueueRole !== 'follower') {
-    row.append(makeButton('song-action', 'Agregar a playlist', () => openAddToPlaylist(songId), '＋'));
-  }
-  if (options.playlist && options.canReorder) {
-    row.dataset.playlistPosition = String(options.position);
-    row.append(makeButton('drag-handle', 'Arrastrar para cambiar posición', () => {}, '⠿'));
-    setupTouchReorder(row, '[data-playlist-position]', (from, to) => {
-      void reorderPlaylistTracks(options.playlist, from, to);
-    });
   }
   setupQueueAddSwipe(row, song);
   return row;
@@ -2030,34 +1989,6 @@ function renderSongs() {
   view.append(search, results);
   renderResults();
 
-  const suggestionCard = makeElement('section', 'suggestion-card');
-  suggestionCard.append(
-    makeElement('h2', '', '¿Qué canción falta?'),
-    makeElement('p', '', 'Envía una sugerencia al catálogo.')
-  );
-  suggestionCard.append(makeButton('text-button suggestion-open', 'Sugerir canción', () => openDialog(elements.suggestionForm), '＋ SUGERIR CANCIÓN'));
-  view.append(suggestionCard);
-
-  view.append(renderSpotifyLikesSection());
-
-  if (state.suggestions.length) {
-    addSectionHeading(view, 'Sugerencias recientes', `${state.suggestions.length}`, null);
-    const suggestionList = makeElement('div', 'song-list');
-    state.suggestions.forEach(suggestion => {
-      const row = makeElement('div', 'song-row suggestion-row');
-      row.append(
-        makeElement('span', 'suggestion-note-icon', '＋'),
-        makeElement('span', 'song-copy'),
-      );
-      const copy = row.lastElementChild;
-      copy.append(
-        makeElement('strong', '', suggestion.name),
-        makeElement('small', '', `${suggestion.artist} · ${suggestion.suggestedByName || 'AMGC'}`)
-      );
-      suggestionList.append(row);
-    });
-    view.append(suggestionList);
-  }
 }
 
 function renderSpotifyLikesSection() {
@@ -2390,6 +2321,11 @@ async function loadSpotifyStatus(loadTracks = false) {
     try {
       const result = await request('/spotify/status');
       if (String(state.user?._id || '') !== userId) return;
+      if (Number(result.sharedPlaylistsCount) > 0) {
+        void refreshRealtimeLibrary().catch(error => {
+          console.warn('No se pudieron cargar las playlists vinculadas a la cuenta de Spotify.', error);
+        });
+      }
       const wasConnected = state.spotifyConnected;
       const wasConfigured = state.spotifyConfigured;
       const hadRequiredScopes = state.spotifyRequiredScopesGranted;
@@ -2684,7 +2620,6 @@ function renderPlaylistDetail() {
   ));
   const copy = makeElement('div', 'playlist-detail-copy');
   const isOwner = String(playlist.ownerId || '') === String(state.user?._id || '');
-  const isShared = (playlist.sharedWith || []).some(member => String(member?._id || member) === String(state.user?._id || ''));
   const isSpotifyLinked = Boolean(playlist.spotifyPlaylistId);
   const displayTracks = isSpotifyLinked && Array.isArray(playlist.playlistItems)
     ? playlist.playlistItems
@@ -2693,10 +2628,8 @@ function renderPlaylistDetail() {
   copy.append(
     makeElement('p', 'eyebrow', 'PLAYLIST'),
     makeElement('h1', '', playlist.name || 'Playlist'),
-    makeElement('p', '', playlist.desc || ''),
-    makeElement('p', 'playlist-track-count', `${displayTracks.length} canciones · ${formatPlaylistDuration(
-      playlist.duration || (playlist.tracks || []).reduce((total, song) => total + (Number(song.duration) || 0), 0)
-    )}`),
+    ...(!isSpotifyLinked && playlist.desc ? [makeElement('p', '', playlist.desc)] : []),
+    makeElement('p', 'playlist-track-count', `${displayTracks.length} canciones`),
     makeElement('p', 'playlist-owner', 'De ')
   );
   const ownerLine = copy.querySelector('.playlist-owner');
@@ -2717,10 +2650,6 @@ function renderPlaylistDetail() {
   } else {
     ownerLine.append(makeProfileUserLink(creator));
   }
-  if (Number(playlist.savedCount) > 0) {
-    copy.append(makeButton('playlist-saved-count', `${playlist.savedCount} personas guardaron esta playlist`,
-      () => void openPlaylistSaversSheet(playlist), `♡ ${playlist.savedCount} guardados`));
-  }
   const contributors = makeElement('p', 'playlist-contributors');
   const sharedMembers = Array.isArray(playlist.sharedWith) ? playlist.sharedWith : [];
   if (sharedMembers.length && !isSpotifyLinked) {
@@ -2734,32 +2663,12 @@ function renderPlaylistDetail() {
   view.append(copy);
   const actions = makeElement('div', 'detail-actions');
   actions.append(makeButton('round-action play', 'Reproducir playlist', () => {
-    const tracks = playlist.tracks || [];
+    const tracks = isSpotifyLinked
+      ? displayTracks.filter(track => !track.spotifyUnavailable)
+      : playlist.tracks || [];
     if (tracks.length) void playTrack(tracks, 0, { queueTitle: playlist.name || 'PLAYLIST' });
     else showToast('Esta playlist aún no tiene canciones.');
   }, '▶'));
-  const canEdit = (isOwner || isShared) && !isSpotifyLinked;
-  if (isSpotifyLinked && isOwner) {
-    actions.append(makeButton('round-action', 'Sincronizar desde Spotify', () => void syncSpotifyPlaylist(playlist, true), '⟳'));
-    actions.append(makeButton('round-action', 'Eliminar playlist', () => void deletePlaylist(playlist), '⌫'));
-  } else if (isSpotifyLinked && isShared) {
-    actions.append(makeButton('round-action', 'Salir de la playlist', () => void leavePlaylist(playlist), '↩'));
-  } else if (canEdit) {
-    actions.append(makeButton('round-action', 'Editar playlist', () => openPlaylistForm(playlist), '✎'));
-    actions.append(makeButton('round-action', 'Agregar canciones', () => openAddToPlaylist(null, playlist.id), '＋'));
-    if (isOwner) {
-      actions.append(makeButton('round-action', 'Compartir playlist', () => openSharePlaylistSheet(playlist), '↗'));
-      actions.append(makeButton('round-action', 'Gestionar integrantes', () => openPlaylistMembersSheet(playlist), '♙'));
-      actions.append(makeButton('round-action', 'Eliminar playlist', () => void deletePlaylist(playlist), '⌫'));
-    } else {
-      actions.append(makeButton('round-action', 'Salir de la playlist', () => void leavePlaylist(playlist), '↩'));
-    }
-  } else {
-    const isSaved = (state.user?.savedPlaylists || []).some(id => String(id) === String(playlist.id));
-    actions.append(makeButton('round-action', isSaved ? 'Quitar de guardadas' : 'Guardar playlist', () => {
-      void savePlaylistToLibrary(playlist, isSaved);
-    }, isSaved ? '✓' : '＋'));
-  }
   view.append(actions);
   view.append(renderSongList(displayTracks, 'Esta playlist todavía no tiene canciones.', {
     queue: isSpotifyLinked
@@ -2767,9 +2676,9 @@ function renderPlaylistDetail() {
       : playlist.tracks || [],
     queueTitle: playlist.name || 'PLAYLIST',
     detail: true,
-    onRemove: canEdit ? song => void removeSongFromPlaylist(playlist, song) : null,
+    onRemove: null,
     playlist,
-    canReorder: canEdit
+    canReorder: false
   }));
   if (isOwner && isSpotifyLinked) void syncSpotifyPlaylist(playlist);
 }
@@ -3218,6 +3127,7 @@ async function updatePlaybackNotification() {
     if (!state.customNotificationEnabled || !state.notificationPermissionGranted) return;
     const song = getCurrentSong();
     if (!song) {
+      if (playbackRestorePending) return;
       await closePlaybackNotification();
       return;
     }
@@ -4342,7 +4252,7 @@ function updatePlayerUI() {
   const lyricsTextColor = getContrastingTextColor(lyricsColor);
   elements.lyricsScreen.style.setProperty('--lyrics-color', lyricsColor);
   elements.lyricsScreen.style.setProperty('--lyrics-text-color', lyricsTextColor);
-  document.getElementById('player-add-button').hidden = false;
+  document.getElementById('player-add-button').hidden = true;
   elements.miniToggle.disabled = false;
   elements.playerToggle.disabled = false;
   elements.playerProgress.disabled = false;
@@ -4858,6 +4768,7 @@ function resetHomeSpin() {
 }
 
 document.addEventListener('visibilitychange', () => {
+  if (document.hidden) persistLastPlayback(Number(elements.audio.currentTime) || 0, true);
   if (document.hidden) {
     cancelAnimationFrame(homeSpinFrame);
     homeSpinFrame = null;
@@ -4869,6 +4780,9 @@ document.addEventListener('visibilitychange', () => {
   if (!document.hidden && state.token) {
     void loadSpotifyStatus(state.spotifySectionOpen && !state.spotifyTracksLoaded);
   }
+});
+window.addEventListener('pagehide', () => {
+  persistLastPlayback(Number(elements.audio.currentTime) || 0, true);
 });
 
 function renderPlayerQueue({ syncAccount = true, syncShared = true } = {}) {
@@ -6573,20 +6487,26 @@ function resumePendingPlaybackTakeover() {
   return pendingPlaybackTakeoverPromise;
 }
 
-function persistLastPlayback(currentTime = Number(elements.audio.currentTime) || 0) {
+function persistLastPlayback(currentTime = Number(elements.audio.currentTime) || 0, force = false) {
   const song = getCurrentSong();
   if (!song || !state.user?._id) return;
   const now = Date.now();
-  if (now - state.lastLocalPlaybackSave < 4000 && currentTime !== 0) return;
-  state.lastLocalPlaybackSave = now;
-  localStorage.setItem(getLastPlaybackStorageKey(), JSON.stringify({
-    songId: getSongId(song),
-    currentTime,
-    queueTitle: state.queueTitle,
-    queueIds: state.queue.map(getSongId).filter(Boolean),
-    upcomingQueueIds: state.upcomingQueue.map(getSongId).filter(Boolean),
-    updatedAt: new Date().toISOString()
-  }));
+  if (!force && now - state.lastLocalPlaybackSave < 4000 && currentTime !== 0) return;
+  try {
+    localStorage.setItem(getLastPlaybackStorageKey(), JSON.stringify({
+      songId: getSongId(song),
+      currentTime: Math.max(0, Number(currentTime) || 0),
+      queueTitle: state.queueTitle,
+      queueIds: state.queue.map(getSongId).filter(Boolean),
+      upcomingQueueIds: state.upcomingQueue.map(getSongId).filter(Boolean),
+      deviceId: playbackDeviceId,
+      isPlaying: !elements.audio.paused && !elements.audio.ended,
+      updatedAt: new Date().toISOString()
+    }));
+    state.lastLocalPlaybackSave = now;
+  } catch (error) {
+    console.warn('No se pudo guardar la última reproducción en este dispositivo.', error);
+  }
 }
 
 function persistUpcomingQueue() {
@@ -6607,30 +6527,57 @@ async function restoreLastPlayback() {
   const userId = String(state.user?._id || '');
   if (!userId || state.restoredPlaybackForUser === userId) return;
   const sharedPlayback = state.user?.lastPlayed;
-  if (sharedPlayback?.deviceId && sharedPlayback.deviceId !== playbackDeviceId) {
-    state.restoredPlaybackForUser = userId;
-    return;
-  }
   let saved = null;
   try {
     saved = JSON.parse(localStorage.getItem(getLastPlaybackStorageKey()) || 'null');
   } catch (error) {
     console.warn('No se pudo leer la última reproducción guardada.', error);
   }
-  const songIds = [saved?.songId, state.user?.lastPlayed?.songId]
-    .map(songId => String(songId || ''))
-    .filter(Boolean);
-  if (!songIds.length) return;
+  const savedUpdatedAt = Date.parse(saved?.updatedAt || '') || 0;
+  const sharedUpdatedAt = Date.parse(sharedPlayback?.updatedAt || '') || 0;
+  const savedDeviceMatches = !saved?.deviceId || saved.deviceId === playbackDeviceId;
+  const localPlaybackIsNewer = Boolean(
+    savedDeviceMatches
+    && saved?.songId
+    && (!sharedPlayback?.songId || savedUpdatedAt > sharedUpdatedAt)
+  );
+  const finishRestore = () => {
+    state.restoredPlaybackForUser = userId;
+    playbackRestorePending = false;
+    void updatePlaybackNotification();
+  };
+  if (
+    sharedPlayback?.deviceId
+    && sharedPlayback.deviceId !== playbackDeviceId
+    && !localPlaybackIsNewer
+  ) {
+    finishRestore();
+    return;
+  }
+  const songIds = localPlaybackIsNewer || !sharedPlayback?.songId
+    ? [saved?.songId, sharedPlayback?.songId]
+    : [sharedPlayback?.songId, saved?.songId];
+  if (!songIds.some(Boolean)) {
+    finishRestore();
+    return;
+  }
   const allTracks = [
     ...state.songs,
-    ...state.playlists.flatMap(playlist => playlist.tracks || [])
+    ...state.playlists.flatMap(playlist => playlist.tracks || []),
+    ...state.profilePlaylists.flatMap(playlist => playlist.tracks || [])
   ];
-  const song = songIds.map(songId => allTracks.find(track => getSongId(track) === songId))
+  const song = songIds.map(songId => String(songId || ''))
+    .filter(Boolean)
+    .map(songId => allTracks.find(track => getSongId(track) === songId))
     .find(Boolean);
-  if (!song) return;
+  if (!song) {
+    finishRestore();
+    return;
+  }
   const songId = getSongId(song);
-  state.restoredPlaybackForUser = userId;
-  const queueIds = Array.isArray(saved?.queueIds) ? saved.queueIds.map(String) : [];
+  const queueIds = savedDeviceMatches && Array.isArray(saved?.queueIds)
+    ? saved.queueIds.map(String)
+    : [];
   const sourceQueue = queueIds.length
     ? queueIds.map(id => allTracks.find(track => getSongId(track) === id)).filter(Boolean)
     : state.songs;
@@ -6644,18 +6591,20 @@ async function restoreLastPlayback() {
   state.queueIndex = index;
   state.currentTrack = song;
   state.currentQueueKind = 'source';
-  state.queueTitle = saved?.queueTitle || 'GENERAL';
-  const upcomingIds = Array.isArray(saved?.upcomingQueueIds)
+  state.queueTitle = savedDeviceMatches ? saved?.queueTitle || 'GENERAL' : 'GENERAL';
+  const upcomingIds = savedDeviceMatches && Array.isArray(saved?.upcomingQueueIds)
     ? saved.upcomingQueueIds.map(String)
     : [];
   state.upcomingQueue = upcomingIds
     .map(id => allTracks.find(track => getSongId(track) === id))
     .filter(Boolean);
-  const position = Number.isFinite(Number(saved?.currentTime))
-    && saved?.currentTime !== null
-    ? Number(saved.currentTime)
-    : Number(state.user?.lastPlayed?.currentTime) || 0;
+  const savedCurrentTime = Number(saved?.currentTime);
+  const savedPositionMatchesSong = savedDeviceMatches && String(saved?.songId || '') === songId;
+  const position = savedPositionMatchesSong && Number.isFinite(savedCurrentTime) && savedCurrentTime >= 0
+    ? savedCurrentTime
+    : Number(sharedPlayback?.currentTime) || 0;
   await loadTrack(song, { autoplay: false, restoreTime: position });
+  finishRestore();
 }
 
 function getAudioErrorMessage() {
@@ -8130,6 +8079,28 @@ function toggleShuffle() {
 function handlePlaybackNotificationAction(action) {
   if (action === 'shuffle') {
     toggleShuffle();
+  } else if (action === 'play') {
+    const remotePlayback = getRemotePlaybackSession();
+    if (remotePlayback) {
+      if (remotePlayback.isPlaying === false) void requestRemotePlaybackControl('toggle');
+    } else if (state.followingUserId) {
+      void togglePlayback();
+    } else if (elements.audio.paused) {
+      void resumeAudioPlayback().catch(error => {
+        console.warn('No se pudo reanudar desde la notificación multimedia.', error);
+        showToast(error.message || 'No se pudo reanudar la reproducción.', true);
+      });
+    }
+  } else if (action === 'pause') {
+    const remotePlayback = getRemotePlaybackSession();
+    if (remotePlayback) {
+      if (remotePlayback.isPlaying !== false) void requestRemotePlaybackControl('toggle');
+    } else if (state.followingUserId) {
+      void togglePlayback();
+    } else {
+      currentTrackShouldAutoplay = false;
+      if (!elements.audio.paused) elements.audio.pause();
+    }
   } else if (action === 'toggle') {
     togglePlayback();
   } else if (action === 'next') {
@@ -8383,6 +8354,8 @@ async function login(username, password) {
     throw error;
   }
   state.user = user;
+  state.restoredPlaybackForUser = null;
+  playbackRestorePending = true;
   localStorage.setItem(STORAGE_KEYS.token, state.token);
   localStorage.setItem(STORAGE_KEYS.user, JSON.stringify(user));
   elements.loginScreen.hidden = true;
@@ -8391,6 +8364,7 @@ async function login(username, password) {
 }
 
 function logout(showMessage) {
+  playbackRestorePending = false;
   void closePlaybackNotification();
   if (pendingPlaybackTakeoverRetryTimer) window.clearTimeout(pendingPlaybackTakeoverRetryTimer);
   if (accountQueueRetryTimer) window.clearTimeout(accountQueueRetryTimer);
@@ -9330,7 +9304,7 @@ elements.audio.addEventListener('pause', () => {
     return;
   }
   stopHomeSpin();
-  persistLastPlayback(elements.audio.currentTime);
+  persistLastPlayback(elements.audio.currentTime, true);
   updatePlayerUI();
   syncPlaybackStatus(true);
   if (state.currentTab === 'home') updateHomeLyrics();

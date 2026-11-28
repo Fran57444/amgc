@@ -9376,6 +9376,11 @@ export function initMusicPlayer() {
             const response = await apiFetch(`${API_URL}/spotify/status`);
             const result = await response.json().catch(() => null);
             if (!response.ok) throw new Error(result?.error || 'No se pudo consultar Spotify.');
+            if (Number(result.sharedPlaylistsCount) > 0) {
+                void loadPlaylists().catch(error => {
+                    console.warn('No se pudieron cargar las playlists vinculadas a la cuenta de Spotify.', error);
+                });
+            }
             const connectionChanged = spotifyIsConnected !== result.connected;
             const requiredScopesChanged = spotifyRequiredScopesGranted !== (result.requiredScopesGranted === true);
             const playlistScopesChanged = spotifyPlaylistScopesGranted !== (result.playlistScopesGranted === true);
