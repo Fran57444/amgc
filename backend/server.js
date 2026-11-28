@@ -962,11 +962,22 @@ function addSongToArtistGroups(songsByArtist, song, artist, primaryArtist = '') 
   }
 }
 
-function findUniqueSongMatch(candidates, name, artist, primaryArtist = '') {
+function findBestSongMatch(candidates, name, artist, primaryArtist = '') {
   const matches = candidates.filter(candidate =>
     isSimilarSongMetadata(name, artist, candidate, primaryArtist)
   );
-  return matches.length === 1 ? matches[0] : null;
+  if (matches.length <= 1) return matches[0] || null;
+
+  const exactTitleMatches = matches.filter(candidate => (
+    normalizeSongTitle(candidate.name) === normalizeSongTitle(name)
+  ));
+  if (!exactTitleMatches.length) return null;
+
+  const normalizedPrimaryArtist = normalizeSongMetadata(primaryArtist || getPrimaryArtistName(artist));
+  const exactPrimaryArtistMatch = exactTitleMatches.find(candidate => (
+    getArtistCreditNames(candidate.artist).includes(normalizedPrimaryArtist)
+  ));
+  return exactPrimaryArtistMatch || exactTitleMatches[0];
 }
 
 function hasSongMatch(candidates, name, artist, primaryArtist = '') {
@@ -3276,7 +3287,7 @@ app.post('/api/spotify/playlists/:spotifyPlaylistId/import', async (req, res) =>
       const matchingSong = manuallyLinkedSongId
         ? { _id: manuallyLinkedSongId }
         : entry.spotifyTrackId
-        ? findUniqueSongMatch(artistSongs, entry.name, entry.artist, primaryArtist)
+        ? findBestSongMatch(artistSongs, entry.name, entry.artist, primaryArtist)
         : null;
       return {
         spotifyTrackId: entry.spotifyTrackId || '',
@@ -3456,7 +3467,6 @@ app.post('/api/playlists/:playlistId/spotify-tracks/:spotifyTrackId/add', async 
     }
     const playlist = await Playlist.findOne({
       id: playlistId,
-      userId: req.user._id,
       spotifyPlaylistId: { $type: 'string' }
     });
     if (!playlist) {

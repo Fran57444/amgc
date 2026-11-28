@@ -11483,8 +11483,7 @@ export function initMusicPlayer() {
             if (isSpotifyUnavailable) {
                 const li = document.createElement('li');
                 li.className = 'playlist-track-row spotify-unavailable-track';
-                const canAddSpotifyTrack = isOwner
-                    && canCurrentUser('edit_songs')
+                const canAddSpotifyTrack = canCurrentUser('edit_songs')
                     && trackItem.spotifyTrackId;
                 if (canAddSpotifyTrack) {
                     li.tabIndex = 0;
