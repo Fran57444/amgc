@@ -622,7 +622,6 @@ async function shareCollaborativeSpotifyPlaylistsWithLinkedUser(userId, spotifyP
   if (!linkedUser || linkedUser._id !== String(normalizedUserId)) return 0;
 
   const playlists = await Playlist.find({
-    spotifyCollaborative: true,
     userId: { $ne: normalizedUserId },
     sharedWith: { $ne: normalizedUserId },
     $or: [
@@ -3343,13 +3342,11 @@ app.post('/api/spotify/playlists/:spotifyPlaylistId/import', async (req, res) =>
     const linkedOwner = linkedSpotifyParticipants.get(nextOwnerId);
     const nextCollaborative = spotifyPlaylist.collaborative === true;
     const currentSharedIds = new Set((existingPlaylist?.sharedWith || []).map(String));
-    const linkedParticipantIdsToAdd = nextCollaborative
-      ? [...new Set(
-        [...linkedSpotifyParticipants.values()]
-          .map(participant => String(participant._id))
-          .filter(userId => userId && userId !== String(req.user._id) && !currentSharedIds.has(userId))
-      )]
-      : [];
+    const linkedParticipantIdsToAdd = [...new Set(
+      [...linkedSpotifyParticipants.values()]
+        .map(participant => String(participant._id))
+        .filter(userId => userId && userId !== String(req.user._id) && !currentSharedIds.has(userId))
+    )];
     const ownerProfile = nextOwnerId
       ? (await getSpotifyUserProfiles(req.user, [nextOwnerId])).get(nextOwnerId)
       : null;
