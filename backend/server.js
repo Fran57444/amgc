@@ -3298,7 +3298,7 @@ app.post('/api/spotify/playlists/:spotifyPlaylistId/import', async (req, res) =>
         : null;
       const matchingSong = manuallyLinkedSongId
         ? { _id: manuallyLinkedSongId }
-        : entry.spotifyTrackId
+        : (entry.spotifyTrackId || entry.local)
         ? findBestSongMatch(artistSongs, entry.name, entry.artist, primaryArtist)
         : null;
       return {
