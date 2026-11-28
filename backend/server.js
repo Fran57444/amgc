@@ -3252,9 +3252,21 @@ app.post('/api/spotify/playlists/:spotifyPlaylistId/import', async (req, res) =>
         throw error;
       }
     }
-    const artistConditions = buildArtistSearchConditions(sourceEntries);
-    const candidates = artistConditions.length
-      ? await Song.find({ $or: artistConditions })
+    const uniqueMetadataPairs = new Map(sourceEntries
+      .filter(entry => entry.name && entry.artist)
+      .map(entry => [
+        `${normalizeSongMetadata(entry.name)}\u0000${normalizeSongMetadata(entry.artist)}`,
+        { name: entry.name, artist: entry.artist }
+      ]));
+    const catalogMatchConditions = [
+      ...[...uniqueMetadataPairs.values()].map(pair => ({
+        name: pair.name,
+        artist: pair.artist
+      })),
+      ...buildArtistSearchConditions(sourceEntries)
+    ];
+    const candidates = catalogMatchConditions.length
+      ? await Song.find({ $or: catalogMatchConditions })
         .select('_id name artist')
         .collation(songMetadataCollation())
         .lean()
